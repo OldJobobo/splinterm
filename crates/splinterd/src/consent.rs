@@ -146,6 +146,148 @@ pub struct PeerIdentity {
     /// What this connection established about durable identity (ADR 0014),
     /// read while its pidfd pinned it; `None` without a pinned executable.
     durable: Option<DurableEvidence>,
+    /// Whether this connection's peer was the trusted graphical client at
+    /// its `Hello` (AGENTS.md §4.4), and the executable it then ran.
+    hello_client: HelloClientMatch,
+}
+
+/// A connection's `Hello`-time client match (AGENTS.md §4.4, the operator
+/// decision of 2026-10-20): the connection keeps it only while its own
+/// process still executes the file it executed at `Hello`, so a package
+/// upgrade replacing the installed client leaves running Windows trusted.
+///
+/// Connection-local state, not peer identity: it never takes part in
+/// [`PeerIdentity`] equality, so grants match a process across its
+/// connections exactly as before.
+#[derive(Clone, Debug, Default)]
+struct HelloClientMatch(Option<Arc<HelloClient>>);
+
+impl PartialEq for HelloClientMatch {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for HelloClientMatch {}
+
+#[derive(Debug)]
+struct HelloClient {
+    /// The peer process and the file it executed when it matched.
+    process: TrustedClientProcess,
+    /// The connection's pinned peer process; `None` only on a kernel without
+    /// `SO_PEERPIDFD`, where the recorded start time stands in for it.
+    pidfd: Option<OwnedFd>,
+}
+
+/// `statfs` magic of pidfs (Linux 6.9+), where a pidfd's inode number names
+/// its process uniquely for the boot.
+const PIDFS_MAGIC: u64 = 0x5049_4446;
+
+/// The most client processes [`TrustedClientProcesses`] tracks at once.
+const MAX_TRUSTED_CLIENT_PROCESSES: usize = 256;
+
+/// A client process by every identity the daemon can read for it, and the
+/// file it executes: its PID, its start time, its pidfs inode where the
+/// kernel has pidfs, and its executable's device and inode.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TrustedClientProcess {
+    pid: u32,
+    start_time: Option<u64>,
+    pidfs_inode: Option<u64>,
+    executable: (u64, u64),
+}
+
+impl TrustedClientProcess {
+    /// Whether this names one process, not merely a PID that a later
+    /// process could reuse.
+    const fn identifies_the_process(&self) -> bool {
+        self.start_time.is_some() || self.pidfs_inode.is_some()
+    }
+}
+
+/// The pidfs inode of the process `pidfd` names; `None` before pidfs, when
+/// every pidfd shares one anonymous inode.
+fn pidfs_inode(pidfd: &OwnedFd) -> Option<u64> {
+    let filesystem = rustix::fs::fstatfs(pidfd).ok()?;
+    if u64::try_from(filesystem.f_type).ok() != Some(PIDFS_MAGIC) {
+        return None;
+    }
+    rustix::fs::fstat(pidfd).ok().map(|status| status.st_ino)
+}
+
+/// The live client processes that hold a trusted-UI connection trusted at its
+/// own `Hello` (AGENTS.md §4.4, the operator decision of 2026-10-20), counted
+/// by connection. A new connection from the same process, still executing the
+/// same file, is trusted at `Hello` too, so a Window opened before an upgrade
+/// replaced the installed client still opens panes and tabs.
+///
+/// An entry ends with its process's last trusted connection, so trust never
+/// outlives every connection of the process, and a process that exits takes
+/// its connections, and so its entry, with it. Bounded: past
+/// [`MAX_TRUSTED_CLIENT_PROCESSES`] processes, a further one is not tracked
+/// and its later connections need the installed client.
+#[derive(Clone, Debug, Default)]
+pub struct TrustedClientProcesses(
+    Arc<std::sync::Mutex<std::collections::HashMap<TrustedClientProcess, usize>>>,
+);
+
+impl TrustedClientProcesses {
+    fn holds(&self, process: &TrustedClientProcess) -> bool {
+        process.identifies_the_process()
+            && self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(process)
+    }
+
+    fn register(&self, process: TrustedClientProcess) -> Option<TrustedClientRegistration> {
+        if !process.identifies_the_process() {
+            return None;
+        }
+        let mut processes = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !processes.contains_key(&process) && processes.len() >= MAX_TRUSTED_CLIENT_PROCESSES {
+            tracing::warn!("trusted client process registry full; process not tracked");
+            return None;
+        }
+        *processes.entry(process).or_default() += 1;
+        Some(TrustedClientRegistration {
+            processes: self.clone(),
+            process,
+        })
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
+/// One trusted-UI connection's count in [`TrustedClientProcesses`], held for
+/// the connection's lifetime and released when it ends.
+#[derive(Debug)]
+pub struct TrustedClientRegistration {
+    processes: TrustedClientProcesses,
+    process: TrustedClientProcess,
+}
+
+impl Drop for TrustedClientRegistration {
+    fn drop(&mut self) {
+        let mut processes = self
+            .processes
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = processes.get_mut(&self.process) {
+            *count -= 1;
+            if *count == 0 {
+                processes.remove(&self.process);
+            }
+        }
+    }
 }
 
 impl PeerIdentity {
@@ -171,6 +313,7 @@ impl PeerIdentity {
             persistent_executable: None,
             start_time: None,
             durable: None,
+            hello_client: HelloClientMatch::default(),
         })
     }
 
@@ -193,6 +336,7 @@ impl PeerIdentity {
             persistent_executable: None,
             start_time: None,
             durable: None,
+            hello_client: HelloClientMatch::default(),
         }
     }
 
@@ -300,20 +444,112 @@ impl PeerIdentity {
         })
     }
 
-    /// Whether the peer is a trusted graphical client under AGENTS.md §4.4:
-    /// it executes exactly the file now installed as `<prefix>/splinterm`
-    /// (same device and inode), or, in a daemon adopted through a verified
-    /// handoff, exactly the sealed forward client snapshot that daemon
-    /// verified against its package record and pinned for its lifetime
-    /// (same device and inode; the operator exception of 2026-10-18).
+    /// The `Hello`-time client test: whether the peer is a trusted graphical
+    /// client under AGENTS.md §4.4, executing exactly the file now installed
+    /// as `<prefix>/splinterm` (same device and inode), or, in a daemon
+    /// adopted through a verified handoff, exactly the sealed forward client
+    /// snapshot that daemon verified against its package record and pinned
+    /// for its lifetime (same device and inode; the operator exception of
+    /// 2026-10-18).
     ///
     /// Matching is never by content hash. A fresh or rollback daemon pins no
-    /// snapshot, so only the installed rule applies there. A client still
-    /// running a replaced or unlinked image, a stale pre-upgrade inode among
-    /// them, keeps its old inode and matches neither.
+    /// snapshot, so only the installed rule applies there. A new connection
+    /// from a client still running a replaced or unlinked image, a stale
+    /// pre-upgrade inode among them, matches neither. Requests on an
+    /// established connection use [`Self::connection_matches_splinterm`].
     pub fn is_matching_splinterm(&self) -> bool {
         self.matches_installed_executable(&self.install_prefix.client())
             || self.matches_pinned_client()
+    }
+
+    /// Records, at this connection's `Hello`, whether its peer is the
+    /// trusted graphical client, with the process and executable it then ran
+    /// and a duplicate of the connection's pidfd.
+    ///
+    /// The peer matches when it executes the installed client or the pinned
+    /// snapshot ([`Self::is_matching_splinterm`]), or when `trusted` holds
+    /// this very process, executing this very file, from another live
+    /// connection that matched at its own `Hello` (the operator decision of
+    /// 2026-10-20). A pidfd that cannot be duplicated records no match: fail
+    /// closed. The caller still applies [`Self::connection_matches_splinterm`],
+    /// which re-reads the executable and proves the process live.
+    pub fn record_hello_client_match(
+        &mut self,
+        monitor: Option<&PeerMonitor>,
+        trusted: &TrustedClientProcesses,
+    ) {
+        self.record_hello_client_match_with(
+            || monitor.map(PeerMonitor::duplicate_pidfd).transpose(),
+            trusted,
+        );
+    }
+
+    fn record_hello_client_match_with(
+        &mut self,
+        pidfd: impl FnOnce() -> Result<Option<OwnedFd>>,
+        trusted: &TrustedClientProcesses,
+    ) {
+        self.hello_client = HelloClientMatch::default();
+        let pidfd = match pidfd() {
+            Ok(pidfd) => pidfd,
+            Err(error) => {
+                tracing::warn!(%error, "trusted client match not recorded: peer pidfd unavailable");
+                return;
+            }
+        };
+        let process = TrustedClientProcess {
+            pid: self.pid,
+            start_time: self.start_time,
+            pidfs_inode: pidfd.as_ref().and_then(pidfs_inode),
+            executable: (self.executable_device, self.executable_inode),
+        };
+        if self.is_matching_splinterm() || trusted.holds(&process) {
+            self.hello_client = HelloClientMatch(Some(Arc::new(HelloClient { process, pidfd })));
+        }
+    }
+
+    /// Counts this connection in `trusted` for its lifetime, when it matched
+    /// at `Hello`, so later connections from its process match too. `None`
+    /// when it did not match, its process cannot be told from a later one
+    /// reusing its PID, or the registry is full.
+    pub fn register_trusted_client(
+        &self,
+        trusted: &TrustedClientProcesses,
+    ) -> Option<TrustedClientRegistration> {
+        let hello = self.hello_client.0.as_deref()?;
+        trusted.register(hello.process)
+    }
+
+    /// Whether this connection is the trusted graphical client under
+    /// AGENTS.md §4.4 (the operator decision of 2026-10-20): its peer matched
+    /// at `Hello` ([`Self::record_hello_client_match`]), and the same process
+    /// still executes that same file, by device and inode, read afresh
+    /// through `/proc/<pid>/exe` for every call.
+    ///
+    /// A package upgrade that replaces the installed client therefore leaves
+    /// an existing Window's connections trusted, while a peer that executed
+    /// another program over its socket is not, and a new connection from
+    /// another process running the old inode never matched at `Hello`. Fails
+    /// closed when the peer's current executable cannot be read, or its
+    /// process can no longer be shown to be the one that said `Hello`.
+    pub fn connection_matches_splinterm(&self) -> bool {
+        let Some(hello) = self.hello_client.0.as_deref() else {
+            return false;
+        };
+        let Ok(current) = executable_file_identity(self.pid) else {
+            return false;
+        };
+        if current != hello.process.executable {
+            return false;
+        }
+        // Liveness after the read proves it described this connection's own
+        // process, not a later one reusing its PID.
+        match &hello.pidfd {
+            Some(pidfd) => require_live_pidfd(pidfd).is_ok(),
+            None => self.start_time.is_some_and(|start_time| {
+                splinterd::handoff_window_carry::process_start_time(self.pid) == Some(start_time)
+            }),
+        }
     }
 
     /// Whether the peer executes the pinned forward client snapshot.
@@ -1320,18 +1556,39 @@ mod tests {
     }
 
     fn spawn_sleep(program: &Path) -> OwnedChild {
+        spawn_owned(Command::new(program).arg("30"))
+    }
+
+    /// Spawns `command` and returns once the child executes its program.
+    fn spawn_owned(command: &mut Command) -> OwnedChild {
         // A sibling test thread's fork can briefly inherit the descriptor
         // that wrote a fresh copy, so its exec may see ETXTBSY.
         for _ in 0..100 {
-            match Command::new(program).arg("30").spawn() {
-                Ok(child) => return OwnedChild(child),
+            match command.spawn() {
+                Ok(child) => {
+                    let child = OwnedChild(child);
+                    wait_for_exec(child.pid());
+                    return child;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(error) => panic!("spawn sleeping child: {error}"),
+                Err(error) => panic!("spawn child: {error}"),
             }
         }
-        panic!("spawn sleeping child: executable stayed busy");
+        panic!("spawn child: executable stayed busy");
+    }
+
+    /// Under parallel tests, `spawn` was seen to return while the child's
+    /// executable link still named this test binary; waits until it does
+    /// not, so identity reads describe the program the child executes.
+    fn wait_for_exec(pid: u32) {
+        let own = executable_file_identity(std::process::id()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while executable_file_identity(pid).is_ok_and(|current| current == own) {
+            assert!(Instant::now() < deadline, "child {pid} never executed");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// A sealed memfd holding a copy of `program`, as a handoff seals the
@@ -1444,9 +1701,12 @@ mod tests {
     }
 
     fn scratch_prefix() -> InstallPrefix {
+        // Parallel tests can read the same clock value.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "splinterd-peer-identity-{}-{}",
+            "splinterd-peer-identity-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1561,6 +1821,244 @@ mod tests {
         // With nothing installed at the path, nothing matches.
         fs::remove_file(&client).unwrap();
         assert!(!peer_for(child.pid(), &prefix).is_matching_splinterm());
+        drop(child);
+        fs::remove_dir_all(prefix.directory()).unwrap();
+    }
+
+    fn pidfd_of(pid: u32) -> OwnedFd {
+        rustix::process::pidfd_open(
+            rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap()
+    }
+
+    /// `peer`'s connection says `Hello`, pinned by a pidfd for `pid`, in a
+    /// daemon where no process holds a trusted connection.
+    fn say_hello(peer: &mut PeerIdentity, pid: u32) {
+        say_hello_among(peer, pid, &TrustedClientProcesses::default());
+    }
+
+    /// [`say_hello`] in a daemon where `trusted` processes hold trusted
+    /// connections.
+    fn say_hello_among(peer: &mut PeerIdentity, pid: u32, trusted: &TrustedClientProcesses) {
+        peer.record_hello_client_match_with(|| Ok(Some(pidfd_of(pid))), trusted);
+    }
+
+    /// [`peer_for`] with its start time recorded, as connection verification
+    /// records it.
+    fn peer_for_process(pid: u32, install_prefix: &InstallPrefix) -> PeerIdentity {
+        let mut peer = peer_for(pid, install_prefix);
+        peer.install_start_time(splinterd::handoff_window_carry::process_start_time(pid).unwrap());
+        peer
+    }
+
+    /// AGENTS.md §4.4, the operator decision of 2026-10-20: a connection
+    /// trusted at `Hello` stays trusted when an upgrade replaces the
+    /// installed client, because its process still runs what it ran then;
+    /// a new connection from the replaced inode is refused at `Hello`.
+    #[test]
+    fn a_connection_trusted_at_hello_survives_replacement_of_the_installed_client() {
+        let prefix = scratch_prefix();
+        let client = prefix.client();
+        install_copy(system_sleep(), &client);
+        let child = spawn_sleep(&client);
+        let mut connection = peer_for(child.pid(), &prefix);
+        // Before its Hello a connection holds no client trust.
+        assert!(!connection.connection_matches_splinterm());
+        say_hello(&mut connection, child.pid());
+        assert!(connection.connection_matches_splinterm());
+
+        // A byte-identical copy renamed over the installed client: a new
+        // inode, as a package upgrade installs.
+        let original = fs::metadata(&client).unwrap().ino();
+        install_copy(system_sleep(), &client);
+        assert_ne!(fs::metadata(&client).unwrap().ino(), original);
+        assert!(!connection.is_matching_splinterm());
+        assert!(connection.connection_matches_splinterm());
+
+        // A new connection from the same, now replaced, inode, in a daemon
+        // where no connection of the process is registered as trusted.
+        let mut fresh = peer_for(child.pid(), &prefix);
+        say_hello(&mut fresh, child.pid());
+        assert!(!fresh.connection_matches_splinterm());
+
+        // Connection trust is not identity: grants still match the process.
+        let mut untrusted = connection.clone();
+        untrusted.hello_client = HelloClientMatch::default();
+        assert_eq!(untrusted, connection);
+
+        // The process is gone: fail closed.
+        drop(child);
+        assert!(!connection.connection_matches_splinterm());
+        fs::remove_dir_all(prefix.directory()).unwrap();
+    }
+
+    /// A peer that executes another program while holding its socket loses
+    /// the trust its connection established at `Hello`, though the
+    /// installed client is unchanged.
+    #[test]
+    fn a_peer_that_executes_another_program_loses_its_connection_trust() {
+        let shell = ["/bin/sh", "/usr/bin/sh"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.is_file())
+            .expect("a shell");
+        let prefix = scratch_prefix();
+        let client = prefix.client();
+        install_copy(shell, &client);
+        let mut child = spawn_owned(
+            Command::new(&client)
+                .arg("-c")
+                .arg(format!("read line; exec {} 30", system_sleep().display()))
+                .stdin(Stdio::piped()),
+        );
+        let pid = child.pid();
+        let trusted = TrustedClientProcesses::default();
+        let mut connection = peer_for_process(pid, &prefix);
+        say_hello_among(&mut connection, pid, &trusted);
+        assert!(connection.connection_matches_splinterm());
+        let _registration = connection.register_trusted_client(&trusted).unwrap();
+        let at_hello = executable_file_identity(pid).unwrap();
+
+        child.0.stdin.take().unwrap().write_all(b"exec\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while executable_file_identity(pid).is_ok_and(|current| current == at_hello) {
+            assert!(Instant::now() < deadline, "the peer never executed sleep");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // What it ran at Hello is still the installed client: only the live
+        // read sees the exec.
+        assert!(connection.is_matching_splinterm());
+        assert!(!connection.connection_matches_splinterm());
+        // Its trusted connection is still open, but a new connection from
+        // the process, now executing sleep, does not inherit that trust.
+        let mut after_exec = peer_for_process(pid, &prefix);
+        say_hello_among(&mut after_exec, pid, &trusted);
+        assert!(!after_exec.connection_matches_splinterm());
+        drop(child);
+        fs::remove_dir_all(prefix.directory()).unwrap();
+    }
+
+    /// The operator decision of 2026-10-20: while a process holds a
+    /// connection trusted at its own `Hello` and still executes the same
+    /// file, its new connections are trusted too, after the installed
+    /// client was replaced. Another process on the old inode, a later
+    /// process reusing the PID, and the process once every trusted
+    /// connection of it closed are not.
+    #[test]
+    fn a_process_holding_a_trusted_connection_opens_more_after_replacement() {
+        let trusted = TrustedClientProcesses::default();
+        let prefix = scratch_prefix();
+        let client = prefix.client();
+        install_copy(system_sleep(), &client);
+        let window = spawn_sleep(&client);
+        let stale = prefix.directory().join("stale-splinterm");
+        fs::hard_link(&client, &stale).unwrap();
+        let mut first = peer_for_process(window.pid(), &prefix);
+        say_hello_among(&mut first, window.pid(), &trusted);
+        assert!(first.connection_matches_splinterm());
+        let first_registration = first.register_trusted_client(&trusted).unwrap();
+        assert_eq!(trusted.len(), 1);
+
+        install_copy(system_sleep(), &client);
+        let mut second = peer_for_process(window.pid(), &prefix);
+        assert!(!second.is_matching_splinterm());
+        say_hello_among(&mut second, window.pid(), &trusted);
+        assert!(second.connection_matches_splinterm());
+        let second_registration = second.register_trusted_client(&trusted).unwrap();
+        // Counted by connection, under one process entry.
+        assert_eq!(trusted.len(), 1);
+
+        // Another process executing the old inode.
+        let other = spawn_sleep(&stale);
+        let mut intruder = peer_for_process(other.pid(), &prefix);
+        say_hello_among(&mut intruder, other.pid(), &trusted);
+        assert!(!intruder.connection_matches_splinterm());
+
+        // A later process reusing the Window's PID has another start time
+        // and pidfd (a PID cannot be reused on demand, so it is simulated
+        // with the other process's pidfd).
+        let mut reused = PeerIdentity {
+            start_time: first.start_time().map(|start_time| start_time + 1),
+            ..peer_for_process(window.pid(), &prefix)
+        };
+        reused.record_hello_client_match_with(|| Ok(Some(pidfd_of(other.pid()))), &trusted);
+        assert!(!reused.connection_matches_splinterm());
+
+        // Once every trusted connection of the process closed, nothing
+        // lingers.
+        drop(first_registration);
+        assert_eq!(trusted.len(), 1);
+        drop(second_registration);
+        assert_eq!(trusted.len(), 0);
+        let mut after_close = peer_for_process(window.pid(), &prefix);
+        say_hello_among(&mut after_close, window.pid(), &trusted);
+        assert!(!after_close.connection_matches_splinterm());
+        drop(other);
+        drop(window);
+        fs::remove_dir_all(prefix.directory()).unwrap();
+    }
+
+    /// The 2026-10-18 snapshot exception reaches connection trust unchanged:
+    /// only an adopted daemon that pinned the snapshot trusts a connection
+    /// executing it.
+    #[test]
+    fn connection_trust_keeps_the_pinned_snapshot_rule() {
+        let snapshot = sealed_copy(system_sleep());
+        let child = spawn_sleep(Path::new(&format!(
+            "/proc/self/fd/{}",
+            snapshot.as_raw_fd()
+        )));
+        let pinned = Arc::new(PinnedClientSnapshot::pin(snapshot.try_clone().unwrap()).unwrap());
+        let prefix = test_install_prefix();
+        let mut fresh = peer_for(child.pid(), &prefix);
+        say_hello(&mut fresh, child.pid());
+        assert!(!fresh.connection_matches_splinterm());
+        let mut adopted = PeerIdentity {
+            pinned_client: Some(pinned),
+            ..peer_for(child.pid(), &prefix)
+        };
+        say_hello(&mut adopted, child.pid());
+        assert!(adopted.connection_matches_splinterm());
+        drop(child);
+        assert!(!adopted.connection_matches_splinterm());
+    }
+
+    /// Without a duplicated pidfd no trust is recorded; without
+    /// `SO_PEERPIDFD` the recorded start time must still name the process.
+    #[test]
+    fn connection_trust_fails_closed_without_proof_of_the_same_process() {
+        let prefix = scratch_prefix();
+        let client = prefix.client();
+        install_copy(system_sleep(), &client);
+        let child = spawn_sleep(&client);
+        let pid = child.pid();
+
+        let mut unduplicated = peer_for(pid, &prefix);
+        let nothing_trusted = TrustedClientProcesses::default();
+        unduplicated
+            .record_hello_client_match_with(|| Err(anyhow::anyhow!("no pidfd")), &nothing_trusted);
+        assert!(!unduplicated.connection_matches_splinterm());
+
+        let mut unpinned = peer_for(pid, &prefix);
+        unpinned.record_hello_client_match_with(|| Ok(None), &nothing_trusted);
+        // Neither a start time nor a pidfs inode: never registered, so no
+        // later connection could inherit from a PID alone.
+        assert!(unpinned.register_trusted_client(&nothing_trusted).is_none());
+        assert!(!unpinned.connection_matches_splinterm());
+        let start_time = splinterd::handoff_window_carry::process_start_time(pid).unwrap();
+        unpinned.install_start_time(start_time + 1);
+        assert!(!unpinned.connection_matches_splinterm());
+        unpinned.install_start_time(start_time);
+        assert!(unpinned.connection_matches_splinterm());
+
+        // A peer that never matched at Hello records nothing.
+        let other_child = spawn_sleep(system_sleep());
+        let mut other = peer_for(other_child.pid(), &prefix);
+        say_hello(&mut other, other_child.pid());
+        assert!(!other.connection_matches_splinterm());
+        drop(other_child);
         drop(child);
         fs::remove_dir_all(prefix.directory()).unwrap();
     }

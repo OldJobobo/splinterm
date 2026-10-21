@@ -1148,6 +1148,9 @@ struct DaemonState {
     /// Trusted-UI connections and declared Window anchors (Plan 0061
     /// M3.13b1).
     handoff_windows: handoff_windows::SharedHandoffWindows,
+    /// Client processes holding a trusted-UI connection trusted at its own
+    /// Hello (AGENTS.md §4.4): their later connections match too.
+    trusted_client_processes: consent::TrustedClientProcesses,
     /// The initiating connection's side of an in-flight `Execute`, by
     /// connection, until its handler takes it; see [`HandoffInitiator`].
     handoff_initiators: StdMutex<HashMap<u64, HandoffInitiator>>,
@@ -3459,6 +3462,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         handoff_listeners,
         handoff_exit: HandoffExit::default(),
         handoff_windows: Arc::default(),
+        trusted_client_processes: consent::TrustedClientProcesses::default(),
         handoff_initiators: StdMutex::default(),
         handoff_window_hold: StdMutex::default(),
         #[cfg(test)]
@@ -4434,7 +4438,14 @@ async fn serve_authenticated(
         bail!("incompatible protocol version");
     }
     let trusted_ui_client = role == ClientRole::TrustedUi;
-    let matching_splinterm = peer.is_matching_splinterm();
+    // AGENTS.md §4.4: the client test runs once, here (the installed client,
+    // the pinned snapshot, or a process already holding a trusted connection);
+    // afterwards this connection keeps it while its process runs that same
+    // executable.
+    let mut connection_peer = peer.clone();
+    connection_peer.record_hello_client_match(peer_monitor, &state.trusted_client_processes);
+    let peer = &connection_peer;
+    let matching_splinterm = peer.connection_matches_splinterm();
     let remote_interactive_client = role == ClientRole::RemoteInteractive;
     let matching_graphical_relay = peer.is_matching_graphical_relay();
     debug!(
@@ -4465,6 +4476,13 @@ async fn serve_authenticated(
         .await?;
         bail!("remote interactive role claimed outside the installed graphical relay");
     }
+    // Held for the connection: its process's later connections match while
+    // any trusted connection of it is open.
+    let _trusted_client = if trusted_ui_client {
+        peer.register_trusted_client(&state.trusted_client_processes)
+    } else {
+        None
+    };
     if trusted_ui_client {
         state.handoff_windows.lock().unwrap().register_connection(
             connection_id,
@@ -5073,7 +5091,7 @@ fn first_party_human_ui(
     peer: &PeerIdentity,
     scopes: &[AccessScope],
 ) -> bool {
-    ((trusted_ui_client && peer.is_matching_splinterm()) || remote_interactive_client)
+    ((trusted_ui_client && peer.connection_matches_splinterm()) || remote_interactive_client)
         && first_party_ui_scopes(scopes)
 }
 
@@ -6536,7 +6554,7 @@ fn interactive_authorization_context(
 ) -> Option<RequestAuthorizationContext> {
     interactive_bypass(
         trusted_ui_client,
-        peer.is_matching_splinterm(),
+        peer.connection_matches_splinterm(),
         remote_interactive_client,
         request,
     )
@@ -8413,7 +8431,7 @@ async fn handle_authorized_request(
         }
         Request::RequestImageContent { request } => {
             request.validate()?;
-            if !trusted_ui_client || !peer.is_matching_splinterm() {
+            if !trusted_ui_client || !peer.connection_matches_splinterm() {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
                     "image content is available only to the trusted local UI",
@@ -8674,7 +8692,7 @@ async fn handle_authorized_request(
             }
             if !authorization.may_manage_authorization(
                 state.development_terminal_access,
-                peer.is_matching_splinterm(),
+                peer.connection_matches_splinterm(),
             ) {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
@@ -8732,7 +8750,7 @@ async fn handle_authorized_request(
             if !owns_lair_grant
                 && !authorization.may_manage_authorization(
                     state.development_terminal_access,
-                    peer.is_matching_splinterm(),
+                    peer.connection_matches_splinterm(),
                 )
             {
                 return Err(ProtocolError::new(
@@ -9871,7 +9889,7 @@ async fn handle_authorized_request(
         } => {
             let incarnation = incarnation.ok_or_else(internal)?;
             let include_images =
-                include_image_metadata(trusted_ui_client, peer.is_matching_splinterm());
+                include_image_metadata(trusted_ui_client, peer.connection_matches_splinterm());
             let required = if scrollback_rows == 0 {
                 vec![AccessScope::Observe]
             } else {
@@ -10256,7 +10274,7 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
         } => {
-            let trusted_local = trusted_ui_client && peer.is_matching_splinterm();
+            let trusted_local = trusted_ui_client && peer.connection_matches_splinterm();
             if !trusted_local
                 && !authorization.policy_authorized()
                 && authorization.authorized_grant_id().is_none()
@@ -10574,7 +10592,7 @@ fn require_trusted_local_ui(
     trusted_ui_client: bool,
     peer: &PeerIdentity,
 ) -> Result<(), ProtocolError> {
-    if trusted_ui_client && peer.is_matching_splinterm() {
+    if trusted_ui_client && peer.connection_matches_splinterm() {
         Ok(())
     } else {
         Err(ProtocolError::new(
@@ -16238,6 +16256,7 @@ mod tests {
             handoff_listeners: None,
             handoff_exit: HandoffExit::default(),
             handoff_windows: Arc::default(),
+            trusted_client_processes: consent::TrustedClientProcesses::default(),
             handoff_initiators: StdMutex::default(),
             handoff_window_hold: StdMutex::default(),
             handoff_client_identities: StdMutex::default(),
@@ -18065,6 +18084,9 @@ mod tests {
                 .expect("snapshot test executable"),
         );
         assert!(peer.is_matching_splinterm());
+        // Its connection said Hello as the pinned client.
+        peer.record_hello_client_match(None, &consent::TrustedClientProcesses::default());
+        assert!(peer.connection_matches_splinterm());
         peer
     }
 

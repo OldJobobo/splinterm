@@ -85,6 +85,12 @@
 //!   never armed there. A SIGTERM it takes during the runtime stop is
 //!   captured, carried across the boundary, and reaches the resumed round,
 //!   which shuts down in order.
+//! * **A package upgrade keeps running Windows trusted.** A real `splinterd`
+//!   serves a trusted-UI connection from its prefix's client; a
+//!   byte-identical client is then renamed over that client, as a package
+//!   upgrade does, and the open connection's next trusted request still
+//!   succeeds, while a new connection from the replaced inode is refused at
+//!   `Hello` (AGENTS.md §4.4, the operator decision of 2026-10-20).
 //!
 //! # Terminal-body privacy (Plan 0037 M5)
 //!
@@ -376,41 +382,57 @@ finish({"grant_bytes": len(grant), "hello": hello, "claim": frame})
 /// judges (a copy of `python3` at some path): says the spec's hello, then
 /// sends each request in order and records its answer. Prints a JSON list:
 /// the hello answer, then one answer per request; `null` where the daemon
-/// closed the connection first.
+/// closed the connection first. A spec naming `pause_before` first prints
+/// the answers so far on their own line before that request, and waits for
+/// a line on its standard input. A spec naming `second_requests` then opens
+/// a second connection from the same process, while the first stays open,
+/// and appends its hello answer and one answer per request.
 const CLIENT_SESSION: &str = r#"
 import json, socket, struct, sys
 with open(sys.argv[1]) as source:
     spec = json.load(source)
-daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-daemon.settimeout(30)
-daemon.connect(spec["socket"])
-def send(frame):
+def connect():
+    channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    channel.settimeout(30)
+    channel.connect(spec["socket"])
+    return channel
+def send(channel, frame):
     body = json.dumps(frame).encode()
-    daemon.sendall(struct.pack(">I", len(body)) + body)
-def exactly(count):
+    channel.sendall(struct.pack(">I", len(body)) + body)
+def exactly(channel, count):
     data = b""
     while len(data) < count:
-        chunk = daemon.recv(count - len(data))
+        chunk = channel.recv(count - len(data))
         if not chunk:
             return None
         data += chunk
     return data
-def read():
-    header = exactly(4)
+def read(channel):
+    header = exactly(channel, 4)
     if header is None:
         return None
     (length,) = struct.unpack(">I", header)
-    return json.loads(exactly(length))
-send(spec["hello"])
-answers = [read()]
-if answers[0] is not None and answers[0].get("type") == "hello":
-    for request in spec["requests"]:
-        send(request)
+    return json.loads(exactly(channel, length))
+def converse(channel, requests, answers, pause_before=None):
+    send(channel, spec["hello"])
+    answers.append(read(channel))
+    if answers[-1] is None or answers[-1].get("type") != "hello":
+        return
+    for index, request in enumerate(requests):
+        if index == pause_before:
+            print(json.dumps(answers), flush=True)
+            sys.stdin.readline()
+        send(channel, request)
         while True:
-            frame = read()
+            frame = read(channel)
             if frame is None or frame.get("request_id") == request["request_id"]:
                 break
         answers.append(frame)
+answers = []
+daemon = connect()
+converse(daemon, spec["requests"], answers, spec.get("pause_before"))
+if spec.get("second_requests") is not None:
+    converse(connect(), spec["second_requests"], answers)
 print(json.dumps(answers))
 "#;
 /// Every pre-commit step the fault matrix fails the forward candidate at.
@@ -424,7 +446,7 @@ const FAULT_POINTS: [CandidateFaultPoint; 6] = [
 ];
 /// Every case, in run order; [`CaseSelection`] picks the ones a run
 /// executes.
-const CASES: [(&str, fn()); 14] = [
+const CASES: [(&str, fn()); 15] = [
     ("adopt", adopt_case),
     ("rollback", rollback_case),
     ("rollback-dropped-window", rollback_dropped_window_case),
@@ -438,6 +460,10 @@ const CASES: [(&str, fn()); 14] = [
     ("rollback-guard-timeout", rollback_guard_timeout_case),
     ("killed-hung-candidate", killed_hung_candidate_case),
     ("old-side-signal-carry", old_side_signal_carry_case),
+    (
+        "replaced-client-keeps-its-connection",
+        replaced_client_keeps_its_connection_case,
+    ),
     ("fault-matrix", fault_matrix_case),
 ];
 const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
@@ -2353,27 +2379,7 @@ fn client_session(
     role: ClientRole,
     requests: &[Request],
 ) -> Vec<Option<ServerFrame>> {
-    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-    let spec_path = socket.with_file_name(format!("client-session-{sequence}.json"));
-    let spec = json!({
-        "socket": socket,
-        "hello": ClientFrame::Hello {
-            minimum_version: PROTOCOL_VERSION,
-            maximum_version: PROTOCOL_VERSION,
-            role,
-            handoff_window: false,
-        },
-        "requests": requests
-            .iter()
-            .enumerate()
-            .map(|(index, request)| ClientFrame::Request {
-                request_id: u64::try_from(index).unwrap() + 1,
-                diagnostic_correlation: None,
-                request: request.clone(),
-            })
-            .collect::<Vec<_>>(),
-    });
-    fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+    let spec_path = client_session_spec(socket, role, requests, None, None);
     let output = Command::new(client)
         .arg("-c")
         .arg(CLIENT_SESSION)
@@ -2387,7 +2393,101 @@ fn client_session(
         "{} session failed: {output:?}",
         client.display()
     );
-    let answers: Vec<Option<Value>> = serde_json::from_slice(&output.stdout).unwrap();
+    session_answers(&output.stdout)
+}
+
+/// [`client_session`], paused on its one connection before request
+/// `pause_before`: `between` runs with the answers so far, then the session
+/// resumes. Returns every answer.
+fn paused_client_session(
+    client: &Path,
+    socket: &Path,
+    role: ClientRole,
+    requests: &[Request],
+    pause_before: usize,
+    second_requests: Option<&[Request]>,
+    between: impl FnOnce(&[Option<ServerFrame>]),
+) -> Vec<Option<ServerFrame>> {
+    use std::io::{BufRead as _, BufReader, Read as _};
+
+    let spec_path =
+        client_session_spec(socket, role, requests, Some(pause_before), second_requests);
+    let mut session = Command::new(client)
+        .arg("-c")
+        .arg(CLIENT_SESSION)
+        .arg(&spec_path)
+        .env("PYTHONHOME", python_home())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(session.stdout.take().unwrap());
+    let mut paused = String::new();
+    stdout.read_line(&mut paused).unwrap();
+    assert!(
+        !paused.is_empty(),
+        "{} session ended before its pause: {:?}",
+        client.display(),
+        session.wait()
+    );
+    between(&session_answers(paused.as_bytes()));
+    session
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"resume\n")
+        .unwrap();
+    let mut rest = Vec::new();
+    stdout.read_to_end(&mut rest).unwrap();
+    let status = session.wait().unwrap();
+    assert!(
+        status.success(),
+        "{} session failed: {status}",
+        client.display()
+    );
+    session_answers(&rest)
+}
+
+/// Writes a [`CLIENT_SESSION`] spec beside `socket` and returns its path.
+fn client_session_spec(
+    socket: &Path,
+    role: ClientRole,
+    requests: &[Request],
+    pause_before: Option<usize>,
+    second_requests: Option<&[Request]>,
+) -> PathBuf {
+    let frames = |requests: &[Request]| {
+        requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| ClientFrame::Request {
+                request_id: u64::try_from(index).unwrap() + 1,
+                diagnostic_correlation: None,
+                request: request.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let spec_path = socket.with_file_name(format!("client-session-{sequence}.json"));
+    let spec = json!({
+        "pause_before": pause_before,
+        "socket": socket,
+        "hello": ClientFrame::Hello {
+            minimum_version: PROTOCOL_VERSION,
+            maximum_version: PROTOCOL_VERSION,
+            role,
+            handoff_window: false,
+        },
+        "requests": frames(requests),
+        "second_requests": second_requests.map(frames),
+    });
+    fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+    spec_path
+}
+
+/// Decodes the JSON answer list a [`CLIENT_SESSION`] printed.
+fn session_answers(printed: &[u8]) -> Vec<Option<ServerFrame>> {
+    let answers: Vec<Option<Value>> = serde_json::from_slice(printed).unwrap();
     answers
         .into_iter()
         .map(|answer| {
@@ -3652,6 +3752,116 @@ fn old_side_signal_carry_case() {
         "{ready:?}\n{logs}"
     );
     assert!(!socket_exists(&directory.socket()), "{logs}");
+}
+
+/// AGENTS.md §4.4, the operator decision of 2026-10-20, reproducing the VM
+/// acceptance failure on 8728e59b: `pacman -U` replaced `/usr/bin/splinterm`
+/// under a running daemon, and every open Window's next trusted request was
+/// refused ("trusted consent is required"), so both Windows exited.
+///
+/// A real `splinterd` serves from a private prefix whose installed client
+/// is a `python3` copy. One trusted-UI connection from that client makes a
+/// trusted request (a handoff dry run, which both the authorization table
+/// and its handler gate on the trusted client), pauses while a
+/// byte-identical copy is renamed over the installed client (a new inode;
+/// a hard link keeps the old one). Meanwhile another process executing the
+/// replaced inode is refused trusted UI at `Hello`. The session then makes
+/// the request again on the same connection, and the same process opens a
+/// second trusted-UI connection, as a Window opening a pane does: both must
+/// succeed. Afterwards a new connection from the newly installed client is
+/// served.
+fn replaced_client_keeps_its_connection_case() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let directory = TestDirectory::new();
+    let prefix = directory.0.join("prefix");
+    fs::create_dir(&prefix).unwrap();
+    let daemon = prefix.join("splinterd");
+    install(&daemon, &fs::read(DAEMON).unwrap());
+    let client = prefix.join("splinterm");
+    install(&client, &forward_client());
+    install(
+        &prefix.join("splinterm-pty-child"),
+        &fs::read(pty_helper()).unwrap(),
+    );
+    let mut stage = Stage::launch_program(&directory, StageOptions::default(), &daemon, &[]);
+    let socket = directory.socket();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (_, daemon_generation) = connect_adopted(&mut stage, &socket).await;
+        assert_eq!(daemon_generation, 1);
+    });
+    let dry_run = Request::PrepareDaemonHandoff {
+        mode: DaemonHandoffMode::DryRun,
+    };
+    let reported = |answer: &Option<ServerFrame>| {
+        matches!(
+            answer,
+            Some(ServerFrame::Response {
+                result: Response::HandoffReport { .. },
+                ..
+            })
+        )
+    };
+    let stale_client = directory.0.join(STALE_CLIENT);
+    let identity = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    };
+    let answers = paused_client_session(
+        &client,
+        &socket,
+        ClientRole::TrustedUi,
+        &[dry_run.clone(), dry_run.clone()],
+        1,
+        Some(&[dry_run.clone()]),
+        |before| {
+            assert!(
+                matches!(before, [Some(ServerFrame::Hello { .. }), answer] if reported(answer)),
+                "the installed client was not served before the upgrade: {before:?}\n{}",
+                stage.logs()
+            );
+            // The upgrade: a byte-identical copy renamed over the client.
+            fs::hard_link(&client, &stale_client).unwrap();
+            install(&client, &fs::read(&client).unwrap());
+            assert_ne!(identity(&client), identity(&stale_client));
+            assert_eq!(fs::read(&stale_client).unwrap(), fs::read(&client).unwrap());
+            // Another process on the replaced inode, while the session holds
+            // its trusted connection open.
+            let refused = client_session(&stale_client, &socket, ClientRole::TrustedUi, &[]);
+            assert!(
+                matches!(
+                    refused.as_slice(),
+                    [Some(ServerFrame::Error { error, .. })] if error.code == ErrorCode::Unauthorized
+                ),
+                "another process on the replaced inode was not refused: {refused:?}\n{}",
+                stage.logs()
+            );
+        },
+    );
+    assert!(
+        matches!(
+            answers.as_slice(),
+            [
+                Some(ServerFrame::Hello { .. }),
+                before,
+                after,
+                Some(ServerFrame::Hello { .. }),
+                second,
+            ] if reported(before) && reported(after) && reported(second)
+        ),
+        "the Window process lost trust when its client was replaced: {answers:?}\n{}",
+        stage.logs()
+    );
+    let served = client_session(&client, &socket, ClientRole::TrustedUi, &[dry_run]);
+    assert!(
+        matches!(served.as_slice(), [Some(ServerFrame::Hello { .. }), answer] if reported(answer)),
+        "the newly installed client was not served: {served:?}\n{}",
+        stage.logs()
+    );
 }
 
 fn socket_exists(path: &Path) -> bool {
