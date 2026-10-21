@@ -44,7 +44,7 @@ use super::pane_bridge::{
 use super::{
     access_cli::{resolve_access_request, run_human_access},
     agent_status_cli::{resolve_agent_status_request, run_human_agent_status},
-    consent::run_consent_client,
+    consent::{configure_dialog_renderer, run_consent_client},
     human_output::{print_lairs, print_response},
     interrupted::{
         InterruptedCommand, Interruption, PROBE_WINDOW, Probe, explain_interruption,
@@ -69,6 +69,16 @@ use super::{
     sessions::{launch, reopen_recent, run_dojos, run_dojos_from, select_dojo, xdg_launch},
     upgrade_dialog::run_upgrade_dialog_client,
 };
+
+/// Set once this process runs a trusted dialog child: `consent`,
+/// `upgrade-dialog`, or `restart-dialog`.
+static DIALOG_CHILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this process is a trusted dialog child, whose standard error is
+/// a private pipe to the command that asked (`splinterd::child_stderr`).
+pub(crate) fn is_dialog_child() -> bool {
+    DIALOG_CHILD.load(std::sync::atomic::Ordering::Acquire)
+}
 
 #[allow(
     clippy::too_many_lines,
@@ -251,6 +261,12 @@ pub(crate) async fn run() -> Result<()> {
     }
 
     let graphical = graphical_command(&command);
+    if matches!(
+        command,
+        Command::Consent | Command::UpgradeDialog | Command::RestartDialog
+    ) {
+        DIALOG_CHILD.store(true, std::sync::atomic::Ordering::Release);
+    }
     if graphical {
         initialize_graphical()
             .map_err(|_| anyhow::anyhow!("graphical diagnostics initialization failed"))?
@@ -501,18 +517,21 @@ async fn run_configured_command(
             }
         }
         Command::Consent => {
+            configure_dialog_renderer(&config)?;
             let shortcut = config.dialog_shortcut;
             tokio::task::spawn_blocking(move || run_consent_client(shortcut))
                 .await
                 .context("trusted consent task failed")?
         }
         Command::UpgradeDialog => {
+            configure_dialog_renderer(&config)?;
             let shortcut = config.dialog_shortcut;
             tokio::task::spawn_blocking(move || run_upgrade_dialog_client(shortcut))
                 .await
                 .context("trusted upgrade dialog task failed")?
         }
         Command::RestartDialog => {
+            configure_dialog_renderer(&config)?;
             let shortcut = config.dialog_shortcut;
             tokio::task::spawn_blocking(move || run_restart_dialog_client(shortcut))
                 .await

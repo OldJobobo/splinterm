@@ -643,29 +643,20 @@ impl WindowOptions {
     }
 }
 
-/// Opens the native window and runs until compositor close or an explicit shutdown.
-///
-/// Q/Escape close shortcuts are available only when `evidence_close_shortcuts` is set.
-///
-/// # Errors
-///
-/// Returns an error when font setup, required Wayland globals, shared-memory buffers,
-/// keyboard state, capture output, or event dispatch cannot be initialized.
-#[allow(
-    clippy::too_many_lines,
-    reason = "Wayland global binding and application state initialization form one startup transaction"
-)]
-pub fn run(mut options: WindowOptions) -> Result<()> {
-    if let Some(diagnostics) = diagnostics() {
-        let dojo_id = options
-            .initial_dojo
-            .as_ref()
-            .map(|identity| identity.dojo_id);
-        let splint_id = options
-            .active_splint
-            .or_else(|| options.snapshot.as_ref().map(|snapshot| snapshot.splint_id));
-        diagnostics.ensure_window(dojo_id, splint_id);
-    }
+/// What [`run`] derives from its options before it connects to the
+/// compositor.
+struct PreparedWindow {
+    render_context: RenderContext,
+    inactive_options: Vec<WindowPaneOptions>,
+    text_row: Option<TextRow>,
+    snapshot_frame: Option<SnapshotFrame>,
+    initial_width: u32,
+    initial_height: u32,
+}
+
+/// The part of [`run`] before the compositor: input activation, snapshot
+/// validation and theming, font and frame loading, and the initial size.
+fn prepare_window(options: &mut WindowOptions) -> Result<PreparedWindow> {
     let managed_tabs = options.initial_dojo.is_some();
     let render_context = RenderContext::new(options.theme.background_alpha)
         .with_font_size_override(followed_font_size(options.theme));
@@ -705,6 +696,65 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             .checked_add(tab_strip_logical_height(options.theme))
             .context("initial tab strip height overflow")?;
     }
+    Ok(PreparedWindow {
+        render_context,
+        inactive_options,
+        text_row,
+        snapshot_frame,
+        initial_width,
+        initial_height,
+    })
+}
+
+/// Runs every check [`run`] makes on `options` that needs no compositor:
+/// the same preparation, then the viewport and buffer bounds of the initial
+/// size, which it returns. A caller can prove a Window it builds gets as far
+/// as connecting to the compositor without a display.
+///
+/// # Errors
+///
+/// Returns the error [`run`] would return for these options before it
+/// reaches the compositor.
+#[doc(hidden)]
+pub fn check_window_options(mut options: WindowOptions) -> Result<(u32, u32)> {
+    let prepared = prepare_window(&mut options)?;
+    viewport_destination(prepared.initial_width, prepared.initial_height)?;
+    bounded_window_backing_len(prepared.initial_width, prepared.initial_height)?;
+    Ok((prepared.initial_width, prepared.initial_height))
+}
+
+/// Opens the native window and runs until compositor close or an explicit shutdown.
+///
+/// Q/Escape close shortcuts are available only when `evidence_close_shortcuts` is set.
+///
+/// # Errors
+///
+/// Returns an error when font setup, required Wayland globals, shared-memory buffers,
+/// keyboard state, capture output, or event dispatch cannot be initialized.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Wayland global binding and application state initialization form one startup transaction"
+)]
+pub fn run(mut options: WindowOptions) -> Result<()> {
+    if let Some(diagnostics) = diagnostics() {
+        let dojo_id = options
+            .initial_dojo
+            .as_ref()
+            .map(|identity| identity.dojo_id);
+        let splint_id = options
+            .active_splint
+            .or_else(|| options.snapshot.as_ref().map(|snapshot| snapshot.splint_id));
+        diagnostics.ensure_window(dojo_id, splint_id);
+    }
+    let managed_tabs = options.initial_dojo.is_some();
+    let PreparedWindow {
+        render_context,
+        inactive_options,
+        text_row,
+        snapshot_frame,
+        initial_width,
+        initial_height,
+    } = prepare_window(&mut options)?;
     let connection = Connection::connect_to_env().context("connect to Wayland compositor")?;
     let (globals, event_queue) =
         registry_queue_init(&connection).context("read Wayland registry")?;

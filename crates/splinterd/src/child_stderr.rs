@@ -1,0 +1,230 @@
+//! A bounded tail of a trusted dialog child's standard error.
+//!
+//! A dialog child (the consent prompt, the upgrade and restart questions)
+//! answers on a private socket, so a child that fails before answering
+//! leaves its asker only an end-of-file. Its standard error is a pipe that a
+//! background thread drains to its end, keeping the last
+//! [`MAX_CHILD_STDERR_BYTES`], so the asker can say why the dialog failed
+//! once the child is reaped. The child is this installation's own client;
+//! what it prints is its error chain, never terminal content.
+
+use std::{
+    io::{self, Read},
+    process::{Child, ExitStatus},
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
+
+/// The most standard-error bytes kept from one child: the last ones.
+pub const MAX_CHILD_STDERR_BYTES: usize = 4096;
+
+/// How long [`StderrTail::finish`] waits for a reaped child's pipe to close.
+/// A descendant that inherited the pipe can hold it open; then nothing is
+/// reported rather than the asker waiting on it.
+pub const STDERR_TAIL_WAIT: Duration = Duration::from_millis(500);
+
+/// The standard error of one child, drained in the background.
+#[derive(Debug)]
+pub struct StderrTail {
+    tail: Option<mpsc::Receiver<Vec<u8>>>,
+}
+
+impl StderrTail {
+    /// Starts draining `child`'s piped standard error. A child spawned
+    /// without `Stdio::piped()` for it captures nothing.
+    pub fn capture(child: &mut Child) -> Self {
+        let Some(mut stderr) = child.stderr.take() else {
+            return Self { tail: None };
+        };
+        let (sender, receiver) = mpsc::channel();
+        let spawned = thread::Builder::new()
+            .name("dialog-stderr".to_owned())
+            .spawn(move || {
+                let _ = sender.send(read_tail(&mut stderr, MAX_CHILD_STDERR_BYTES));
+            });
+        Self {
+            tail: spawned.ok().map(|_| receiver),
+        }
+    }
+
+    /// What the child reported ([`report`]) once it has exited: `None` when
+    /// it printed nothing, or its pipe stayed open past `wait`.
+    #[must_use]
+    pub fn finish(self, wait: Duration) -> Option<String> {
+        let bytes = self.tail?.recv_timeout(wait).ok()?;
+        report(&bytes)
+    }
+}
+
+/// How a failed Splinterm graphical client's last line on standard error
+/// begins. A dialog child adds its error chain after it.
+pub const CLIENT_FAILURE_PREFIX: &str = "splinterm graphical client failed";
+
+/// What a dialog child reported in `bytes`, its standard error's tail: its
+/// last [`CLIENT_FAILURE_PREFIX`] line when there is one, so the lines a
+/// client logs as it starts (the fonts it resolved) do not bury the reason;
+/// otherwise the whole tail. On one line, as [`one_line`] makes it.
+#[must_use]
+pub fn report(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines()
+        .rev()
+        .find(|line| line.starts_with(CLIENT_FAILURE_PREFIX))
+        .map_or_else(|| one_line(bytes), |line| one_line(line.as_bytes()))
+}
+
+/// The error for a dialog child, named by `what`, that gave no usable
+/// answer, on one line so a log that shows only the outermost message keeps
+/// it all: what the child printed when it did, how it ended, and `error`,
+/// the asker's own failure.
+#[must_use]
+pub fn child_failure(
+    what: &str,
+    error: &anyhow::Error,
+    status: Option<ExitStatus>,
+    printed: Option<&str>,
+) -> anyhow::Error {
+    let ended = status.map_or_else(|| "not reaped".to_owned(), |status| status.to_string());
+    match printed {
+        Some(printed) => anyhow::anyhow!("{what} failed: {printed} ({ended}; {error:#})"),
+        None => anyhow::anyhow!("{what} gave no answer ({ended}): {error:#}"),
+    }
+}
+
+/// Reads `reader` to its end and returns its last `maximum` bytes. A read
+/// error ends it early with what was read.
+pub fn read_tail(reader: &mut impl Read, maximum: usize) -> Vec<u8> {
+    let mut tail = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                tail.extend_from_slice(&buffer[..read]);
+                if tail.len() > maximum {
+                    tail.drain(..tail.len() - maximum);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    tail
+}
+
+/// `bytes` as one printable line: its non-blank lines, trimmed, joined by
+/// "; ", with every other control character replaced. `None` when blank.
+#[must_use]
+pub fn one_line(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    (!line.is_empty()).then_some(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::{Command, Stdio};
+
+    use super::*;
+
+    #[test]
+    fn a_failing_child_reports_its_last_bytes_on_one_line() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'first\\n\\n  second\\033[1m  \\n' >&2; exit 1",
+            ])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let tail = StderrTail::capture(&mut child);
+        assert!(!child.wait().unwrap().success());
+        assert_eq!(
+            tail.finish(Duration::from_secs(10)).as_deref(),
+            Some("first; second\u{fffd}[1m")
+        );
+    }
+
+    #[test]
+    fn a_failure_names_what_the_child_printed_and_how_it_ended() {
+        let status = Command::new("sh").args(["-c", "exit 1"]).status().unwrap();
+        let error = anyhow::anyhow!("failed to fill whole buffer");
+        assert_eq!(
+            child_failure("the dialog", &error, Some(status), Some("no font")).to_string(),
+            "the dialog failed: no font (exit status: 1; failed to fill whole buffer)"
+        );
+        assert_eq!(
+            child_failure("the dialog", &error, None, None).to_string(),
+            "the dialog gave no answer (not reaped): failed to fill whole buffer"
+        );
+    }
+
+    #[test]
+    fn a_client_failure_line_is_reported_over_startup_noise() {
+        let tail = b"Resolved primary regular: Hack (face 0, /x.ttf)\n\
+            splinterm graphical client failed: no snapshot\n\
+            Resolved 208 ordered Fontconfig fallback faces\n";
+        assert_eq!(
+            report(tail).as_deref(),
+            Some("splinterm graphical client failed: no snapshot")
+        );
+        assert_eq!(
+            report(b"thread panicked\nnote: backtrace\n").as_deref(),
+            Some("thread panicked; note: backtrace")
+        );
+    }
+
+    #[test]
+    fn only_the_last_bytes_are_kept() {
+        let mut long = vec![b'a'; 3 * MAX_CHILD_STDERR_BYTES];
+        long.extend_from_slice(b"the end");
+        let tail = read_tail(&mut long.as_slice(), MAX_CHILD_STDERR_BYTES);
+        assert_eq!(tail.len(), MAX_CHILD_STDERR_BYTES);
+        assert!(tail.ends_with(b"the end"));
+    }
+
+    #[test]
+    fn a_silent_or_unpiped_child_reports_nothing() {
+        let mut silent = Command::new("true").stderr(Stdio::piped()).spawn().unwrap();
+        let tail = StderrTail::capture(&mut silent);
+        silent.wait().unwrap();
+        assert_eq!(tail.finish(Duration::from_secs(10)), None);
+
+        let mut unpiped = Command::new("true").stderr(Stdio::null()).spawn().unwrap();
+        let tail = StderrTail::capture(&mut unpiped);
+        unpiped.wait().unwrap();
+        assert_eq!(tail.finish(Duration::from_secs(10)), None);
+        assert_eq!(one_line(b" \n\t\n"), None);
+    }
+
+    #[test]
+    fn a_pipe_held_open_stops_waiting_at_the_bound() {
+        // The grandchild keeps the pipe open after its parent exits.
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 5 & echo started >&2"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let tail = StderrTail::capture(&mut child);
+        child.wait().unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(tail.finish(Duration::from_millis(100)), None);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+}

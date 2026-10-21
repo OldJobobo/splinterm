@@ -5,7 +5,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use splinterd::dialog_shortcut::{BackgroundRegistration, DialogShortcut};
-use splinterm::{AccessConsentView, TrustedConsentUi, WindowOptions, run_window};
+use splinterm::{
+    AccessConsentView, TrustedConsentUi, WindowOptions,
+    config::{AppConfig, ResolvedTheme},
+    run_window,
+};
 use splinterm_protocol::{
     AccessLevel, ActiveScreen, CellAttributes, ColorSource, ConsentDecision, ConsentPrompt,
     ConsentReplacement, ConsentReply, ConsentTarget, GrantDuration, MAX_CONSENT_FRAME_BYTES,
@@ -499,6 +503,11 @@ pub(in crate::app) fn static_dialog_snapshot(
         linebreak: false,
         cells: Vec::new(),
     });
+    // A Window refuses a snapshot whose visible rows lack distinct, nonzero
+    // identities (`TerminalSnapshot::validate`), before it maps.
+    for (row, id) in visible_rows.iter_mut().zip(1_u64..) {
+        row.row_id = Some(id);
+    }
     TerminalSnapshot {
         splint_id,
         incarnation,
@@ -590,30 +599,50 @@ fn global_dialog_shortcut() -> bool {
         .is_ok_and(|roots| super::omarchy_integration::dialog_focus_ready(&roots))
 }
 
+/// Configures the renderer a trusted dialog child draws with from the
+/// person's configuration, as every other Window does. Without it the child
+/// draws with the explicit startup fallback font alone, ignoring
+/// `main.font` and Fontconfig's `monospace`, and fails where that font is
+/// not installed. Dialogs keep the default, opaque theme.
+pub(in crate::app) fn configure_dialog_renderer(config: &AppConfig) -> Result<()> {
+    super::sessions::configure_picker_renderer(config, ResolvedTheme::default())
+}
+
+/// The consent dialog's Window, sized to its first rendering, answering on
+/// `decision`.
+fn consent_window_options(
+    prompt: ConsentPrompt,
+    decision: std_mpsc::Sender<ConsentDecision>,
+    shortcut: Option<DialogShortcut>,
+) -> WindowOptions {
+    let durations = prompt
+        .durations
+        .iter()
+        .map(|offer| (offer.duration, offer.withheld.is_none()))
+        .collect();
+    let (trusted_consent, snapshot) =
+        TrustedConsentUi::access_consent(decision, durations, consent_renderer(prompt, shortcut));
+    let trusted_consent = trusted_consent.with_shortcut(shortcut);
+    let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
+    let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
+    WindowOptions {
+        snapshot: Some(snapshot),
+        trusted_consent: Some(trusted_consent),
+        initial_columns: columns,
+        initial_rows: rows,
+        ..WindowOptions::default()
+    }
+}
+
 pub(in crate::app) fn run_consent_client(shortcut: Option<DialogShortcut>) -> Result<()> {
     let prompt: ConsentPrompt = read_private_frame(&mut io::stdin().lock())?;
     if let Err(reason) = prompt.validate() {
         bail!("invalid trusted consent prompt: {reason}");
     }
     let capability = prompt.capability.clone();
-    let durations = prompt
-        .durations
-        .iter()
-        .map(|offer| (offer.duration, offer.withheld.is_none()))
-        .collect();
     let (decision, receiver) = std_mpsc::channel();
-    let (trusted_consent, snapshot) =
-        TrustedConsentUi::access_consent(decision, durations, consent_renderer(prompt, shortcut));
-    let trusted_consent = trusted_consent.with_shortcut(shortcut);
-    let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
-    let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
-    let registration = run_trusted_dialog_window(WindowOptions {
-        snapshot: Some(snapshot),
-        trusted_consent: Some(trusted_consent),
-        initial_columns: columns,
-        initial_rows: rows,
-        ..WindowOptions::default()
-    })?;
+    let registration =
+        run_trusted_dialog_window(consent_window_options(prompt, decision, shortcut))?;
     // Closing the Window, or any way out without an answer, denies.
     let decision = receiver.try_recv().unwrap_or(ConsentDecision::Deny);
     let written = write_private_frame(
@@ -638,8 +667,8 @@ mod tests {
     use splinterd::dialog_shortcut::DialogShortcut;
 
     use super::{
-        consent_layout, consent_renderer, grant_label, keyboard_hint, read_private_frame_bounded,
-        trusted_label, write_private_frame_bounded,
+        consent_layout, consent_renderer, consent_window_options, grant_label, keyboard_hint,
+        read_private_frame_bounded, trusted_label, write_private_frame_bounded,
     };
 
     #[allow(
@@ -806,10 +835,9 @@ mod tests {
         }
     }
 
-    /// The longest inputs a valid prompt can carry still show every fixed
-    /// word and every character of the paths: nothing is cut off.
-    #[test]
-    fn the_longest_prompt_fits_its_columns_and_cuts_nothing() {
+    /// The longest inputs a valid prompt can carry: maximal paths, names,
+    /// and scopes, with every longer duration shared and replacing.
+    fn longest_prompt() -> ConsentPrompt {
         let path = format!("/{}", "p".repeat(MAX_CONSENT_PATH_CHARS - 1));
         let shared = format!("/{}", "s".repeat(MAX_CONSENT_PATH_CHARS - 1));
         let mut prompt = manage_prompt();
@@ -841,6 +869,60 @@ mod tests {
             });
         }
         assert_eq!(prompt.validate(), Ok(()));
+        prompt
+    }
+
+    /// A Splint prompt as the daemon sends it: "Just this once" only.
+    fn splint_prompt() -> ConsentPrompt {
+        let prompt = ConsentPrompt {
+            capability: vec![1; splinterm_protocol::CONSENT_CAPABILITY_BYTES],
+            requester: "/usr/bin/splinterm-mcp".to_owned(),
+            requester_pid: 42,
+            requester_uid: 1000,
+            agent_name: None,
+            target: ConsentTarget::Splint {
+                splint_id: splinterm_core::SplintId::new(),
+                incarnation: 3,
+            },
+            scopes: vec![AccessScope::Observe, AccessScope::Input],
+            level: None,
+            durations: vec![offer(GrantDuration::Once, None)],
+        };
+        assert_eq!(prompt.validate(), Ok(()));
+        prompt
+    }
+
+    /// Every consent Window gets as far as the compositor: each selection's
+    /// snapshot validates, and the Window passes every check `run_window`
+    /// makes before it connects. Dialog snapshots once had no visible row
+    /// identities, which `TerminalSnapshot::validate` refuses, so no trusted
+    /// dialog ever mapped.
+    #[test]
+    fn every_consent_window_passes_the_checks_before_the_compositor() {
+        // The renderer the dialog child configures, from the default
+        // configuration: Fontconfig's `monospace`.
+        super::configure_dialog_renderer(&splinterm::config::AppConfig::default()).unwrap();
+        for prompt in [manage_prompt(), splint_prompt(), longest_prompt()] {
+            let render = consent_renderer(prompt.clone(), shortcut());
+            for selected in 0..prompt.durations.len() {
+                let snapshot = render(selected).snapshot;
+                assert_eq!(snapshot.validate().map_err(|error| error.message), Ok(()));
+            }
+            for shortcut in [shortcut(), None] {
+                let (decision, _receiver) = std::sync::mpsc::channel();
+                let options = consent_window_options(prompt.clone(), decision, shortcut);
+                splinterm::check_window_options(options).unwrap();
+            }
+        }
+    }
+
+    /// The longest inputs a valid prompt can carry still show every fixed
+    /// word and every character of the paths: nothing is cut off.
+    #[test]
+    fn the_longest_prompt_fits_its_columns_and_cuts_nothing() {
+        let path = format!("/{}", "p".repeat(MAX_CONSENT_PATH_CHARS - 1));
+        let shared = format!("/{}", "s".repeat(MAX_CONSENT_PATH_CHARS - 1));
+        let prompt = longest_prompt();
         let render = consent_renderer(prompt.clone(), shortcut());
         for selected in 0..prompt.durations.len() {
             let view = render(selected);

@@ -3,6 +3,7 @@
 pub mod authorization;
 mod candidate_bootstrap;
 pub mod cgroup;
+pub mod child_stderr;
 #[doc(hidden)]
 pub mod dbus_worker;
 pub mod dialog_shortcut;
