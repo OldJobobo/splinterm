@@ -2,11 +2,15 @@
 //!
 //! Every trusted dialog (the access consent dialog, the upgrade question,
 //! and the launcher's restart question) appears without taking keyboard
-//! focus, and its keyboard stays inert until the person clicks inside it.
-//! Keyboard focus alone, even when the compositor gives it, never engages a
-//! dialog, so typing meant for another Window can never answer one. After
-//! that click the dialog arms: every key press and the proceed or grant
-//! click are ignored for [`UPGRADE_ARMING_DELAY`], and the delay starts again
+//! focus, and its keyboard stays inert until the person clicks inside it or,
+//! while it has keyboard focus, presses the dialog shortcut (`Ctrl+Alt+G`
+//! unless configured otherwise; see `splinterd::dialog_shortcut`). Keyboard
+//! focus alone, even when the compositor gives it, never engages a dialog,
+//! so typing meant for another Window can never answer one, and the
+//! shortcut itself never answers. Any other key with Ctrl, Alt or Super held
+//! does nothing. After that click or shortcut the dialog arms: every key
+//! press and the proceed or grant click are ignored for
+//! [`UPGRADE_ARMING_DELAY`], and the delay starts again
 //! whenever the dialog regains focus and, in the access consent dialog,
 //! whenever the selected duration changes. Key repeats are always ignored.
 //! A click in the deny or cancel area always counts. See [`Engagement`].
@@ -55,6 +59,9 @@ pub(crate) enum TrustedDialogKey {
     Down,
     Left,
     Right,
+    /// The exact dialog shortcut chord: engages the keyboard as a click
+    /// inside does, and never answers.
+    Engage,
     Other,
 }
 
@@ -64,8 +71,9 @@ pub(crate) const UPGRADE_ARMING_DELAY: Duration = Duration::from_millis(600);
 
 /// Whether a trusted dialog's keyboard is engaged, and since when it arms.
 ///
-/// Only a click inside the dialog engages it. Before that, nothing arms it:
-/// a focus gain is ignored, so keys typed for another Window stay inert.
+/// Only a click inside the dialog, or the dialog shortcut pressed while it
+/// has focus, engages it. Before that, nothing arms it: a focus gain is
+/// ignored, so keys typed for another Window stay inert.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Engagement {
     engaged: bool,
@@ -73,8 +81,9 @@ pub(crate) struct Engagement {
 }
 
 impl Engagement {
-    /// A click inside the dialog: the first one engages the keyboard and
-    /// starts the arming delay; later ones change nothing.
+    /// A click inside the dialog or the dialog shortcut: the first one
+    /// engages the keyboard and starts the arming delay; later ones change
+    /// nothing.
     pub(crate) const fn engage(&mut self, now: Instant) {
         if !self.engaged {
             self.engaged = true;
@@ -208,7 +217,7 @@ impl AccessChoice {
             TrustedDialogKey::Down | TrustedDialogKey::Right => {
                 self.step(true).map(ConsentAction::Select)
             }
-            TrustedDialogKey::R | TrustedDialogKey::Other => None,
+            TrustedDialogKey::R | TrustedDialogKey::Engage | TrustedDialogKey::Other => None,
         }
     }
 
@@ -296,7 +305,7 @@ impl TrustedDialogKind {
 mod tests {
     use super::*;
 
-    const KEYS: [TrustedDialogKey; 10] = [
+    const KEYS: [TrustedDialogKey; 11] = [
         TrustedDialogKey::G,
         TrustedDialogKey::D,
         TrustedDialogKey::R,
@@ -306,6 +315,7 @@ mod tests {
         TrustedDialogKey::Down,
         TrustedDialogKey::Left,
         TrustedDialogKey::Right,
+        TrustedDialogKey::Engage,
         TrustedDialogKey::Other,
     ];
 
@@ -577,6 +587,28 @@ mod tests {
                     "{key:?}"
                 );
             }
+        }
+    }
+
+    /// The dialog shortcut engages a dialog (see `TrustedConsentUi`) but is
+    /// never an answer itself, even once the dialog is armed.
+    #[test]
+    fn the_dialog_shortcut_never_answers_or_selects() {
+        let (choice, armed) = engaged_choice(vec![true, true, true]);
+        assert_eq!(choice.key(TrustedDialogKey::Engage, false, armed), None);
+        for kind in KINDS {
+            let clicked = Instant::now();
+            let engagement = engaged_at(clicked);
+            assert_eq!(
+                kind.key_decision(
+                    TrustedDialogKey::Engage,
+                    false,
+                    engagement,
+                    clicked + UPGRADE_ARMING_DELAY
+                ),
+                None,
+                "{kind:?}"
+            );
         }
     }
 

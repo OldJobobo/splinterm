@@ -36,15 +36,17 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use splinterd::dialog_shortcut::{DialogShortcut, DialogShortcutLease, Hyprctl, SystemHyprctl};
 use splinterm::automation::HandoffDecisionPrompt;
-use splinterm::{TrustedConsentUi, WindowOptions, run_window};
+use splinterm::{TrustedConsentUi, WindowOptions};
 use splinterm_protocol::{
     HandoffUnresponsiveWindow, MAX_HANDOFF_DOJO_NAME_BYTES, MAX_HANDOFF_WINDOW_DOJOS,
     MAX_HANDOFF_WINDOWS, TerminalSnapshot,
 };
 
 use super::consent::{
-    read_private_frame_bounded, static_dialog_snapshot, trusted_label, write_private_frame_bounded,
+    keyboard_hint, read_private_frame_bounded, run_trusted_dialog_window, static_dialog_snapshot,
+    trusted_label, write_private_frame_bounded,
 };
 
 /// The hidden subcommand the dialog child runs.
@@ -69,8 +71,13 @@ pub(in crate::app) trait DialogPrompt:
     fn parent_pid(&self) -> u32;
     /// Rejects a prompt the child must not show.
     fn validate(&self) -> Result<()>;
-    /// The Window that shows the prompt and sends its answer on `decision`.
-    fn window_options(&self, decision: std_mpsc::Sender<bool>) -> WindowOptions;
+    /// The Window that shows the prompt and sends its answer on `decision`,
+    /// engaged by `shortcut` as well as by a click when it is on.
+    fn window_options(
+        &self,
+        decision: std_mpsc::Sender<bool>,
+        shortcut: Option<DialogShortcut>,
+    ) -> WindowOptions;
 }
 
 /// The widest dialog line, matching the consent snapshot's column clamp.
@@ -98,8 +105,12 @@ impl DialogPrompt for UpgradeDialogPrompt {
         self.parent_pid
     }
 
-    fn window_options(&self, decision: std_mpsc::Sender<bool>) -> WindowOptions {
-        dialog_window_options(self, decision)
+    fn window_options(
+        &self,
+        decision: std_mpsc::Sender<bool>,
+        shortcut: Option<DialogShortcut>,
+    ) -> WindowOptions {
+        dialog_window_options(self, decision, shortcut)
     }
 
     fn validate(&self) -> Result<()> {
@@ -169,7 +180,7 @@ fn window_line(window: &HandoffUnresponsiveWindow) -> String {
 }
 
 /// The dialog text: the Windows, what proceeding does, and how to answer.
-fn dialog_lines(prompt: &UpgradeDialogPrompt) -> Vec<String> {
+fn dialog_lines(prompt: &UpgradeDialogPrompt, shortcut: Option<DialogShortcut>) -> Vec<String> {
     let count = prompt.windows.len();
     let mut lines = vec![
         "TRUSTED SPLINTERM UPGRADE QUESTION".to_owned(),
@@ -195,6 +206,7 @@ fn dialog_lines(prompt: &UpgradeDialogPrompt) -> Vec<String> {
         ));
     }
     lines.extend(DIALOG_FOOTER.map(str::to_owned));
+    lines.push(keyboard_hint("dialog", shortcut));
     lines.insert(
         lines.len() - 4,
         format!(
@@ -205,9 +217,10 @@ fn dialog_lines(prompt: &UpgradeDialogPrompt) -> Vec<String> {
     lines
 }
 
-/// The explanation and the actions, always shown in full below the list.
-/// The deadline line is inserted before the last four.
-const DIALOG_FOOTER: [&str; 8] = [
+/// The explanation and the actions, always shown in full below the list and
+/// followed by the keyboard hint. The deadline line is inserted before the
+/// last three and the hint.
+const DIALOG_FOOTER: [&str; 7] = [
     "",
     "Proceeding closes these Windows. Their terminals keep running in the",
     "upgraded daemon; reopen them from the Recent Dojos picker.",
@@ -215,12 +228,11 @@ const DIALOG_FOOTER: [&str; 8] = [
     "",
     "[D / Esc / Enter  Cancel]     [G  Proceed]",
     "Click the red left area to cancel or the green right area to proceed.",
-    "Click inside this dialog first to answer with the keyboard.",
 ];
 
 /// Lines above and below the Window list: the three header lines, the
-/// footer, and its deadline line.
-const FIXED_DIALOG_LINES: usize = 3 + DIALOG_FOOTER.len() + 1;
+/// footer, its deadline line, and the keyboard hint.
+const FIXED_DIALOG_LINES: usize = 3 + DIALOG_FOOTER.len() + 2;
 
 /// The tallest dialog, in terminal rows. The static snapshot cannot scroll,
 /// so the dialog is sized to its content within this bound.
@@ -236,8 +248,11 @@ pub(in crate::app) fn dialog_rows(lines: usize) -> usize {
     (lines * 100).div_ceil(TEXT_ROWS_PERCENT).max(18)
 }
 
-fn dialog_snapshot(prompt: &UpgradeDialogPrompt) -> TerminalSnapshot {
-    let lines = dialog_lines(prompt);
+fn dialog_snapshot(
+    prompt: &UpgradeDialogPrompt,
+    shortcut: Option<DialogShortcut>,
+) -> TerminalSnapshot {
+    let lines = dialog_lines(prompt, shortcut);
     let rows = dialog_rows(lines.len());
     static_dialog_snapshot(
         lines,
@@ -252,13 +267,14 @@ fn dialog_snapshot(prompt: &UpgradeDialogPrompt) -> TerminalSnapshot {
 fn dialog_window_options(
     prompt: &UpgradeDialogPrompt,
     decision: std_mpsc::Sender<bool>,
+    shortcut: Option<DialogShortcut>,
 ) -> WindowOptions {
-    let snapshot = dialog_snapshot(prompt);
+    let snapshot = dialog_snapshot(prompt, shortcut);
     let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
     let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
     WindowOptions {
         snapshot: Some(snapshot),
-        trusted_consent: Some(TrustedConsentUi::upgrade(decision)),
+        trusted_consent: Some(TrustedConsentUi::upgrade(decision).with_shortcut(shortcut)),
         initial_columns: columns,
         initial_rows: rows,
         ..WindowOptions::default()
@@ -275,12 +291,14 @@ fn dialog_window_options(
 /// prompt, which covers a parent that died before the signal was set. The
 /// signal follows the thread that spawned the child, the runtime thread that
 /// drives the command for as long as the process lives.
-pub(in crate::app) fn run_upgrade_dialog_client() -> Result<()> {
-    run_dialog_client::<UpgradeDialogPrompt>()
+pub(in crate::app) fn run_upgrade_dialog_client(shortcut: Option<DialogShortcut>) -> Result<()> {
+    run_dialog_client::<UpgradeDialogPrompt>(shortcut)
 }
 
 /// The body of every trusted dialog child: see [`run_upgrade_dialog_client`].
-pub(in crate::app) fn run_dialog_client<P: DialogPrompt>() -> Result<()> {
+pub(in crate::app) fn run_dialog_client<P: DialogPrompt>(
+    shortcut: Option<DialogShortcut>,
+) -> Result<()> {
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
         .context("tie the dialog to its command")?;
     let prompt: P =
@@ -290,16 +308,19 @@ pub(in crate::app) fn run_dialog_client<P: DialogPrompt>() -> Result<()> {
         bail!("the command that asked has exited");
     }
     let (decision, receiver) = std_mpsc::channel();
-    run_window(prompt.window_options(decision))?;
+    let registration = run_trusted_dialog_window(prompt.window_options(decision, shortcut))?;
     let proceed = receiver.try_recv().unwrap_or(false);
-    write_private_frame_bounded(
+    let written = write_private_frame_bounded(
         &mut io::stdout().lock(),
         &DialogReply {
             capability: prompt.capability().to_vec(),
             proceed,
         },
         MAX_UPGRADE_DIALOG_FRAME_BYTES,
-    )
+    );
+    // The answer goes first; the shortcut registration ends after it.
+    registration.finish();
+    written
 }
 
 /// Whether `parent` (from `getppid`) is the command that sent the prompt.
@@ -310,42 +331,120 @@ fn is_parent(expected: u32, parent: Option<rustix::process::Pid>) -> bool {
 
 /// Kills and reaps the dialog child unless it already answered, so an
 /// abandoned question (the daemon ended the attempt, or the deadline passed)
-/// never leaves a dialog on screen.
-struct DialogChild(Option<Child>);
+/// never leaves a dialog on screen. Once the child is reaped, by any path,
+/// its dialog shortcut registration is removed, so a killed dialog leaves no
+/// Hyprland binding behind (`splinterd::dialog_shortcut`).
+struct DialogChild<H: Hyprctl = SystemHyprctl> {
+    child: Option<Child>,
+    /// Dropped only after `child` is reaped.
+    shortcut: Option<DialogShortcutLease<H>>,
+}
 
 impl DialogChild {
+    fn new(child: Child) -> Self {
+        asking().push(child.id());
+        let shortcut = DialogShortcutLease::for_child(child.id());
+        Self {
+            child: Some(child),
+            shortcut: Some(shortcut),
+        }
+    }
+}
+
+impl<H: Hyprctl + Send + 'static> DialogChild<H> {
     /// Hands a child that has answered to a detached thread, which gives it
     /// a moment to exit and then reaps it, so the answer reaches the daemon
     /// without waiting on the child.
     fn finish(mut self) {
-        let Some(mut child) = self.0.take() else {
+        let Some(mut child) = self.child.take() else {
             return;
         };
+        let shortcut = self.shortcut.take();
         // Without a thread the child still exits on its own after replying,
-        // and init reaps it once this process exits.
+        // and init reaps it once this process exits; it removes its own
+        // shortcut registration as it exits.
         let _ = std::thread::Builder::new()
             .name("upgrade-dialog-reaper".to_owned())
             .spawn(move || {
                 let started = Instant::now();
+                let mut reaped = false;
                 while started.elapsed() < Duration::from_secs(2) {
                     if matches!(child.try_wait(), Ok(Some(_))) {
-                        return;
+                        reaped = true;
+                        break;
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                let _ = child.kill();
-                let _ = child.wait();
+                if !reaped {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                if let Some(shortcut) = shortcut {
+                    stop_asking(shortcut.pid());
+                    drop(shortcut);
+                }
             });
     }
 }
 
-impl Drop for DialogChild {
+impl<H: Hyprctl> Drop for DialogChild<H> {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        if let Some(shortcut) = self.shortcut.take() {
+            stop_asking(shortcut.pid());
+            drop(shortcut);
+        }
     }
+}
+
+/// Dialog children this command is asking now, by PID, so a termination
+/// signal can remove their dialog shortcut entries before the command exits.
+static ASKING: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn asking() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    ASKING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Forgets a dialog child once its entry is being removed by its lease.
+fn stop_asking(pid: u32) {
+    asking().retain(|asked| *asked != pid);
+}
+
+/// Ctrl+C or `SIGTERM` would otherwise end this command before a dialog
+/// child's guard runs: the dialog dies with it (`PR_SET_PDEATHSIG`) and its
+/// dialog shortcut entry stays behind. From the first dialog on, for the
+/// rest of the process, either signal first removes the entries of the
+/// dialogs being asked and then exits as the signal would (128 + signal).
+fn install_dialog_signal_cleanup() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::signal::unix::{SignalKind, signal};
+
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mut terminate = signal(SignalKind::terminate()).ok();
+    let mut interrupt = signal(SignalKind::interrupt()).ok();
+    if terminate.is_none() && interrupt.is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        let signal_number = tokio::select! {
+            Some(()) = async { terminate.as_mut()?.recv().await } => libc::SIGTERM,
+            Some(()) = async { interrupt.as_mut()?.recv().await } => libc::SIGINT,
+            else => return,
+        };
+        let pids = asking().clone();
+        for pid in pids {
+            splinterd::dialog_shortcut::unregister_with(&SystemHyprctl, pid);
+        }
+        std::process::exit(128 + signal_number);
+    });
 }
 
 /// A fresh random capability for one dialog prompt.
@@ -390,6 +489,7 @@ pub(in crate::app) async fn ask_dialog_child<P: DialogPrompt>(
     budget: Duration,
 ) -> Result<bool> {
     request.validate()?;
+    install_dialog_signal_cleanup();
     let capability = request.capability().to_vec();
     let (mut parent, child) = UnixStream::pair().context("create private dialog socket")?;
     let child_read = child
@@ -402,7 +502,7 @@ pub(in crate::app) async fn ask_dialog_child<P: DialogPrompt>(
         .stderr(Stdio::null())
         .spawn()
         .context("launch the dialog")?;
-    let guard = DialogChild(Some(process));
+    let guard = DialogChild::new(process);
     let reply = tokio::task::spawn_blocking(move || -> Result<DialogReply> {
         parent.set_write_timeout(Some(budget))?;
         parent.set_read_timeout(Some(budget))?;
@@ -450,6 +550,96 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the dialog takes the configured setting, which can be off"
+    )]
+    fn shortcut() -> Option<DialogShortcut> {
+        Some(DialogShortcut::default())
+    }
+
+    /// A `hyprctl` that records each call and whether `pid` was still an
+    /// unreaped `sleep` child when it came.
+    #[derive(Clone)]
+    struct RecordingHyprctl {
+        pid: u32,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+    }
+
+    impl RecordingHyprctl {
+        fn new(pid: u32) -> Self {
+            Self {
+                pid,
+                calls: std::sync::Arc::default(),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, bool)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Hyprctl for RecordingHyprctl {
+        fn run(&self, arguments: &[&str]) -> Option<String> {
+            let child_present = std::fs::read_to_string(format!("/proc/{}/stat", self.pid))
+                .is_ok_and(|stat| stat.contains("(sleep)"));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((arguments.join(" "), child_present));
+            None
+        }
+    }
+
+    /// A `sleep 30` child guarded as a dialog, with its recorder and PID.
+    fn sleeping_child() -> (DialogChild<RecordingHyprctl>, RecordingHyprctl, u32) {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let recorder = RecordingHyprctl::new(pid);
+        let shortcut = DialogShortcutLease::new(recorder.clone(), child.id());
+        (
+            DialogChild {
+                child: Some(child),
+                shortcut: Some(shortcut),
+            },
+            recorder,
+            pid,
+        )
+    }
+
+    fn unregistered_after_reaping(pid: u32) -> Vec<(String, bool)> {
+        vec![(
+            format!(
+                "eval {}",
+                splinterd::dialog_shortcut::unregister_script(Some(pid))
+            ),
+            false,
+        )]
+    }
+
+    #[test]
+    fn the_dialog_names_its_shortcut_and_engages_by_it() {
+        let dialog = prompt(vec![window(5, 0, 0)]);
+        let lines = dialog_lines(&dialog, shortcut());
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("Click inside this dialog or press Ctrl+Alt+G first to answer with the keyboard.")
+        );
+        assert_eq!(
+            dialog_lines(&dialog, None).last().map(String::as_str),
+            Some("Click inside this dialog first to answer with the keyboard.")
+        );
+        let (decision, _receiver) = std_mpsc::channel();
+        let options = dialog_window_options(&dialog, decision, shortcut());
+        assert_eq!(
+            options
+                .trusted_consent
+                .as_ref()
+                .and_then(TrustedConsentUi::shortcut),
+            shortcut()
+        );
+    }
+
     #[test]
     fn short_dojo_lists_are_shown_in_full() {
         let mut short = window(4242, 2, 4);
@@ -484,7 +674,7 @@ mod tests {
     fn the_largest_prompt_fits_the_bounded_dialog_with_a_count_and_the_actions() {
         let windows = (1..=64).map(|pid| window(pid, 32, 128)).collect::<Vec<_>>();
         let dialog = prompt(windows);
-        let lines = dialog_lines(&dialog);
+        let lines = dialog_lines(&dialog, shortcut());
         let listed = lines
             .iter()
             .filter(|line| line.starts_with("  • PID "))
@@ -514,7 +704,7 @@ mod tests {
         );
         assert!(lines.iter().all(|line| line.len() <= MAX_DIALOG_COLUMNS));
         let (decision, _receiver) = std_mpsc::channel();
-        let options = dialog_window_options(&dialog, decision);
+        let options = dialog_window_options(&dialog, decision, shortcut());
         let snapshot = options.snapshot.as_ref().unwrap();
         assert!(snapshot.rows <= MAX_DIALOG_ROWS, "{}", snapshot.rows);
         // The grid shows the whole snapshot, and the text ends above the
@@ -532,7 +722,7 @@ mod tests {
         let windows = (1..=u32::try_from(MAX_LISTED_WINDOWS).unwrap())
             .map(|pid| window(pid, 32, 128))
             .collect::<Vec<_>>();
-        let lines = dialog_lines(&prompt(windows));
+        let lines = dialog_lines(&prompt(windows), shortcut());
         assert_eq!(
             lines
                 .iter()
@@ -542,7 +732,7 @@ mod tests {
         );
         assert!(!lines.iter().any(|line| line.contains("more Windows")));
         assert!(dialog_rows(lines.len()) <= MAX_DIALOG_ROWS);
-        let single = dialog_lines(&prompt(vec![window(5, 0, 0)]));
+        let single = dialog_lines(&prompt(vec![window(5, 0, 0)]), shortcut());
         assert!(
             single[2].contains("1 Window cannot take part"),
             "{}",
@@ -552,7 +742,7 @@ mod tests {
 
     #[test]
     fn the_dialog_says_what_proceeding_does_and_how_to_answer() {
-        let text = dialog_lines(&prompt(vec![window(5, 0, 0)])).join("\n");
+        let text = dialog_lines(&prompt(vec![window(5, 0, 0)]), shortcut()).join("\n");
         assert!(text.contains("PID 5 — did not answer in time — Dojos: none named"));
         assert!(text.contains("Proceeding closes these Windows"));
         assert!(text.contains("terminals keep running"));
@@ -584,9 +774,10 @@ mod tests {
 
     #[test]
     fn a_dropped_question_kills_and_reaps_its_dialog() {
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
-        let pid = child.id();
-        drop(DialogChild(Some(child)));
+        let (guard, recorder, pid) = sleeping_child();
+        drop(guard);
+        // The shortcut registration went once, after the child was reaped.
+        assert_eq!(recorder.calls(), unregistered_after_reaping(pid));
         // Reaped: the pid no longer names our child.
         assert!(
             !std::path::Path::new(&format!("/proc/{pid}/stat")).exists()
@@ -595,13 +786,28 @@ mod tests {
         );
     }
 
+    /// A termination signal removes the entries of the dialogs being asked,
+    /// and only of those.
+    #[test]
+    fn a_dialog_is_listed_for_signal_cleanup_until_it_is_reaped() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let guard = DialogChild::new(child);
+        assert!(asking().contains(&pid));
+        drop(guard);
+        assert!(!asking().contains(&pid));
+    }
+
     #[test]
     fn finishing_an_answered_dialog_never_blocks_the_caller() {
         // A child that lingers after answering is reaped in the background.
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
-        let pid = child.id();
+        let (guard, recorder, pid) = sleeping_child();
         let started = Instant::now();
-        DialogChild(Some(child)).finish();
+        guard.finish();
+        assert!(
+            recorder.calls().is_empty(),
+            "the registration stays until the child is reaped"
+        );
         assert!(started.elapsed() < Duration::from_millis(500));
         // The reaper kills it after its grace period.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -615,6 +821,11 @@ mod tests {
             !std::fs::read_to_string(format!("/proc/{pid}/stat"))
                 .is_ok_and(|stat| stat.contains("(sleep)"))
         );
+        // The reaper removes the shortcut registration after reaping.
+        while Instant::now() < deadline && recorder.calls().is_empty() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(recorder.calls(), unregistered_after_reaping(pid));
     }
 
     #[test]

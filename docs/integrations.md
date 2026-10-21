@@ -31,8 +31,9 @@ The lifecycle manages three independently verified components:
    appear; and
 3. the guarded Omarchy screensaver adapter described below.
 
-Trusted dialogs ignore every key until you click inside them, with or without
-this module; the module also keeps them from taking focus at all. A module that
+Trusted dialogs ignore every key until you click inside them or press the
+dialog shortcut, Ctrl+Alt+G, while they have focus, with or without this
+module; the module also keeps them from taking focus at all. A module that
 an earlier release wrote has only the terminal tag. Status then reports
 `Dialog focus missing`, and running `splinterm integration omarchy enable`
 again upgrades it in place. With a terminal tag rule of your own instead of the
@@ -60,6 +61,41 @@ splinterm integration omarchy disable
 
 Package installation never runs this command automatically. It remains a
 separate, explicit user action.
+
+### Reaching a waiting dialog from the keyboard
+
+With the trusted dialog rule above in place, from the module or your own file,
+a waiting dialog has no keyboard focus, so Splinterm also makes the dialog
+shortcut work from any Window. When a trusted dialog appears, it runs
+`hyprctl eval` in the background to enable a binding of Ctrl+Alt+G (or the
+chord in [`[integration] dialog-shortcut`](configuration.md#supported-keys))
+in Hyprland's running Lua state, creating it the first time with the
+description `Splinterm: focus the waiting trusted dialog`. The binding only
+focuses the waiting dialog, matched by its process ID and the trusted dialog
+app ID, and lets the chord through to it, so the dialog engages as if clicked
+and then arms; the chord never answers. Nothing is written to your Hyprland
+files.
+
+- The binding is enabled only while a dialog waits. The dialog removes its
+  entry once it has answered, and the process that started it removes the
+  entry again after reaping it, so a killed or crashed dialog leaves nothing
+  behind; `splinterm upgrade` and the desktop launcher also remove their
+  dialogs' entries when they are interrupted or terminated. Each new dialog
+  drops entries whose process is gone. With the last entry the binding is
+  disabled, not removed: removing a Hyprland binding removes every binding
+  of the same chord. `hyprctl reload` clears it with the rest of the runtime
+  state.
+- `hyprctl binds` therefore keeps listing Splinterm's binding after the first
+  dialog, enabled or not. A disabled binding does nothing, and while no
+  listed dialog has a Window on screen even an enabled one focuses nothing
+  and the chord reaches the focused application unchanged.
+- When your configuration already binds the chord, in any submap, Splinterm
+  enables nothing and your binding keeps working. Splinterm checks
+  `hyprctl -j binds` for a binding with the same modifiers and key; a binding
+  written by keycode (`code:42`) is not recognized, so choose another chord
+  if you bind it that way.
+- Set `dialog-shortcut=none` to turn the shortcut off; dialogs then engage only
+  by a click.
 
 ### Why the terminal tag matters
 

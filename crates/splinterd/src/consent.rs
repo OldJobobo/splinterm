@@ -1597,6 +1597,13 @@ fn prompt_blocking(
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("launch trusted consent client {}", executable.display()))?;
+    // Every path below reaps the client before it returns, and only then
+    // does this drop: it removes the dialog shortcut entry the client
+    // registered, even when the client was killed (`dialog_shortcut`), on a
+    // detached thread so the decision never waits for Hyprland.
+    let _shortcut = ReapedDialogShortcut(Some(
+        splinterd::dialog_shortcut::DialogShortcutLease::for_child(process.id()),
+    ));
     if !cancel.register(process.id()) {
         let _ = process.kill();
         let _ = process.wait();
@@ -1623,6 +1630,18 @@ fn prompt_blocking(
         bail!("consent client chose a duration the prompt did not offer");
     }
     Ok(reply.decision)
+}
+
+/// Releases a reaped consent client's dialog shortcut entry in the
+/// background when dropped.
+struct ReapedDialogShortcut(Option<splinterd::dialog_shortcut::DialogShortcutLease>);
+
+impl Drop for ReapedDialogShortcut {
+    fn drop(&mut self) {
+        if let Some(lease) = self.0.take() {
+            lease.release_in_background();
+        }
+    }
 }
 
 pub fn read_bounded<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {

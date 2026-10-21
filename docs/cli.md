@@ -214,9 +214,10 @@ picker (`splinterm dojos`). Input stays paused in every Window until the answer.
   "Splinterm — Upgrade", in the style of the access consent dialog, asks
   instead. `D`, `Escape`, `Enter`, or the red left area cancels; only `G` or the
   green right area proceeds. The dialog appears without taking keyboard focus,
-  and its keys stay inert until you click inside it; keys and the proceed click
-  count only about 600 ms after that click, and held or repeating keys never
-  count, so typing meant for another Window cannot answer it. Closing the dialog or not
+  and its keys stay inert until you click inside it or press Ctrl+Alt+G (see
+  [Trusted dialogs](usage.md#trusted-dialogs)); keys and the proceed click
+  count only about 600 ms after that, and held or repeating keys never count,
+  so typing meant for another Window cannot answer it. Closing the dialog or not
   answering cancels. If the list of Windows is too long for the dialog, the last
   line counts the rest. Without a graphical session either, the upgrade is
   cancelled.
@@ -269,8 +270,8 @@ daemon's build identity with the installed client's:
   **Restart now (ends N shells)**, with the daemon's exact count; for a daemon
   it cannot read, "ends about N shells" from a best-effort count of running
   workload units, or "all running shells". The dialog takes no keyboard focus;
-  keys count only about 600 ms after a click inside it, and key repeats never
-  count. When the daemon reports that nothing
+  keys count only about 600 ms after a click inside it or Ctrl+Alt+G, and key
+  repeats never count. When the daemon reports that nothing
   blocks a live upgrade, the dialog says to choose **Not now** and run
   `splinterm upgrade`;
 - a daemon it cannot read whose executable is the installed `splinterd` is

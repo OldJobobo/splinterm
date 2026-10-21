@@ -398,10 +398,13 @@ identifies an agent by host name, basename, or a copied digest.
 The prompt is deliberate by default:
 
 - It appears without taking keyboard focus, so typing meant for another
-  Window never reaches it. Click it when you get to it: its keyboard stays
-  inert until you click inside it, even if your desktop gives it focus. Under
-  Omarchy, the Hyprland module that `splinterm integration omarchy enable`
-  installs maps it without focus; see [Integrations](integrations.md).
+  Window never reaches it. Click it when you get to it, or press Ctrl+Alt+G:
+  its keyboard stays inert until you do, even if your desktop gives it focus,
+  and Ctrl+Alt+G itself never answers. Under Omarchy, the Hyprland module that
+  `splinterm integration omarchy enable` installs maps it without focus, and
+  Ctrl+Alt+G then reaches it from any Window while it waits; see
+  [Trusted dialogs](usage.md#trusted-dialogs) and
+  [Integrations](integrations.md).
 - Enter, Escape, and `D` deny. Only `G` or a click on the grant area grants.
   Earlier releases granted on Enter; this one does not.
 - Input is ignored for a short moment after your click, each time the prompt

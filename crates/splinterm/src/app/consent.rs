@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use splinterd::dialog_shortcut::{BackgroundRegistration, DialogShortcut};
 use splinterm::{AccessConsentView, TrustedConsentUi, WindowOptions, run_window};
 use splinterm_protocol::{
     AccessLevel, ActiveScreen, CellAttributes, ColorSource, ConsentDecision, ConsentPrompt,
@@ -292,7 +293,11 @@ fn chosen_lines(prompt: &ConsentPrompt, selected: usize, workspace: &str) -> Cho
 /// selection has the same lines in the same places, so choosing a duration
 /// never moves the rows the pointer selects. No line is wider than
 /// [`PROMPT_LINE_CHARS`].
-fn consent_layout(prompt: &ConsentPrompt, selected: usize) -> ConsentLayout {
+fn consent_layout(
+    prompt: &ConsentPrompt,
+    selected: usize,
+    shortcut: Option<DialogShortcut>,
+) -> ConsentLayout {
     let workspace = workspace_label(&prompt.target);
     let mut lines = vec!["TRUSTED SPLINTERM ACCESS REQUEST".to_owned(), String::new()];
     if let Some(name) = &prompt.agent_name {
@@ -373,7 +378,7 @@ fn consent_layout(prompt: &ConsentPrompt, selected: usize) -> ConsentLayout {
     lines.extend([
         "G or the green area (right) grants. Enter, Escape, D, or the red area (left) deny."
             .to_owned(),
-        "Click inside this prompt first to answer with the keyboard.".to_owned(),
+        keyboard_hint("prompt", shortcut),
     ]);
     ConsentLayout {
         lines,
@@ -388,8 +393,12 @@ const CONSENT_TEXT_ROWS_PERCENT: usize = 72;
 /// Renders the prompt for each selection at one fixed size: as wide as its
 /// widest selection and tall enough that the text stays above the action
 /// areas.
-fn consent_renderer(prompt: ConsentPrompt) -> splinterm::AccessConsentRenderer {
-    let layouts = || (0..prompt.durations.len()).map(|selected| consent_layout(&prompt, selected));
+fn consent_renderer(
+    prompt: ConsentPrompt,
+    shortcut: Option<DialogShortcut>,
+) -> splinterm::AccessConsentRenderer {
+    let layouts =
+        || (0..prompt.durations.len()).map(|selected| consent_layout(&prompt, selected, shortcut));
     let width = layouts()
         .flat_map(|layout| layout.lines.into_iter().map(|line| line.len()))
         .max()
@@ -405,7 +414,7 @@ fn consent_renderer(prompt: ConsentPrompt) -> splinterm::AccessConsentRenderer {
         ConsentTarget::Lair { .. } => splinterm_core::SplintId::new(),
     };
     Box::new(move |selected| {
-        let mut layout = consent_layout(&prompt, selected);
+        let mut layout = consent_layout(&prompt, selected, shortcut);
         // Every selection is drawn as wide as the widest one.
         let title = &mut layout.lines[0];
         let padding = width.saturating_sub(title.len());
@@ -537,7 +546,51 @@ fn consent_snapshot(
     )
 }
 
-pub(in crate::app) fn run_consent_client() -> Result<()> {
+/// The line that tells the person how to engage a trusted dialog's keyboard:
+/// a click inside, or the dialog shortcut when it is on.
+pub(in crate::app) fn keyboard_hint(noun: &str, shortcut: Option<DialogShortcut>) -> String {
+    shortcut.map_or_else(
+        || format!("Click inside this {noun} first to answer with the keyboard."),
+        |shortcut| {
+            format!(
+                "Click inside this {noun} or press {} first to answer with the keyboard.",
+                shortcut.label()
+            )
+        },
+    )
+}
+
+/// Shows a trusted dialog Window and returns once it closes.
+///
+/// When Hyprland maps trusted dialogs without keyboard focus (the Omarchy
+/// integration's module, or the same rule in the person's own file), the
+/// dialog shortcut is also registered with Hyprland, in the background while
+/// the Window maps, so it reaches the dialog from any Window
+/// (`splinterd::dialog_shortcut`). The caller writes its answer first and
+/// then finishes the returned registration; the process that reaps this one
+/// removes it again. Otherwise the shortcut works only inside the dialog
+/// once it has focus.
+pub(in crate::app) fn run_trusted_dialog_window(
+    options: WindowOptions,
+) -> Result<BackgroundRegistration> {
+    let shortcut = options
+        .trusted_consent
+        .as_ref()
+        .and_then(TrustedConsentUi::shortcut)
+        .filter(|_| global_dialog_shortcut());
+    let registration = BackgroundRegistration::start(shortcut);
+    run_window(options)?;
+    Ok(registration)
+}
+
+/// Whether trusted dialogs map without keyboard focus here, so they need the
+/// Hyprland binding to be reached from the keyboard. Only reads files.
+fn global_dialog_shortcut() -> bool {
+    super::omarchy_integration::Roots::from_env()
+        .is_ok_and(|roots| super::omarchy_integration::dialog_focus_ready(&roots))
+}
+
+pub(in crate::app) fn run_consent_client(shortcut: Option<DialogShortcut>) -> Result<()> {
     let prompt: ConsentPrompt = read_private_frame(&mut io::stdin().lock())?;
     if let Err(reason) = prompt.validate() {
         bail!("invalid trusted consent prompt: {reason}");
@@ -550,10 +603,11 @@ pub(in crate::app) fn run_consent_client() -> Result<()> {
         .collect();
     let (decision, receiver) = std_mpsc::channel();
     let (trusted_consent, snapshot) =
-        TrustedConsentUi::access_consent(decision, durations, consent_renderer(prompt));
+        TrustedConsentUi::access_consent(decision, durations, consent_renderer(prompt, shortcut));
+    let trusted_consent = trusted_consent.with_shortcut(shortcut);
     let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
     let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
-    run_window(WindowOptions {
+    let registration = run_trusted_dialog_window(WindowOptions {
         snapshot: Some(snapshot),
         trusted_consent: Some(trusted_consent),
         initial_columns: columns,
@@ -562,13 +616,16 @@ pub(in crate::app) fn run_consent_client() -> Result<()> {
     })?;
     // Closing the Window, or any way out without an answer, denies.
     let decision = receiver.try_recv().unwrap_or(ConsentDecision::Deny);
-    write_private_frame(
+    let written = write_private_frame(
         &mut io::stdout().lock(),
         &ConsentReply {
             capability,
             decision,
         },
-    )
+    );
+    // The answer goes first; the shortcut registration ends after it.
+    registration.finish();
+    written
 }
 
 #[cfg(test)]
@@ -578,10 +635,39 @@ mod tests {
         ConsentTarget, DurationWithheld, GrantDuration, MAX_CONSENT_PATH_CHARS,
     };
 
+    use splinterd::dialog_shortcut::DialogShortcut;
+
     use super::{
-        consent_layout, consent_renderer, grant_label, read_private_frame_bounded, trusted_label,
-        write_private_frame_bounded,
+        consent_layout, consent_renderer, grant_label, keyboard_hint, read_private_frame_bounded,
+        trusted_label, write_private_frame_bounded,
     };
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the layout takes the configured setting, which can be off"
+    )]
+    fn shortcut() -> Option<DialogShortcut> {
+        Some(DialogShortcut::default())
+    }
+
+    #[test]
+    fn the_keyboard_hint_names_the_dialog_shortcut_only_when_it_is_on() {
+        assert_eq!(
+            keyboard_hint("prompt", shortcut()),
+            "Click inside this prompt or press Ctrl+Alt+G first to answer with the keyboard."
+        );
+        assert_eq!(
+            keyboard_hint(
+                "dialog",
+                DialogShortcut::parse_setting("ctrl+alt+7").unwrap()
+            ),
+            "Click inside this dialog or press Ctrl+Alt+7 first to answer with the keyboard."
+        );
+        assert_eq!(
+            keyboard_hint("dialog", None),
+            "Click inside this dialog first to answer with the keyboard."
+        );
+    }
 
     fn offer(duration: GrantDuration, withheld: Option<DurationWithheld>) -> ConsentDurationOffer {
         ConsentDurationOffer {
@@ -640,7 +726,7 @@ mod tests {
         let ConsentTarget::Lair { lair_id, .. } = &prompt.target else {
             unreachable!()
         };
-        let text = consent_layout(&prompt, 0).lines.join("\n");
+        let text = consent_layout(&prompt, 0, shortcut()).lines.join("\n");
         assert!(text.contains("Agent (reported by the agent, not verified): Claude Code"));
         assert!(text.contains("Program: /usr/bin/splinterm-mcp"));
         let short_id: String = lair_id.to_string().chars().take(8).collect();
@@ -662,14 +748,14 @@ mod tests {
             level: Some(AccessLevel::Look),
             scopes: AccessLevel::Look.scopes().to_vec(),
         });
-        let text = consent_layout(&prompt, 2).lines.join("\n");
+        let text = consent_layout(&prompt, 2, shortcut()).lines.join("\n");
         assert!(text.contains("(•) Always for 'Workspace'"));
         assert!(text.contains("Grant: Always allow Manage for 'Workspace'"));
         assert!(text.contains("Any program that runs /usr/bin/splinterm-mcp shares this access."));
         assert!(
             text.contains("This replaces the earlier answer: Always allow Look for 'Workspace'.")
         );
-        let session = consent_layout(&prompt, 1).lines.join("\n");
+        let session = consent_layout(&prompt, 1, shortcut()).lines.join("\n");
         assert!(session.contains("Grant: Allow Manage while 'Workspace' is open"));
         assert!(!session.contains("replaces"));
     }
@@ -691,7 +777,7 @@ mod tests {
             ),
         ];
         assert_eq!(prompt.validate(), Ok(()));
-        let layout = consent_layout(&prompt, 0);
+        let layout = consent_layout(&prompt, 0, shortcut());
         let text = layout.lines.join("\n");
         assert!(text.contains("Access: Custom, exactly these scopes and nothing more"));
         assert!(text.contains("observe visible terminal, take over terminal control"));
@@ -755,10 +841,10 @@ mod tests {
             });
         }
         assert_eq!(prompt.validate(), Ok(()));
-        let render = consent_renderer(prompt.clone());
+        let render = consent_renderer(prompt.clone(), shortcut());
         for selected in 0..prompt.durations.len() {
             let view = render(selected);
-            let layout = consent_layout(&prompt, selected);
+            let layout = consent_layout(&prompt, selected, shortcut());
             for line in &layout.lines {
                 assert!(
                     line.chars().count() <= super::PROMPT_LINE_CHARS
@@ -782,7 +868,9 @@ mod tests {
             assert!(text.contains("Agent (reported by the agent, not verified): Agent name"));
             assert!(text.contains(&format!("{}…", "a".repeat(10))));
             assert!(text.contains(&format!("'{}…'", "n".repeat(59))));
-            assert!(text.contains("Click inside this prompt first to answer with the keyboard."));
+            assert!(text.contains(
+                "Click inside this prompt or press Ctrl+Alt+G first to answer with the keyboard."
+            ));
             // The rendered snapshot keeps every row of the text.
             assert!(layout.lines.len() <= view.snapshot.rows);
         }
@@ -791,7 +879,7 @@ mod tests {
     #[test]
     fn every_selection_renders_at_one_size_with_the_same_rows() {
         let prompt = manage_prompt();
-        let render = consent_renderer(prompt.clone());
+        let render = consent_renderer(prompt.clone(), shortcut());
         let views: Vec<_> = (0..prompt.durations.len()).map(&render).collect();
         for view in &views {
             assert_eq!(view.snapshot.columns, views[0].snapshot.columns);
@@ -800,7 +888,7 @@ mod tests {
             assert_eq!(view.duration_rows, views[0].duration_rows);
         }
         // The text stays above the action areas in the bottom 22%.
-        let last_text_row = consent_layout(&prompt, 2).lines.len();
+        let last_text_row = consent_layout(&prompt, 2, shortcut()).lines.len();
         assert!(last_text_row * 100 <= views[0].snapshot.rows * 72);
     }
 
@@ -811,7 +899,7 @@ mod tests {
             lair_id: splinterm_core::LairId::new(),
             lair_name: format!("{}\u{202e}", "w".repeat(60)),
         };
-        let text = consent_layout(&prompt, 2).lines.join("\n");
+        let text = consent_layout(&prompt, 2, shortcut()).lines.join("\n");
         assert!(text.contains(&format!("Always allow Manage for '{}…'", "w".repeat(59))));
         assert!(!text.contains('\u{202e}'));
     }

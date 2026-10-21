@@ -5,6 +5,7 @@ mod candidate_bootstrap;
 pub mod cgroup;
 #[doc(hidden)]
 pub mod dbus_worker;
+pub mod dialog_shortcut;
 pub mod executable_snapshot;
 pub mod handoff_adoption;
 pub mod handoff_checkpoint;
