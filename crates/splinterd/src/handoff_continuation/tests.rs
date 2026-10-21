@@ -1049,12 +1049,24 @@ fn tickets_are_compared_in_full_and_never_printed() {
     assert!(same_ticket(&ticket, &ticket));
     let first = random_ticket().unwrap();
     assert_ne!(first, random_ticket().unwrap());
-    let debug = format!(
-        "{:?} {:?}",
-        issued(ticket, (1, 2)),
-        presentation(&ticket, placeholder(0, 1, 1), 1)
-    );
-    assert!(!debug.contains("129"), "{debug}");
+    // Every other printed field is fixed: a random Splint ID or the test's
+    // own PID could otherwise spell a rendering of the ticket byte by chance.
+    let mut shown = presentation(&ticket, placeholder(0, 1, 1), 1);
+    shown.claimant_pid = 4242;
+    shown.claimant_start_time = Some(7);
+    shown.splint_id = "00000000-0000-4000-a000-000000000000".parse().unwrap();
+    let debug = format!("{:?} {shown:?}", issued(ticket, (3, 4)));
+    assert!(debug.contains(&shown.splint_id.to_string()), "{debug}");
+    let byte = ticket[0];
+    for rendering in [
+        format!("{byte}"),
+        format!("{byte:x}"),
+        format!("{byte:X}"),
+        format!("{byte:o}"),
+        format!("{byte:b}"),
+    ] {
+        assert!(!debug.contains(&rendering), "{rendering} in {debug}");
+    }
 }
 
 /// The kernel reports PID 0 for a sender outside the daemon's PID

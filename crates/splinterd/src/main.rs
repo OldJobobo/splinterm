@@ -17973,13 +17973,25 @@ mod tests {
         for runtime in runtimes {
             let _ = runtime.shutdown().await;
         }
-        time::timeout(Duration::from_secs(5), async {
+        await_retiring_reaped(state, "retiring runtimes were not reaped").await;
+    }
+
+    /// Waits until every retiring runtime is reaped. A retiring shell
+    /// normally exits on its hangup within milliseconds, but one hung up
+    /// just after it started occasionally survives it, and an interactive
+    /// shell ignores SIGTERM: only the SIGKILL after both graces reaps it,
+    /// about a minute later. The bound covers that whole escalation plus a margin
+    /// for a loaded host, so only a runtime the SIGKILL never reaps fails.
+    async fn await_retiring_reaped(state: &Arc<DaemonState>, failure: &str) {
+        let config = daemon_live_config(state, 0);
+        let escalation = config.exit_drain_timeout + config.hangup_grace + config.terminate_grace;
+        time::timeout(escalation + Duration::from_secs(15), async {
             while state.retiring.count() > 0 {
                 time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("retiring runtimes were not reaped");
+        .expect(failure);
     }
 
     async fn create_plain_transient_dojo(
@@ -18450,13 +18462,7 @@ mod tests {
                 .is_none()
         );
         // Retirement reaps in the background, outside the topology transaction.
-        time::timeout(Duration::from_secs(5), async {
-            while state.retiring.count() > 0 {
-                time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("retired transient runtime was not reaped");
+        await_retiring_reaped(&state, "retired transient runtime was not reaped").await;
         assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
     }
 
