@@ -208,6 +208,49 @@ fn a_trusted_dialog_child_reports_its_error_chain() {
     }
 }
 
+/// What a dialog child prints reaches its asker's log, so a configuration
+/// it cannot load never puts a value on its standard error: it names only
+/// the category. A value the loader only warns about stays off it too.
+#[test]
+fn a_trusted_dialog_child_never_formats_configuration_values() {
+    for dialog in ["consent", "upgrade-dialog", "restart-dialog"] {
+        for (contents, fails_to_load) in [
+            (
+                format!("[integration]\ndialog-shortcut={PANIC_SENTINEL}\n"),
+                true,
+            ),
+            (format!("[main]\nfont-pixelsize={PANIC_SENTINEL}\n"), true),
+            (format!("[font]\nsize={PANIC_SENTINEL}\n"), false),
+        ] {
+            let root = test_directory(dialog);
+            let config = root.join("invalid-config.ini");
+            fs::write(&config, &contents).unwrap();
+            let output = Command::new(env!("CARGO_BIN_EXE_splinterm"))
+                .arg(dialog)
+                .env("XDG_STATE_HOME", &root)
+                .env("SPLINTERM_CONFIG", &config)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{dialog}: {contents}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!stderr.contains(PANIC_SENTINEL), "{dialog}: {stderr}");
+            if fails_to_load {
+                assert_eq!(
+                    stderr.lines().last(),
+                    Some("splinterm graphical client failed: configuration could not be loaded"),
+                    "{dialog}: {contents}"
+                );
+            }
+            assert_eq!(summary(&root).unwrap().exit_class, Some(ExitClass::Unknown));
+            assert!(!retained_text(&root).contains(PANIC_SENTINEL));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
 #[test]
 fn graphical_pre_map_error_survives_null_stdio() {
     let root = test_directory("null-stdio-error");

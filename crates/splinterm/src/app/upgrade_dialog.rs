@@ -543,8 +543,13 @@ async fn ask_dialog_process<P: DialogPrompt>(
     let reply = match reply {
         Ok(reply) => reply,
         Err(error) => {
-            let status = guard.end();
-            let printed = stderr.finish(STDERR_TAIL_WAIT);
+            // Reaping and waiting for the pipe block, so not on a runtime
+            // worker. A failed task has dropped the guard, which still kills
+            // and reaps the child.
+            let (status, printed) =
+                tokio::task::spawn_blocking(move || (guard.end(), stderr.finish(STDERR_TAIL_WAIT)))
+                    .await
+                    .unwrap_or((None, None));
             return Err(child_failure(
                 "the dialog",
                 &error,

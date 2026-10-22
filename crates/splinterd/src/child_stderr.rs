@@ -38,6 +38,11 @@ impl StderrTail {
             return Self { tail: None };
         };
         let (sender, receiver) = mpsc::channel();
+        // The thread lives until the pipe reaches end-of-file: when the
+        // child and every descendant that inherited its standard error have
+        // exited. A descendant that keeps the pipe open keeps the thread,
+        // and its bounded buffer, until then; `finish` stops waiting at its
+        // bound, and the send to a dropped receiver is ignored.
         let spawned = thread::Builder::new()
             .name("dialog-stderr".to_owned())
             .spawn(move || {
@@ -114,7 +119,8 @@ pub fn read_tail(reader: &mut impl Read, maximum: usize) -> Vec<u8> {
 }
 
 /// `bytes` as one printable line: its non-blank lines, trimmed, joined by
-/// "; ", with every other control character replaced. `None` when blank.
+/// "; ", with every other [`unprintable`] character replaced. `None` when
+/// blank.
 #[must_use]
 pub fn one_line(bytes: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(bytes);
@@ -126,7 +132,7 @@ pub fn one_line(bytes: &[u8]) -> Option<String> {
         .join("; ")
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if unprintable(character) {
                 char::REPLACEMENT_CHARACTER
             } else {
                 character
@@ -134,6 +140,40 @@ pub fn one_line(bytes: &[u8]) -> Option<String> {
         })
         .collect::<String>();
     (!line.is_empty()).then_some(line)
+}
+
+/// Whether `character` could change how a log line reads rather than show
+/// as itself: a control character (`Cc`), a format character (`Cf`), which
+/// includes the bidirectional embeddings, overrides, isolates, and marks, the
+/// zero-width characters, and the byte order mark, or a line or paragraph
+/// separator.
+#[must_use]
+pub fn unprintable(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{00ad}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061c}'
+                | '\u{06dd}'
+                | '\u{070f}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08e2}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{110cd}'
+                | '\u{13430}'..='\u{1343f}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
+        )
 }
 
 #[cfg(test)]
@@ -187,6 +227,21 @@ mod tests {
             report(b"thread panicked\nnote: backtrace\n").as_deref(),
             Some("thread panicked; note: backtrace")
         );
+    }
+
+    #[test]
+    fn bidi_format_and_separator_characters_are_replaced() {
+        let replaced = "\u{202a}\u{202e}\u{2066}\u{2069}\u{200b}\u{200f}\u{2028}\u{2029}\u{061c}\u{feff}\u{00ad}\u{e0041}";
+        for character in replaced.chars() {
+            assert!(unprintable(character), "{:04x}", u32::from(character));
+            assert_eq!(
+                one_line(format!("bad{character}name").as_bytes()).as_deref(),
+                Some("bad\u{fffd}name")
+            );
+        }
+        for character in ['a', 'é', '—', '•', '…', '日', ' '] {
+            assert!(!unprintable(character), "{character}");
+        }
     }
 
     #[test]

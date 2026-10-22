@@ -70,14 +70,30 @@ use super::{
     upgrade_dialog::run_upgrade_dialog_client,
 };
 
-/// Set once this process runs a trusted dialog child: `consent`,
-/// `upgrade-dialog`, or `restart-dialog`.
+/// Set once this process runs a trusted dialog child (`consent`,
+/// `upgrade-dialog`, or `restart-dialog`) and has tried to load its
+/// configuration. A failed load reports only its category; later errors
+/// print their chain, and those never quote a configuration value except a
+/// font pattern that cannot be resolved.
 static DIALOG_CHILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether this process is a trusted dialog child, whose standard error is
 /// a private pipe to the command that asked (`splinterd::child_stderr`).
 pub(crate) fn is_dialog_child() -> bool {
     DIALOG_CHILD.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Loads the configuration. From then on a dialog child reports its error
+/// chain to its asker, which logs it (`main.rs`), so a dialog child's failed
+/// load names only its category: a configuration error can quote a raw
+/// value and its path, which must not reach the asker's journal.
+fn load_configuration(dialog_child: bool) -> Result<ConfigLoad> {
+    let load = load_default();
+    if !dialog_child {
+        return load;
+    }
+    DIALOG_CHILD.store(true, std::sync::atomic::Ordering::Release);
+    load.map_err(|_| anyhow::anyhow!("configuration could not be loaded"))
 }
 
 #[allow(
@@ -261,12 +277,10 @@ pub(crate) async fn run() -> Result<()> {
     }
 
     let graphical = graphical_command(&command);
-    if matches!(
+    let dialog_child = matches!(
         command,
         Command::Consent | Command::UpgradeDialog | Command::RestartDialog
-    ) {
-        DIALOG_CHILD.store(true, std::sync::atomic::Ordering::Release);
-    }
+    );
     if graphical {
         initialize_graphical()
             .map_err(|_| anyhow::anyhow!("graphical diagnostics initialization failed"))?
@@ -277,7 +291,7 @@ pub(crate) async fn run() -> Result<()> {
     let ConfigLoad {
         config,
         diagnostics,
-    } = load_default()?;
+    } = load_configuration(dialog_child)?;
     for diagnostic in diagnostics {
         if graphical {
             if let Some(client_diagnostics) = diagnostics_global() {
