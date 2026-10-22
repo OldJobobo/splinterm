@@ -9,8 +9,9 @@ use unicode_width::UnicodeWidthChar;
 use crate::frontend::{TAB_MENU_ACTIONS, tab_menu_descriptor};
 use crate::{
     frontend::{
-        BindingHelpUi, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteUi,
-        DojoPromptUi, TabContextMenuUi, TabMenuActionId, TerminationDecision, command_descriptor,
+        AgentAccessUi, BindingHelpUi, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS,
+        CommandPaletteUi, DojoPromptUi, TabContextMenuUi, TabMenuActionId, TerminationDecision,
+        command_descriptor,
     },
     geometry::Rect,
     keymap::ResolvedKeymap,
@@ -367,6 +368,20 @@ pub(crate) fn command_palette_hit_test(
         .map(|row| row.command)
 }
 
+/// The list index of the row under `point`, for a list body that is not
+/// the command catalog.
+#[must_use]
+pub(crate) fn command_palette_row_hit_test(
+    layout: &CommandPaletteLayout,
+    point: (f64, f64),
+) -> Option<usize> {
+    layout
+        .rows
+        .iter()
+        .position(|row| contains(row.rect, point))
+        .map(|offset| layout.visible_start.saturating_add(offset))
+}
+
 #[derive(Default)]
 pub(crate) struct CommandPaletteTextCache {
     scale_120: u32,
@@ -597,6 +612,24 @@ const fn palette_title(binding_help: bool) -> &'static str {
     }
 }
 
+/// What the palette's list shows: its commands, the key bindings, or the
+/// **Agent access** list (ADR 0014).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PaletteBody<'a> {
+    Commands,
+    BindingHelp(&'a BindingHelpUi),
+    AgentAccess(&'a AgentAccessUi),
+}
+
+/// One read-only list row: category, title, one-line form, and the text in
+/// the shortcut column.
+struct ListRowText<'a> {
+    category: &'a str,
+    title: &'a str,
+    compact: &'a str,
+    trailing: &'a str,
+}
+
 /// The header title slot, in buffer pixels: the 98 logical px the palette has
 /// always reserved, widened to fit a longer title and a gap before the query,
 /// but by no more than half of `available`, so the query keeps room.
@@ -621,7 +654,7 @@ pub(crate) fn paint_command_palette(
     keymap: &ResolvedKeymap,
     pressed: Option<BuiltInCommandId>,
     keyboard_focused: bool,
-    binding_help: Option<&BindingHelpUi>,
+    body: PaletteBody<'_>,
 ) -> Result<()> {
     blend_rect(
         canvas,
@@ -707,7 +740,12 @@ pub(crate) fn paint_command_palette(
 
     let header = buffer_rect(layout.header, scale_120);
     let inset = CONTENT_INSET.saturating_mul(scale_120).div_ceil(120);
-    let title = palette_title(binding_help.is_some());
+    let title = match body {
+        PaletteBody::AgentAccess(access) => access.heading(),
+        PaletteBody::BindingHelp(_) => palette_title(true).to_owned(),
+        PaletteBody::Commands => palette_title(false).to_owned(),
+    };
+    let title = title.as_str();
     let title_width = palette_title_width(
         cache
             .text(
@@ -749,9 +787,20 @@ pub(crate) fn paint_command_palette(
             .saturating_sub(title_width),
         height: header.height,
     };
-    let typed = binding_help.map_or_else(|| state.query(), |help| help.query());
+    let typed = match body {
+        PaletteBody::Commands => state.query(),
+        PaletteBody::BindingHelp(help) => help.query(),
+        PaletteBody::AgentAccess(access) => access.query(),
+    };
     let query_is_placeholder = typed.is_empty();
-    let query = if !query_is_placeholder {
+    let query = if query_is_placeholder {
+        match body {
+            PaletteBody::BindingHelp(_) => "> Search keybindings",
+            PaletteBody::AgentAccess(_) => "> Search agent access",
+            PaletteBody::Commands => "> Type a command",
+        }
+        .to_owned()
+    } else {
         editable_field_text(
             cache,
             context,
@@ -761,10 +810,6 @@ pub(crate) fn paint_command_palette(
             renderer_generation,
             query_clip.width,
         )?
-    } else if binding_help.is_some() {
-        "> Search keybindings".to_owned()
-    } else {
-        "> Type a command".to_owned()
     };
     paint_text(
         cache,
@@ -785,14 +830,17 @@ pub(crate) fn paint_command_palette(
         false,
     )?;
 
-    let empty_label = if binding_help.is_some_and(|help| help.rows().is_empty()) {
-        Some("No matching keybindings")
-    } else if binding_help.is_none() && state.filtered().is_empty() {
-        Some("No matching commands")
-    } else {
-        None
+    let empty_label = match body {
+        PaletteBody::BindingHelp(help) if help.rows().is_empty() => {
+            Some("No matching keybindings".to_owned())
+        }
+        PaletteBody::Commands if state.filtered().is_empty() => {
+            Some("No matching commands".to_owned())
+        }
+        PaletteBody::AgentAccess(access) => access.empty_label(),
+        _ => None,
     };
-    if let Some(empty_label) = empty_label {
+    if let Some(empty_label) = empty_label.as_deref() {
         let empty = buffer_rect(layout.list, scale_120);
         paint_text(
             cache,
@@ -813,14 +861,42 @@ pub(crate) fn paint_command_palette(
             false,
         )?;
     }
-    if let Some(help) = binding_help {
+    let list_rows: Option<(Vec<ListRowText<'_>>, usize)> = match body {
+        PaletteBody::BindingHelp(help) => Some((
+            help.rows()
+                .iter()
+                .map(|row| ListRowText {
+                    category: &row.source,
+                    title: &row.action,
+                    compact: &row.compact,
+                    trailing: &row.shortcut,
+                })
+                .collect(),
+            help.selected_index(),
+        )),
+        PaletteBody::AgentAccess(access) => Some((
+            access
+                .rows()
+                .iter()
+                .map(|row| ListRowText {
+                    category: row.category,
+                    title: &row.title,
+                    compact: &row.compact,
+                    trailing: &row.status,
+                })
+                .collect(),
+            access.selected_index(),
+        )),
+        PaletteBody::Commands => None,
+    };
+    if let Some((list_rows, selected_index)) = list_rows {
         for (offset, row) in layout.rows.iter().enumerate() {
             let index = layout.visible_start.saturating_add(offset);
-            let Some(help_row) = help.rows().get(index) else {
+            let Some(help_row) = list_rows.get(index) else {
                 continue;
             };
             let rect = buffer_rect(row.rect, scale_120);
-            let is_selected = index == help.selected_index();
+            let is_selected = index == selected_index;
             if is_selected {
                 fill_rect(
                     canvas,
@@ -854,7 +930,7 @@ pub(crate) fn paint_command_palette(
                     canvas,
                     width,
                     height,
-                    &help_row.source,
+                    help_row.category,
                     ChromeTextStyle::Regular,
                     scale_120,
                     renderer_generation,
@@ -874,9 +950,9 @@ pub(crate) fn paint_command_palette(
                 width,
                 height,
                 if layout.compact {
-                    &help_row.compact
+                    help_row.compact
                 } else {
-                    &help_row.action
+                    help_row.title
                 },
                 if is_selected {
                     ChromeTextStyle::Bold
@@ -896,7 +972,7 @@ pub(crate) fn paint_command_palette(
                     canvas,
                     width,
                     height,
-                    &help_row.shortcut,
+                    help_row.trailing,
                     ChromeTextStyle::Regular,
                     scale_120,
                     renderer_generation,
@@ -1036,7 +1112,10 @@ pub(crate) fn paint_command_palette(
                     canvas,
                     width,
                     height,
-                    descriptor.shortcut(keymap),
+                    state
+                        .badge(row.command)
+                        .as_deref()
+                        .unwrap_or_else(|| descriptor.shortcut(keymap)),
                     ChromeTextStyle::Regular,
                     scale_120,
                     renderer_generation,
@@ -1048,17 +1127,20 @@ pub(crate) fn paint_command_palette(
         }
     }
     let footer = buffer_rect(layout.footer, scale_120);
+    let footer_text = match body {
+        PaletteBody::BindingHelp(_) => {
+            "Type to search · ↑↓/Pg navigate · Ctrl+U clear · Esc clear/close".to_owned()
+        }
+        PaletteBody::AgentAccess(access) => access.footer(),
+        PaletteBody::Commands => "↑↓ navigate   Enter run   Esc close".to_owned(),
+    };
     paint_text(
         cache,
         context,
         canvas,
         width,
         height,
-        if binding_help.is_some() {
-            "Type to search · ↑↓/Pg navigate · Ctrl+U clear · Esc clear/close"
-        } else {
-            "↑↓ navigate   Enter run   Esc close"
-        },
+        &footer_text,
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
@@ -2571,7 +2653,8 @@ mod tests {
             viewport_detached: false,
             controller_active: false,
             forced_control_transfer: true,
-            grant_ids: Vec::new(),
+            revoke_all_available: false,
+            access_waiting: 0,
             pending_transfer_id: None,
             agent_status_incarnation: None,
         });
@@ -2602,7 +2685,7 @@ mod tests {
             &keymap,
             None,
             true,
-            None,
+            PaletteBody::Commands,
         )
         .unwrap();
         let shaped = cache.len();
@@ -2623,7 +2706,7 @@ mod tests {
             &keymap,
             None,
             true,
-            None,
+            PaletteBody::Commands,
         )
         .unwrap();
         assert_eq!(cache.len(), shaped);
@@ -2643,11 +2726,50 @@ mod tests {
             &keymap,
             None,
             true,
-            Some(&help),
+            PaletteBody::BindingHelp(&help),
         )
         .unwrap();
         assert!(cache.len() > shaped);
         assert!(cache.contains_source("> Search keybindings"));
+
+        // The access list paints its rows as words, never colour alone.
+        let lair_id = LairId::new();
+        let mut snapshot = crate::frontend::AccessSnapshot::new(
+            3,
+            splinterm_protocol::RememberedStoreStatus::Available,
+        );
+        snapshot.entries = vec![crate::frontend::agent_access_test_entry(lair_id)];
+        let access = AgentAccessUi::new(Some(&snapshot), None);
+        let access_layout = command_palette_layout(
+            content,
+            &vec![BuiltInCommandId::RecentSessions; access.rows().len()],
+            0,
+            0,
+        )
+        .unwrap();
+        paint_command_palette(
+            &mut cache,
+            &RenderContext::new(u16::MAX),
+            &mut canvas,
+            640,
+            400,
+            content,
+            120,
+            1,
+            &access_layout,
+            session_picker_palette(theme),
+            &state,
+            &keymap,
+            None,
+            true,
+            PaletteBody::AgentAccess(&access),
+        )
+        .unwrap();
+        assert!(cache.contains_source("> Search agent access"));
+        assert!(cache.contains_source("AGENT ACCESS"));
+        assert!(cache.contains_source("ALWAYS"));
+        assert!(cache.contains_source("not connected"));
+        assert!(cache.contains_source(&access.footer()));
 
         assert!(help.append_text("definitely absent xyz"));
         let empty_layout = command_palette_layout(content, &[], 0, 0).unwrap();
@@ -2666,7 +2788,7 @@ mod tests {
             &keymap,
             None,
             true,
-            Some(&help),
+            PaletteBody::BindingHelp(&help),
         )
         .unwrap();
         assert!(cache.contains_source("> definitely absent xyz_"));
@@ -2706,7 +2828,8 @@ mod tests {
             viewport_detached: false,
             controller_active: false,
             forced_control_transfer: true,
-            grant_ids: Vec::new(),
+            revoke_all_available: false,
+            access_waiting: 0,
             pending_transfer_id: None,
             agent_status_incarnation: None,
         });
@@ -2746,7 +2869,7 @@ mod tests {
             &ResolvedKeymap::default(),
             None,
             true,
-            None,
+            PaletteBody::Commands,
         )
         .unwrap();
         let panel = buffer_rect(layout.panel, 120);

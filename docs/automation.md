@@ -288,16 +288,12 @@ verification, and lifecycle guidance.
 
 ## Easy agent access
 
-> **Status:** partly implemented for 0.2. The contract is fixed by
+> **Status:** implemented for 0.2. The contract is fixed by
 > [ADR 0014](adr/0014-easy-agent-access.md). The access levels, the three
-> durations, remembered grants, the prompt, pending requests, the access
-> list with per-entry revoke and **Revoke all access** through
-> `splinterm access`, and one-step agent setup through `splinterm mcp setup`
-> work as described below. Still planned: **Agent access**
-> in the command palette, the Explorer marks, and the waiting indicator in
-> Windows. Until the palette uses the new list, its **Revoke all access** ends
-> the grants the Window shows and every pending request, and leaves
-> remembered grants in place; `splinterm access revoke --all` removes them.
+> durations, remembered grants, the prompt, pending requests, the access list
+> with per-entry revoke and **Revoke all access** through `splinterm access`
+> and the command palette, the Explorer marks, the waiting indicator, and
+> one-step agent setup through `splinterm mcp setup` work as described below.
 
 Easy agent access lets you give an agent access to one workspace (a Lair) in a
 single deliberate answer, choose how long that lasts, and see and revoke it
@@ -459,8 +455,19 @@ level or Custom scopes, when it was created, when an "Always" grant was last
 used, when a shorter one expires, and what it is doing now: the agent
 connections it authorizes and the control it holds. Pending requests are
 listed too, and so are policy rules that match a connected agent, marked as
-coming from the policy file and read-only here. **Agent access** in the command
-palette (planned) will show the same list.
+coming from the policy file and read-only here.
+
+**Agent access** in the command palette shows the same list in a Window. Each
+row starts with a word for its kind (ALWAYS, OPEN, ONCE, WAITING, or POLICY),
+names the agent, the access, and the workspace, and says whether the agent is
+connected now; the footer shows the selected entry's executable, how it is
+identified, its times, and what Enter does. Type to search. Enter on a
+just-this-once or while-open grant revokes it at once; on an "Always" grant
+it first asks, with Cancel selected. A pending request or a policy rule
+explains instead: answer the request in its prompt, or remove the rule from
+`policy.json`. Agent names and paths are shown escaped, as data. The list
+refreshes every few seconds, and a confirmation whose entry changed meanwhile
+is shown again on Cancel; one whose entry ended closes without revoking.
 
 Each entry has one ID:
 
@@ -496,8 +503,26 @@ It never touches policy rules or the trusted UI.
 
 Revoking a remembered grant does not remove a matching policy rule. When one
 exists, the list and the revoke result name the rule and tell you to edit
-`policy.json` to remove it. The Explorer marks (planned) will show workspaces
-an agent can reach and those it is connected to now.
+`policy.json` to remove it.
+
+**Revoke all access** in the command palette (and its shortcut) works the same
+way: it first shows the exact counts from a dry run, with Cancel selected.
+When you confirm, Splinterm counts again; if the numbers changed, nothing is
+revoked and you are shown the new numbers to confirm. A grant that arrives
+between that second count and the revoke is revoked too, and the result shows
+what was removed. A single-pane Window has no palette; there the shortcut
+still ends only the grants that Window shows and every pending request, so
+use `splinterm access revoke --all`.
+
+The Explorer marks, in words in each row's status, which reach an agent has:
+**Agent can reach** (a grant or matching policy rule covers it, but no agent
+it covers is connected) or **Agent connected** (one is connected or holds
+control now), on the workspace, or **…part** when only some of its Dojos or
+Splints are covered. **Agent asking for access** marks a workspace with a
+request waiting for your answer, and while any request waits the Window title
+ends with **AGENT ACCESS REQUEST WAITING** and **Agent access** in the palette
+shows how many wait. The prompt itself still never takes focus; click it or
+press the dialog shortcut when you get to it.
 
 The human command speaks as the installed trusted client, so it works only
 with the packaged `splinterm` next to the running daemon. The installed

@@ -1,6 +1,7 @@
 //! Platform-independent contracts shared by application orchestration and presentation adapters.
 
 mod action_menu;
+mod agent_access;
 mod agent_status;
 mod binding_help;
 mod lair_explorer;
@@ -21,6 +22,25 @@ pub(crate) use action_menu::{
 };
 #[cfg(test)]
 pub(crate) use action_menu::{TAB_MENU_ACTIONS, tab_menu_descriptor};
+pub(crate) use agent_access::{
+    AGENT_ACCESS_PAGE_ITEMS, AccessActivation, AccessMarks, AgentAccessUi, PromptReconcile,
+    RevokeAccessUi, waiting_title,
+};
+pub use agent_access::{
+    AccessSnapshot, MAX_WINDOW_ACCESS_ENTRIES, RevokeAllCheck, WindowAccessCommand,
+    WindowAccessUpdate, check_revoke_all, counts_are_empty, revoke_all_summary, shown,
+};
+/// An "Always" inventory entry for `lair_id`, for tests outside `frontend`.
+#[cfg(test)]
+pub(crate) fn agent_access_test_entry(
+    lair_id: splinterm_core::LairId,
+) -> splinterm_protocol::AccessEntry {
+    agent_access::tests::entry(
+        agent_access::tests::remembered_key(),
+        splinterm_protocol::AccessEntryKind::Remembered,
+        lair_id,
+    )
+}
 pub(crate) use agent_status::{AgentAggregate, AgentGlyphs, badged_tab_label};
 pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
 #[cfg(test)]

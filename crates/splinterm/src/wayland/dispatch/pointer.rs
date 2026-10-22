@@ -28,10 +28,12 @@ impl PointerHandler for App {
                 continue;
             }
             if modal_frame.owns_event(self.modal.input_modal_open()) {
-                picker_changed |= if self.modal.command_palette.is_some() {
-                    self.handle_command_palette_pointer(event, queue_handle)
-                } else if self.modal.dojo_prompt.is_some() {
+                // A prompt can stand above the palette (a revoke from the
+                // access list); the topmost layer takes the pointer.
+                picker_changed |= if self.modal.dojo_prompt.is_some() {
                     self.handle_dojo_prompt_pointer(event)
+                } else if self.modal.command_palette.is_some() {
+                    self.handle_command_palette_pointer(event, queue_handle)
                 } else if self.modal.tab_context_menu.is_some() {
                     self.handle_tab_context_menu_pointer(event)
                 } else {
