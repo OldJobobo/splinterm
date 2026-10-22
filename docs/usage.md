@@ -531,10 +531,12 @@ continuity, reusable templates, or cross-machine saved-layout synchronization.
 
 The daemon owns all running shells. Stopping it, installing a private-protocol-
 incompatible version, or resetting it ends those processes. A package upgrade
-also replaces the trusted client inode: close and reopen every existing
-Splinterm Window after replacement so it uses the exact client sibling adjacent
-to the running daemon. To back up and clear
-every session in one guarded workflow:
+also replaces the trusted client inode. A Window opened before the upgrade
+keeps working, including new tabs and panes, while it runs, until it is
+live-upgraded or reopened; new launches use the new install. A client that
+executes another program loses that trust, and a fresh launch must match the
+installed `splinterm` next to the running daemon. To back up and clear every
+session in one guarded workflow:
 
 ```bash
 splinterm reset
