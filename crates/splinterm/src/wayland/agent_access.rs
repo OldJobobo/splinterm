@@ -13,9 +13,11 @@ use super::{
 };
 use crate::frontend::{
     AGENT_ACCESS_PAGE_ITEMS, AccessActivation, AccessMarks, AccessSnapshot, AgentAccessUi,
-    PromptReconcile, RevokeAccessUi, WindowAccessCommand, WindowAccessUpdate, counts_are_empty,
+    PromptReconcile, RevokeAccessUi, RowClick, WindowAccessCommand, WindowAccessUpdate,
+    counts_are_empty,
 };
 use crate::renderer::command_palette_row_hit_test;
+use splinterm_protocol::AccessEntryKey;
 
 /// What this Window last heard about access.
 #[derive(Debug, Default)]
@@ -23,8 +25,8 @@ pub(super) struct WindowAccess {
     snapshot: Option<AccessSnapshot>,
     unavailable: Option<String>,
     waiting: u32,
-    /// The list row a pointer press began on.
-    pressed: Option<usize>,
+    /// The entry on the list row a pointer press began on.
+    pressed: Option<AccessEntryKey>,
 }
 
 impl WindowAccess {
@@ -39,6 +41,21 @@ impl WindowAccess {
         self.snapshot
             .as_ref()
             .is_none_or(AccessSnapshot::revoke_all_has_targets)
+    }
+
+    /// Keeps a fresh read; whether the waiting count changed.
+    fn record_snapshot(&mut self, snapshot: AccessSnapshot, waiting: u32) -> bool {
+        self.snapshot = Some(snapshot);
+        self.unavailable = None;
+        std::mem::replace(&mut self.waiting, waiting) != waiting
+    }
+
+    /// Forgets the last read: what it showed may no longer be true, so no
+    /// mark or waiting count outlives it. Whether the waiting count changed.
+    fn record_unavailable(&mut self, reason: String) -> bool {
+        self.snapshot = None;
+        self.unavailable = Some(reason);
+        std::mem::take(&mut self.waiting) != 0
     }
 }
 
@@ -101,12 +118,17 @@ impl App {
         match update {
             WindowAccessUpdate::Snapshot(snapshot) => self.apply_access_snapshot(snapshot),
             WindowAccessUpdate::Unavailable(reason) => {
+                let mut changed = self.explorer.set_access_marks(AccessMarks::default());
                 if let Some(list) = self.modal.agent_access.as_mut() {
                     list.set_unavailable(&reason);
                     self.refresh_command_palette();
+                    changed = true;
                 }
-                self.access.unavailable = Some(reason);
-                self.modal.agent_access.is_some()
+                if self.access.record_unavailable(reason) {
+                    self.refresh_waiting_title();
+                    changed = true;
+                }
+                changed
             }
             WindowAccessUpdate::RevokeAllCounts { counts, recounted } => {
                 let prompt = if counts_are_empty(counts) {
@@ -127,9 +149,10 @@ impl App {
                 message,
                 failed,
                 all,
+                entry,
             } => {
                 if !all && let Some(list) = self.modal.agent_access.as_mut() {
-                    list.finish_revoke(&message);
+                    list.finish_revoke(entry.as_ref(), &message);
                     self.refresh_command_palette();
                     return true;
                 }
@@ -154,6 +177,9 @@ impl App {
         let mut changed = self.explorer.set_access_marks(marks);
         if let Some(list) = self.modal.agent_access.as_mut() {
             list.apply_snapshot(&snapshot);
+            // Rows carry agent-chosen text: drop the shaped text of earlier
+            // reads so it cannot pile up while the list stays open.
+            self.modal.command_palette_text_cache.clear();
             self.refresh_command_palette();
             changed = true;
         }
@@ -169,7 +195,7 @@ impl App {
                 PromptReconcile::Gone => {
                     self.close_dojo_prompt();
                     if let Some(list) = self.modal.agent_access.as_mut() {
-                        list.set_notice(
+                        list.mark_selection_stale(
                             "That access ended before you confirmed; nothing was revoked",
                         );
                     }
@@ -177,18 +203,19 @@ impl App {
                 }
             }
         }
-        self.access.snapshot = Some(snapshot);
-        self.access.unavailable = None;
-        if self.access.waiting != waiting {
-            self.access.waiting = waiting;
-            // The waiting indicator is in the title, which a modal owns while
-            // it shows; it closes back to the terminal title.
-            if !self.modal.input_modal_open() && self.modal.trusted_consent.is_none() {
-                self.update_window_title();
-            }
+        if self.access.record_snapshot(snapshot, waiting) {
+            self.refresh_waiting_title();
             changed = true;
         }
         changed
+    }
+
+    /// The waiting indicator is in the title, which a modal owns while it
+    /// shows; closing the modal returns to the terminal title.
+    fn refresh_waiting_title(&mut self) {
+        if !self.modal.input_modal_open() && self.modal.trusted_consent.is_none() {
+            self.update_window_title();
+        }
     }
 
     /// Opens a revoke prompt above whatever palette is open, unless another
@@ -285,25 +312,34 @@ impl App {
                 if !inside_panel {
                     return self.close_command_palette();
                 }
-                self.access.pressed = target;
+                // The entry, not the row: a refresh between press and release
+                // can move another entry under the pointer.
+                self.access.pressed = target.and_then(|index| {
+                    self.modal
+                        .agent_access
+                        .as_ref()
+                        .and_then(|list| list.row_key(index).cloned())
+                });
                 false
             }
             PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
-                let Some(index) = self.access.pressed.take().filter(|_| target.is_some()) else {
+                let (Some(pressed), Some(index)) = (self.access.pressed.take(), target) else {
                     return false;
                 };
-                if Some(index) != target {
-                    return false;
-                }
                 let Some(list) = self.modal.agent_access.as_mut() else {
                     return false;
                 };
-                if list.select_index(index) {
-                    self.refresh_command_palette();
-                } else {
-                    self.activate_agent_access();
+                match list.release_click(&pressed, index) {
+                    RowClick::Ignored => false,
+                    RowClick::Selected => {
+                        self.refresh_command_palette();
+                        true
+                    }
+                    RowClick::Activate => {
+                        self.activate_agent_access();
+                        true
+                    }
                 }
-                true
             }
             PointerEventKind::Axis { vertical, .. } if !vertical.is_none() => {
                 let Some((direction, count)) = self.modal.session_picker_wheel.push(
@@ -361,5 +397,28 @@ mod tests {
         assert!(access_repeat_consumed(true, Keysym::KP_Enter));
         assert!(!access_repeat_consumed(true, Keysym::Down));
         assert!(!access_repeat_consumed(false, Keysym::Return));
+    }
+
+    #[test]
+    fn an_unavailable_inventory_forgets_the_last_read_and_its_waiting_count() {
+        let mut access = WindowAccess::default();
+        let snapshot = AccessSnapshot::new(1, RememberedStoreStatus::Available);
+        assert!(
+            access.record_snapshot(snapshot.clone(), 2),
+            "waiting changed"
+        );
+        assert!(!access.record_snapshot(snapshot.clone(), 2));
+        assert_eq!(access.waiting(), 2);
+        assert!(!access.revoke_all_available(), "the read showed nothing");
+        // Unavailable: no waiting indicator or mark outlives the read, and
+        // Revoke all stays offered because nothing is known any more.
+        assert!(access.record_unavailable("not authorized".into()));
+        assert_eq!(access.waiting(), 0);
+        assert!(access.snapshot.is_none());
+        assert_eq!(access.unavailable.as_deref(), Some("not authorized"));
+        assert!(access.revoke_all_available());
+        assert!(!access.record_unavailable("still not".into()));
+        assert!(!access.record_snapshot(snapshot, 0));
+        assert_eq!(access.unavailable, None);
     }
 }

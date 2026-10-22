@@ -247,8 +247,10 @@ impl WindowTopologyCommand {
             | Self::RequestLairExplorer { .. }
             | Self::RequestSelector { .. }
             | Self::ActivateTab { .. }
-            // Listing and revoking access only read or reduce authority,
-            // which a fenced daemon still serves.
+            // Listing and revoking access only read or reduce authority, so
+            // the Window never holds them for a pause. While the Window waits
+            // out a handoff, the topology manager abandons them like any
+            // other daemon request, and a revoke says nothing was revoked.
             | Self::Access(_) => false,
             Self::ExplorerContext { command, .. } => command.paused_during_handoff(),
             Self::OpenDojo { target, .. } => target.action != NavigationAction::ActivateDojo,

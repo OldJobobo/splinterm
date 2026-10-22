@@ -4981,8 +4981,8 @@ impl App {
             input_modal_open: self.modal.input_modal_open(),
             consent_or_picker_open: self.consent_or_picker_open(),
             explorer_focused: self.explorer.focused(),
-            binding_help: self.modal.binding_help.is_some(),
             // A prompt above the palette owns the keyboard.
+            binding_help: self.modal.binding_help.is_some() && self.modal.dojo_prompt.is_none(),
             command_palette: self.modal.command_palette.is_some()
                 && self.modal.dojo_prompt.is_none(),
             dojo_prompt_input: self
@@ -5000,8 +5000,9 @@ impl App {
         let consent_or_picker_open = self.consent_or_picker_open();
         let explorer_search = self.explorer.focused() && self.explorer.search_active();
         // The palette's field is the access list's search while it shows,
-        // and no field while a revoke prompt stands above it.
-        let palette_field = if self.modal.dojo_prompt.is_some() {
+        // and no field, nor binding help's, while a prompt stands above it.
+        let prompt_open = self.modal.dojo_prompt.is_some();
+        let palette_field = if prompt_open {
             None
         } else if let Some(access) = self.modal.agent_access.as_mut() {
             Some(access.editor_mut())
@@ -5017,6 +5018,7 @@ impl App {
             self.modal
                 .binding_help
                 .as_mut()
+                .filter(|_| !prompt_open)
                 .map(BindingHelpUi::editor_mut),
             palette_field,
             self.modal
@@ -6454,8 +6456,12 @@ impl App {
         self.modal.dojo_prompt_pressed = None;
         self.modal.dojo_prompt_text_cache.clear();
         if self.modal.command_palette.is_some() {
-            // A revoke prompt opened above the access list returns to it.
-            self.update_window_title();
+            // A revoke prompt opened above the palette returns to it.
+            if self.modal.agent_access.is_some() || self.modal.binding_help.is_some() {
+                self.update_window_title();
+            } else {
+                self.surface.window.set_title("Splinterm — Commands");
+            }
         } else {
             self.modal.command_palette_reconcile_pending = true;
         }

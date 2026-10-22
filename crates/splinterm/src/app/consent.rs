@@ -59,16 +59,10 @@ fn write_private_frame<T: serde::Serialize>(writer: &mut impl Write, value: &T) 
     write_private_frame_bounded(writer, value, MAX_CONSENT_FRAME_BYTES)
 }
 
+/// The one set of characters trusted UI never shows as is, shared with the
+/// **Agent access** list.
 fn unsafe_label_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{061c}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{2069}'
-                | '\u{feff}'
-        )
+    splinterm::frontend::unsafe_display_character(character)
 }
 
 /// At most `maximum` characters of `value`, with control and bidi-formatting

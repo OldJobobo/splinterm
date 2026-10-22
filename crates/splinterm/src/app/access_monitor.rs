@@ -37,6 +37,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const UNAVAILABLE_RETRY: Duration = Duration::from_secs(30);
 const MAX_PAGES: usize = MAX_WINDOW_ACCESS_ENTRIES / MAX_ACCESS_INVENTORY_PAGE as usize;
 const MAX_REASON_SCALARS: usize = 200;
+/// A revoke whose connection was lost after the request was sent.
+const UNCERTAIN: &str = "The connection to splinterd was lost; the revoke may not have completed. Check the list again.";
 
 #[derive(Debug, Default)]
 pub(super) struct AccessMonitor {
@@ -140,24 +142,19 @@ pub(super) fn abandoned_access_updates(
     let WindowTopologyCommand::Access(command) = command else {
         return None;
     };
-    let all = match command {
+    let (all, entry) = match command {
         WindowAccessCommand::Refresh => return Some(Vec::new()),
-        WindowAccessCommand::RevokeEntry { .. } => false,
-        WindowAccessCommand::CountRevokeAll | WindowAccessCommand::RevokeAll { .. } => true,
+        WindowAccessCommand::RevokeEntry { target } => (false, Some(target.key())),
+        WindowAccessCommand::CountRevokeAll | WindowAccessCommand::RevokeAll { .. } => (true, None),
     };
-    Some(vec![revoked(
-        format!("Nothing was revoked: {message}"),
-        true,
-        all,
+    Some(vec![WindowTopologyUpdate::Access(
+        WindowAccessUpdate::Revoked {
+            message: format!("Nothing was revoked: {message}"),
+            failed: true,
+            all,
+            entry,
+        },
     )])
-}
-
-fn revoked(message: String, failed: bool, all: bool) -> WindowTopologyUpdate {
-    WindowTopologyUpdate::Access(WindowAccessUpdate::Revoked {
-        message,
-        failed,
-        all,
-    })
 }
 
 async fn send(updates: &mpsc::Sender<WindowTopologyUpdate>, update: WindowAccessUpdate) -> bool {
@@ -221,6 +218,7 @@ async fn revoke_entry(
     connection: &mut Connection,
     target: AccessRevokeTarget,
 ) -> WindowAccessUpdate {
+    let entry = target.key();
     let result = connection
         .request(Request::RevokeAccessEntry { target })
         .await;
@@ -234,12 +232,16 @@ async fn revoke_entry(
             "Revoke failed: splinterd returned an unexpected response".to_owned(),
             true,
         ),
+        // The request was sent: the daemon may have revoked it before the
+        // connection went.
+        Err(error) if is_connection_loss(&error) => (UNCERTAIN.to_owned(), true),
         Err(error) => (format!("Revoke failed: {}", reason(&error)), true),
     };
     WindowAccessUpdate::Revoked {
         message: one_line(&message),
         failed,
         all: false,
+        entry: Some(entry),
     }
 }
 
@@ -302,8 +304,15 @@ async fn revoke_all(
                 message,
                 failed,
                 all: true,
+                entry: None,
             }
         }
+        Err(error) if is_connection_loss(&error) => WindowAccessUpdate::Revoked {
+            message: UNCERTAIN.to_owned(),
+            failed: true,
+            all: true,
+            entry: None,
+        },
         Err(error) => failed_revoke_all(&error),
     }
 }
@@ -313,6 +322,7 @@ fn failed_revoke_all(error: &anyhow::Error) -> WindowAccessUpdate {
         message: format!("Nothing was revoked: {}", reason(error)),
         failed: true,
         all: true,
+        entry: None,
     }
 }
 
@@ -353,19 +363,21 @@ mod tests {
             ),
             Some(updates) if updates.is_empty()
         ));
-        for (command, all) in [
+        for (command, all, entry) in [
             (
                 WindowAccessCommand::RevokeEntry {
                     target: AccessRevokeTarget::Grant { grant_id: 4 },
                 },
                 false,
+                Some(splinterm_protocol::AccessEntryKey::Grant { grant_id: 4 }),
             ),
-            (WindowAccessCommand::CountRevokeAll, true),
+            (WindowAccessCommand::CountRevokeAll, true, None),
             (
                 WindowAccessCommand::RevokeAll {
                     expected: AccessRevocationCounts::default(),
                 },
                 true,
+                None,
             ),
         ] {
             let updates = abandoned_access_updates(&WindowTopologyCommand::Access(command), "lost");
@@ -378,6 +390,7 @@ mod tests {
                     message: "Nothing was revoked: lost".into(),
                     failed: true,
                     all,
+                    entry,
                 }
             );
         }

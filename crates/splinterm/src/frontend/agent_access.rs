@@ -110,11 +110,13 @@ pub enum WindowAccessUpdate {
     },
     /// The outcome of a revoke, for the person. `failed` is set when it did
     /// not happen, or a remembered grant could not be removed durably; `all`
-    /// when it was **Revoke all access**.
+    /// when it was **Revoke all access**; `entry` names the one entry a
+    /// per-entry revoke answered.
     Revoked {
         message: String,
         failed: bool,
         all: bool,
+        entry: Option<AccessEntryKey>,
     },
 }
 
@@ -180,20 +182,49 @@ pub fn revoke_all_summary(counts: AccessRevocationCounts, done: bool) -> String 
     )
 }
 
-/// Untrusted display text, escaped and bounded: control and bidirectional
-/// formatting characters are shown as `\u{…}`, so a name can neither break a
-/// line nor reorder the text around it, and long text ends in an ellipsis.
+/// Whether a character of untrusted text must never reach trusted UI as is:
+/// controls, bidirectional and invisible formatting (zero-width spaces and
+/// joiners, word joiner, invisible operators, isolates), the line and
+/// paragraph separators, and the byte-order mark. The consent prompt and the
+/// **Agent access** list use this one set.
+#[must_use]
+pub fn unsafe_display_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{feff}'
+        )
+}
+
+/// Untrusted display text, escaped and bounded: every
+/// [`unsafe_display_character`] is shown as `\u{…}`, so text can neither
+/// break a line nor reorder or hide the text around it, and long text ends
+/// in an ellipsis.
 #[must_use]
 pub fn shown(text: &str, maximum_scalars: usize) -> String {
+    shown_escaping(text, maximum_scalars, unsafe_display_character)
+}
+
+/// A name or path inside a list row or prompt: also escapes the quotes and
+/// the separator the row puts around and between names, so a name cannot
+/// fake another segment of the row.
+fn shown_name(text: &str, maximum_scalars: usize) -> String {
+    shown_escaping(text, maximum_scalars, |character| {
+        unsafe_display_character(character) || matches!(character, '‘' | '’' | '·')
+    })
+}
+
+fn shown_escaping(text: &str, maximum_scalars: usize, escape: impl Fn(char) -> bool) -> String {
     let mut output = String::with_capacity(text.len().min(maximum_scalars * 4));
     let mut scalars = 0_usize;
     for character in text.chars() {
-        let escaped = character.is_control()
-            || matches!(
-                character,
-                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-            );
-        let piece = if escaped {
+        let piece = if escape(character) {
             format!("\\u{{{:04x}}}", u32::from(character))
         } else {
             character.to_string()
@@ -243,11 +274,11 @@ fn utc(seconds: u64) -> String {
 /// never an identity), or else its executable's file name.
 fn agent_text(entry: &AccessEntry) -> String {
     if let Some(name) = &entry.identity.display_name {
-        return format!("‘{}’", shown(name, MAX_NAME_SCALARS));
+        return format!("‘{}’", shown_name(name, MAX_NAME_SCALARS));
     }
     let path = &entry.identity.executable_path;
     let name = path.rsplit('/').next().filter(|name| !name.is_empty());
-    shown(name.unwrap_or(path), MAX_NAME_SCALARS)
+    shown_name(name.unwrap_or(path), MAX_NAME_SCALARS)
 }
 
 fn access_text(entry: &AccessEntry) -> String {
@@ -268,7 +299,7 @@ fn workspace_text(entry: &AccessEntry) -> String {
     };
     let short = short_id(&workspace.lair_id);
     match &workspace.name {
-        Some(name) => format!("‘{}’ ({short})", shown(name, MAX_NAME_SCALARS)),
+        Some(name) => format!("‘{}’ ({short})", shown_name(name, MAX_NAME_SCALARS)),
         None => format!("a missing workspace ({short})"),
     }
 }
@@ -301,7 +332,7 @@ fn policy_resources_text(resources: &[AccessPolicyResource]) -> String {
 fn rule_list(rules: &[String]) -> String {
     rules
         .iter()
-        .map(|rule| format!("‘{}’", shown(rule, MAX_NAME_SCALARS)))
+        .map(|rule| format!("‘{}’", shown_name(rule, MAX_NAME_SCALARS)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -340,7 +371,7 @@ fn title(entry: &AccessEntry) -> String {
         AccessEntryKind::Pending => format!("{agent} asks for {access} on {workspace}"),
         AccessEntryKind::PersistentPolicy => {
             let rule = match &entry.key {
-                AccessEntryKey::Policy { rule_id } => shown(rule_id, MAX_NAME_SCALARS),
+                AccessEntryKey::Policy { rule_id } => shown_name(rule_id, MAX_NAME_SCALARS),
                 _ => String::new(),
             };
             format!(
@@ -393,7 +424,7 @@ fn detail(entry: &AccessEntry) -> String {
         hint(entry),
         format!(
             "{} ({})",
-            shown(&entry.identity.executable_path, MAX_PATH_SCALARS),
+            shown_name(&entry.identity.executable_path, MAX_PATH_SCALARS),
             identity_kind_text(entry.identity.kind)
         ),
     ];
@@ -493,6 +524,15 @@ impl AccessRow {
     }
 }
 
+/// What a pointer release on a list row does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RowClick {
+    /// Not a press and release on the same entry.
+    Ignored,
+    Selected,
+    Activate,
+}
+
 /// What activating a list row asks the Window to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AccessActivation {
@@ -517,6 +557,11 @@ pub(crate) struct AgentAccessUi {
     /// Entries revoked from this list whose revoke the daemon has not
     /// answered yet, so a second press cannot send it twice.
     revoking: HashSet<AccessEntryKey>,
+    /// The selected entry left the list in a newer read, or the confirmation
+    /// the person was answering closed because its entry ended: the row
+    /// now under the selection is not the one they chose, so Enter or a
+    /// click on it must not act until they choose again.
+    selection_stale: bool,
 }
 
 impl AgentAccessUi {
@@ -537,6 +582,7 @@ impl AgentAccessUi {
             visible_start: 0,
             notice: None,
             revoking: HashSet::new(),
+            selection_stale: false,
         };
         if let Some(snapshot) = snapshot {
             ui.apply_snapshot(snapshot);
@@ -553,7 +599,9 @@ impl AgentAccessUi {
         self.revoking
             .retain(|key| snapshot.entry(key).is_some_and(|entry| entry.revocable));
         self.snapshot = Some(snapshot.clone());
-        self.refilter(selected.as_ref());
+        if !self.refilter(selected.as_ref()) {
+            self.selection_stale = true;
+        }
     }
 
     pub(crate) fn set_unavailable(&mut self, reason: &str) {
@@ -564,11 +612,43 @@ impl AgentAccessUi {
         self.notice = Some(shown(notice, MAX_NOTICE_SCALARS));
     }
 
-    /// A revoke the daemon answered: the entry may be revoked again if it
-    /// failed and is still listed.
-    pub(crate) fn finish_revoke(&mut self, message: &str) {
-        self.revoking.clear();
+    /// A revoke the daemon answered: that entry may be revoked again if it
+    /// failed and is still listed; other revokes stay in flight.
+    pub(crate) fn finish_revoke(&mut self, key: Option<&AccessEntryKey>, message: &str) {
+        if let Some(key) = key {
+            self.revoking.remove(key);
+        }
         self.set_notice(message);
+    }
+
+    /// The confirmation the person was answering closed because its entry
+    /// ended: nothing acts until they choose a row again.
+    pub(crate) fn mark_selection_stale(&mut self, notice: &str) {
+        self.selection_stale = true;
+        self.set_notice(notice);
+    }
+
+    /// What a pointer release on row `index` does, after a press on the
+    /// row that showed `pressed`. Only a press and release on the same entry
+    /// count; on the selected entry they activate it, on any other row (or
+    /// after the selection went stale) they select it.
+    pub(crate) fn release_click(&mut self, pressed: &AccessEntryKey, index: usize) -> RowClick {
+        let Some(row) = self.rows.get(index) else {
+            return RowClick::Ignored;
+        };
+        if &row.key != pressed {
+            return RowClick::Ignored;
+        }
+        if index == self.selected && !self.selection_stale {
+            return RowClick::Activate;
+        }
+        self.select_row(index);
+        RowClick::Selected
+    }
+
+    /// The entry on row `index`, for a pointer press.
+    pub(crate) fn row_key(&self, index: usize) -> Option<&AccessEntryKey> {
+        self.rows.get(index).map(|row| &row.key)
     }
 
     pub(crate) fn rows(&self) -> &[AccessRow] {
@@ -594,7 +674,9 @@ impl AgentAccessUi {
     pub(crate) fn editor_changed(&mut self) {
         if self.editor.text() != self.filtered_query {
             let selected = self.selected_key().cloned();
-            self.refilter(selected.as_ref());
+            let _ = self.refilter(selected.as_ref());
+            // Searching is choosing again.
+            self.selection_stale = false;
         }
     }
 
@@ -630,6 +712,7 @@ impl AgentAccessUi {
         if self.rows.is_empty() || delta == 0 {
             return false;
         }
+        let was_stale = std::mem::take(&mut self.selection_stale);
         let previous = self.selected;
         let magnitude = delta.unsigned_abs().min(self.rows.len() - 1);
         self.selected = if delta.is_negative() {
@@ -640,7 +723,7 @@ impl AgentAccessUi {
                 .min(self.rows.len() - 1)
         };
         self.ensure_visible();
-        let changed = self.selected != previous;
+        let changed = self.selected != previous || was_stale;
         if changed {
             self.notice = None;
         }
@@ -648,7 +731,8 @@ impl AgentAccessUi {
     }
 
     pub(crate) fn select_first(&mut self) -> bool {
-        let changed = self.selected != 0 || self.visible_start != 0;
+        let was_stale = std::mem::take(&mut self.selection_stale);
+        let changed = self.selected != 0 || self.visible_start != 0 || was_stale;
         self.selected = 0;
         self.visible_start = 0;
         changed
@@ -658,26 +742,40 @@ impl AgentAccessUi {
         let Some(last) = self.rows.len().checked_sub(1) else {
             return false;
         };
-        let changed = self.selected != last;
+        let was_stale = std::mem::take(&mut self.selection_stale);
+        let changed = self.selected != last || was_stale;
         self.selected = last;
         self.ensure_visible();
         changed
     }
 
-    /// Selects the row at `index` in the filtered list, as a click does.
-    pub(crate) fn select_index(&mut self, index: usize) -> bool {
-        if index >= self.rows.len() || index == self.selected {
+    /// Selects the row at `index` in the filtered list; whether anything
+    /// changed, including a stale selection becoming a fresh choice.
+    fn select_row(&mut self, index: usize) -> bool {
+        if index >= self.rows.len() {
             return false;
         }
+        let was_stale = std::mem::take(&mut self.selection_stale);
+        let changed = index != self.selected || was_stale;
         self.selected = index;
         self.notice = None;
         self.ensure_visible();
-        true
+        changed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_index(&mut self, index: usize) -> bool {
+        self.select_row(index)
     }
 
     /// What Enter, or a click on the selected row, does. Rows that cannot be
-    /// revoked here explain why instead.
+    /// revoked here explain why instead, and a stale selection does nothing
+    /// until the person chooses again.
     pub(crate) fn activate(&mut self) -> Option<AccessActivation> {
+        if self.selection_stale {
+            self.set_notice("That access ended; choose again");
+            return None;
+        }
         let entry = self.selected_entry()?.clone();
         if self.revoking.contains(&entry.key) {
             self.set_notice("Revoking…");
@@ -703,11 +801,23 @@ impl AgentAccessUi {
         self.set_notice("Revoking…");
     }
 
+    /// The palette title: always visible, so it carries the waiting count
+    /// and says when the read stopped at this Window's bound.
     pub(crate) fn heading(&self) -> String {
-        match self.snapshot.as_ref().map(AccessSnapshot::waiting) {
-            Some(0) | None => "AGENT ACCESS".to_owned(),
-            Some(waiting) => format!("AGENT ACCESS · {waiting} WAITING"),
+        let mut heading = "AGENT ACCESS".to_owned();
+        let Some(snapshot) = &self.snapshot else {
+            return heading;
+        };
+        match snapshot.waiting() {
+            0 => {}
+            waiting => {
+                let _ = write!(heading, " · {waiting} WAITING");
+            }
         }
+        if snapshot.truncated {
+            let _ = write!(heading, " · FIRST {MAX_WINDOW_ACCESS_ENTRIES} ONLY");
+        }
+        heading
     }
 
     /// The text shown when no row is, or `None` when rows are listed.
@@ -755,12 +865,13 @@ impl AgentAccessUi {
             .as_ref()
             .is_some_and(|snapshot| snapshot.truncated)
         {
-            return "Showing the first entries only; `splinterm access list` shows all".to_owned();
+            return "`splinterm access list` shows every entry".to_owned();
         }
         "Type to search · Esc close".to_owned()
     }
 
-    fn refilter(&mut self, keep: Option<&AccessEntryKey>) {
+    /// Filters the rows; whether the kept entry is still listed.
+    fn refilter(&mut self, keep: Option<&AccessEntryKey>) -> bool {
         let query = self.editor.text().to_owned();
         self.filtered_query.clone_from(&query);
         let tokens = query
@@ -773,10 +884,10 @@ impl AgentAccessUi {
             .filter(|row| row.matches(&tokens))
             .cloned()
             .collect();
-        self.selected = keep
-            .and_then(|key| self.rows.iter().position(|row| &row.key == key))
-            .unwrap_or(0);
+        let kept = keep.and_then(|key| self.rows.iter().position(|row| &row.key == key));
+        self.selected = kept.unwrap_or(0);
         self.ensure_visible();
+        keep.is_none() || kept.is_some()
     }
 
     fn ensure_visible(&mut self) {
@@ -908,7 +1019,7 @@ impl RevokeAccessUi {
                 let _ = writeln!(
                     body,
                     "Agent: {} ({})",
-                    shown(&entry.identity.executable_path, MAX_PATH_SCALARS),
+                    shown_name(&entry.identity.executable_path, MAX_PATH_SCALARS),
                     identity_kind_text(entry.identity.kind)
                 );
                 body.push_str(
@@ -1191,13 +1302,17 @@ pub(crate) fn waiting_title(waiting: u32) -> Option<String> {
 
 /// The marks one Explorer row shows, in words, joined for its status line.
 pub(crate) fn mark_text(whole: AccessReach, part: AccessReach, waiting: u32) -> Option<String> {
-    let mut parts = Vec::with_capacity(2);
+    let mut parts = Vec::with_capacity(3);
     if let Some(text) = waiting_text(waiting) {
         parts.push(text);
     }
     if let Some(text) = whole.text(true) {
         parts.push(text.to_owned());
-    } else if let Some(text) = part.text(false) {
+    }
+    // Some of it is reached more strongly than all of it: say so too.
+    if part > whole
+        && let Some(text) = part.text(false)
+    {
         parts.push(text.to_owned());
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
@@ -1500,8 +1615,17 @@ pub(crate) mod tests {
         assert_eq!(ui.rows()[ui.selected_index()].key, remembered_key());
         assert!(ui.select_index(1));
         assert!(matches!(ui.activate(), Some(AccessActivation::Revoke(_))));
-        // A failed revoke may be tried again once the daemon answered.
-        ui.finish_revoke("Revoke failed: not found");
+        // A failed revoke may be tried again once the daemon answered it;
+        // an answer about another entry leaves this one in flight.
+        ui.finish_revoke(
+            Some(&AccessEntryKey::Grant { grant_id: 99 }),
+            "Revoke failed: not found",
+        );
+        assert_eq!(ui.activate(), None);
+        ui.finish_revoke(
+            Some(&AccessEntryKey::Grant { grant_id: 18 }),
+            "Revoke failed: not found",
+        );
         assert_eq!(ui.footer(), "Revoke failed: not found");
         assert!(matches!(ui.activate(), Some(AccessActivation::Revoke(_))));
     }
@@ -1736,5 +1860,136 @@ pub(crate) mod tests {
         );
         assert!(row.detail.contains("(one process) · process 4242"));
         assert!(row.detail.contains("ends 1970-01-01 00:00 UTC"));
+    }
+
+    #[test]
+    fn a_selection_whose_entry_left_the_list_does_nothing_until_chosen_again() {
+        let lair_id = LairId::new();
+        let mut ui = AgentAccessUi::new(Some(&snapshot(4, inventory(lair_id))), None);
+        assert!(ui.select_index(1));
+        // Grant 17 ends; grant 18 slides under the selection.
+        let mut entries = inventory(lair_id);
+        entries.remove(1);
+        ui.apply_snapshot(&snapshot(5, entries.clone()));
+        assert_eq!(ui.activate(), None, "nothing is revoked");
+        assert_eq!(ui.footer(), "That access ended; choose again");
+        // A newer read that still lists the (new) selection keeps it stale.
+        ui.apply_snapshot(&snapshot(6, entries.clone()));
+        assert_eq!(ui.activate(), None);
+        // Any move is a new choice, even one that lands where it was.
+        assert!(ui.move_selection(-1));
+        assert!(ui.move_selection(1));
+        assert_eq!(
+            ui.activate(),
+            Some(AccessActivation::Revoke(AccessRevokeTarget::Grant {
+                grant_id: 18
+            }))
+        );
+        // Typing a search is a new choice too, and so are Home and End.
+        let mut ui = AgentAccessUi::new(Some(&snapshot(4, inventory(lair_id))), None);
+        ui.mark_selection_stale("That access ended before you confirmed; nothing was revoked");
+        assert_eq!(
+            ui.footer(),
+            "That access ended before you confirmed; nothing was revoked"
+        );
+        assert_eq!(ui.activate(), None);
+        assert!(ui.select_first(), "clearing staleness is a change");
+        assert!(matches!(ui.activate(), Some(AccessActivation::Confirm(_))));
+        ui.mark_selection_stale("ended");
+        assert!(ui.append_text("open"));
+        assert!(matches!(ui.activate(), Some(AccessActivation::Revoke(_))));
+    }
+
+    #[test]
+    fn a_click_acts_only_on_the_entry_it_pressed_and_only_when_selected() {
+        let lair_id = LairId::new();
+        let mut ui = AgentAccessUi::new(Some(&snapshot(4, inventory(lair_id))), None);
+        let pressed = ui.row_key(1).cloned().unwrap();
+        // Out of range never falls through to activation.
+        assert_eq!(ui.release_click(&pressed, 99), RowClick::Ignored);
+        assert_eq!(ui.row_key(99), None);
+        // Released on another entry: nothing.
+        assert_eq!(ui.release_click(&pressed, 2), RowClick::Ignored);
+        // The first click selects, the next on the selected row activates.
+        assert_eq!(ui.release_click(&pressed, 1), RowClick::Selected);
+        assert_eq!(ui.selected_index(), 1);
+        assert_eq!(ui.release_click(&pressed, 1), RowClick::Activate);
+        // A refresh between press and release moves another entry under
+        // the pointer: the release is ignored.
+        let mut entries = inventory(lair_id);
+        entries.remove(1);
+        ui.apply_snapshot(&snapshot(5, entries));
+        assert_eq!(ui.release_click(&pressed, 1), RowClick::Ignored);
+        // On a stale selection a click on the selected row only selects it.
+        let now_there = ui.row_key(0).cloned().unwrap();
+        assert_eq!(ui.selected_index(), 0);
+        assert_eq!(ui.release_click(&now_there, 0), RowClick::Selected);
+        assert_eq!(ui.release_click(&now_there, 0), RowClick::Activate);
+    }
+
+    #[test]
+    fn invisible_separators_and_row_punctuation_in_names_are_escaped() {
+        for character in [
+            '\u{200b}', '\u{200c}', '\u{200d}', '\u{2028}', '\u{2029}', '\u{2060}', '\u{2063}',
+            '\u{2065}', '\u{feff}', '\u{061c}', '\u{202e}', '\u{2066}', '\u{0085}',
+        ] {
+            assert!(unsafe_display_character(character), "{character:?}");
+            assert_eq!(
+                shown(&format!("a{character}b"), 64),
+                format!("a\\u{{{:04x}}}b", u32::from(character))
+            );
+        }
+        for character in ['a', '‘', '·', 'é', '中'] {
+            assert!(!unsafe_display_character(character), "{character:?}");
+        }
+        // Inside a row a name cannot fake the quotes or separators around it.
+        let lair_id = LairId::new();
+        let mut fake = entry(remembered_key(), AccessEntryKind::Remembered, lair_id);
+        fake.identity.display_name = Some("x’ · y".into());
+        fake.workspace.as_mut().unwrap().name = Some("w\u{2028}v".into());
+        fake.identity.executable_path = "/opt/a · b".into();
+        let ui = AgentAccessUi::new(Some(&snapshot(1, vec![fake])), None);
+        let row = &ui.rows()[0];
+        assert!(
+            row.title
+                .starts_with("‘x\\u{2019} \\u{00b7} y’ · Manage · always for ‘w\\u{2028}v’"),
+            "{}",
+            row.title
+        );
+        assert!(
+            row.detail
+                .contains("/opt/a \\u{00b7} b (protected install)")
+        );
+        // Notices keep their own punctuation.
+        assert_eq!(shown("a · b", 16), "a · b");
+    }
+
+    #[test]
+    fn a_stronger_partial_mark_is_shown_beside_the_whole_one() {
+        assert_eq!(
+            mark_text(AccessReach::Reachable, AccessReach::Connected, 0).as_deref(),
+            Some("Agent can reach · Agent connected to part")
+        );
+        assert_eq!(
+            mark_text(AccessReach::Connected, AccessReach::Reachable, 0).as_deref(),
+            Some("Agent connected")
+        );
+        assert_eq!(
+            mark_text(AccessReach::Reachable, AccessReach::Reachable, 1).as_deref(),
+            Some("Agent asking for access · Agent can reach")
+        );
+    }
+
+    #[test]
+    fn a_truncated_read_says_so_in_the_always_visible_heading() {
+        let lair_id = LairId::new();
+        let mut read = snapshot(1, inventory(lair_id));
+        read.truncated = true;
+        let ui = AgentAccessUi::new(Some(&read), None);
+        assert_eq!(ui.heading(), "AGENT ACCESS · 1 WAITING · FIRST 512 ONLY");
+        read.entries.remove(3);
+        let ui = AgentAccessUi::new(Some(&read), None);
+        assert_eq!(ui.heading(), "AGENT ACCESS · FIRST 512 ONLY");
+        assert_eq!(AgentAccessUi::new(None, None).heading(), "AGENT ACCESS");
     }
 }
