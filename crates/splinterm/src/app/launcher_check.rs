@@ -1428,6 +1428,47 @@ mod tests {
         assert_eq!(snapshot.title, "Upgrade question");
     }
 
+    /// The restart question's Window, as the dialog child builds it, passes
+    /// every check `run_window` makes before it connects to the compositor,
+    /// for the ordinary question and the longest one. Dialog snapshots once
+    /// had no visible row identities, which `TerminalSnapshot::validate`
+    /// refuses, so the question never mapped.
+    #[test]
+    fn restart_windows_pass_the_checks_before_the_compositor() {
+        // The renderer the dialog child configures, from the default
+        // configuration: Fontconfig's `monospace`.
+        crate::app::consent::configure_dialog_renderer(&splinterm::config::AppConfig::default())
+            .unwrap();
+        let reasons = (0..12)
+            .map(|index| format!("reason {index} {}", "word ".repeat(40)))
+            .collect::<Vec<_>>();
+        let longest = RestartQuestion {
+            running: RunningDaemon::Build {
+                version: "0.2.0".to_owned(),
+                generation: 9,
+            },
+            installed_version: "0.2.1".to_owned(),
+            shells: ShellCount::Exact(2),
+            live_upgrade: LiveUpgrade::Blocked(reasons),
+            daemon_pid: PID,
+        };
+        for question in [asked(&report(OLDER, 4, Vec::new())), longest] {
+            let prompt = RestartDialogPrompt {
+                capability: vec![1; CAPABILITY_BYTES],
+                parent_pid: 42,
+                lines: dialog_lines(&question),
+            };
+            prompt.validate().unwrap();
+            for shortcut in [Some(DialogShortcut::default()), None] {
+                let (decision, _receiver) = std_mpsc::channel();
+                let options = prompt.window_options(decision, shortcut);
+                let snapshot = options.snapshot.as_ref().unwrap();
+                assert_eq!(snapshot.validate().map_err(|error| error.message), Ok(()));
+                splinterm::check_window_options(options).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn restart_prompts_are_validated() {
         let good = RestartDialogPrompt {

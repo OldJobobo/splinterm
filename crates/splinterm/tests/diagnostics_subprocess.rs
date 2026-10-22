@@ -169,6 +169,88 @@ fn graphical_top_level_error_never_formats_arbitrary_error_text() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A trusted dialog child's standard error is a private pipe to the command
+/// that asked, so a child that fails says why there, unlike an ordinary
+/// graphical client. Here each gets no prompt on its standard input.
+#[test]
+fn a_trusted_dialog_child_reports_its_error_chain() {
+    for dialog in ["consent", "upgrade-dialog", "restart-dialog"] {
+        let root = test_directory(dialog);
+        let config = root.join("config.ini");
+        fs::write(&config, "").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_splinterm"))
+            .arg(dialog)
+            .env("XDG_STATE_HOME", &root)
+            .env("SPLINTERM_CONFIG", &config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{dialog}");
+        assert!(output.stdout.is_empty(), "{dialog}");
+        // The fonts it resolved come first; its failure is the last line,
+        // and what its asker reports.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last = stderr.lines().last().unwrap_or_default();
+        assert!(
+            last.starts_with("splinterm graphical client failed: ")
+                && last.ends_with("failed to fill whole buffer"),
+            "{dialog}: {stderr}"
+        );
+        assert_eq!(
+            splinterd::child_stderr::report(&output.stderr).as_deref(),
+            Some(last),
+            "{dialog}"
+        );
+        assert_eq!(summary(&root).unwrap().exit_class, Some(ExitClass::Unknown));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// What a dialog child prints reaches its asker's log, so a configuration
+/// it cannot load never puts a value on its standard error: it names only
+/// the category. A value the loader only warns about stays off it too.
+#[test]
+fn a_trusted_dialog_child_never_formats_configuration_values() {
+    for dialog in ["consent", "upgrade-dialog", "restart-dialog"] {
+        for (contents, fails_to_load) in [
+            (
+                format!("[integration]\ndialog-shortcut={PANIC_SENTINEL}\n"),
+                true,
+            ),
+            (format!("[main]\nfont-pixelsize={PANIC_SENTINEL}\n"), true),
+            (format!("[font]\nsize={PANIC_SENTINEL}\n"), false),
+        ] {
+            let root = test_directory(dialog);
+            let config = root.join("invalid-config.ini");
+            fs::write(&config, &contents).unwrap();
+            let output = Command::new(env!("CARGO_BIN_EXE_splinterm"))
+                .arg(dialog)
+                .env("XDG_STATE_HOME", &root)
+                .env("SPLINTERM_CONFIG", &config)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{dialog}: {contents}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!stderr.contains(PANIC_SENTINEL), "{dialog}: {stderr}");
+            if fails_to_load {
+                assert_eq!(
+                    stderr.lines().last(),
+                    Some("splinterm graphical client failed: configuration could not be loaded"),
+                    "{dialog}: {contents}"
+                );
+            }
+            assert_eq!(summary(&root).unwrap().exit_class, Some(ExitClass::Unknown));
+            assert!(!retained_text(&root).contains(PANIC_SENTINEL));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
 #[test]
 fn graphical_pre_map_error_survives_null_stdio() {
     let root = test_directory("null-stdio-error");

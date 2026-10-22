@@ -29,14 +29,17 @@ use std::{
     fmt::Write as _,
     io,
     os::{fd::OwnedFd, unix::net::UnixStream},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc as std_mpsc,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use splinterd::dialog_shortcut::{DialogShortcut, DialogShortcutLease, Hyprctl, SystemHyprctl};
+use splinterd::{
+    child_stderr::{STDERR_TAIL_WAIT, StderrTail, child_failure},
+    dialog_shortcut::{DialogShortcut, DialogShortcutLease, Hyprctl, SystemHyprctl},
+};
 use splinterm::automation::HandoffDecisionPrompt;
 use splinterm::{TrustedConsentUi, WindowOptions};
 use splinterm_protocol::{
@@ -351,6 +354,19 @@ impl DialogChild {
     }
 }
 
+impl<H: Hyprctl> DialogChild<H> {
+    /// Kills the child unless it already exited, reaps it, and returns how
+    /// it ended. Its shortcut registration is removed after the reaping, as
+    /// on drop.
+    fn end(mut self) -> Option<ExitStatus> {
+        let mut child = self.child.take()?;
+        // Killing an exited, unreaped child does nothing; the wait still
+        // returns the status it exited with.
+        let _ = child.kill();
+        child.wait().ok()
+    }
+}
+
 impl<H: Hyprctl + Send + 'static> DialogChild<H> {
     /// Hands a child that has answered to a detached thread, which gives it
     /// a moment to exit and then reaps it, so the answer reaches the daemon
@@ -482,9 +498,21 @@ pub(in crate::app) async fn ask_in_dialog(prompt: HandoffDecisionPrompt) -> Resu
 /// Starts `/proc/self/exe <command>` as a trusted dialog child, sends it
 /// `request`, and returns its answer. The answer must arrive within `budget`
 /// and echo the request's capability; anything else is an error, which every
-/// caller treats as "no". The child is killed and reaped unless it answered.
+/// caller treats as "no", and names what the child printed when it failed
+/// before answering. The child is killed and reaped unless it answered.
 pub(in crate::app) async fn ask_dialog_child<P: DialogPrompt>(
     command: &'static str,
+    request: P,
+    budget: Duration,
+) -> Result<bool> {
+    let mut child = Command::new("/proc/self/exe");
+    child.arg(command);
+    ask_dialog_process(child, request, budget).await
+}
+
+/// [`ask_dialog_child`] with the child's program and arguments in `command`.
+async fn ask_dialog_process<P: DialogPrompt>(
+    mut command: Command,
     request: P,
     budget: Duration,
 ) -> Result<bool> {
@@ -495,13 +523,14 @@ pub(in crate::app) async fn ask_dialog_child<P: DialogPrompt>(
     let child_read = child
         .try_clone()
         .context("duplicate private dialog descriptor")?;
-    let process = Command::new("/proc/self/exe")
-        .arg(command)
+    let mut process = command
         .stdin(Stdio::from(OwnedFd::from(child_read)))
         .stdout(Stdio::from(OwnedFd::from(child)))
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("launch the dialog")?;
+    // Why a dialog that fails before answering failed (`child_stderr`).
+    let stderr = StderrTail::capture(&mut process);
     let guard = DialogChild::new(process);
     let reply = tokio::task::spawn_blocking(move || -> Result<DialogReply> {
         parent.set_write_timeout(Some(budget))?;
@@ -510,8 +539,25 @@ pub(in crate::app) async fn ask_dialog_child<P: DialogPrompt>(
         read_private_frame_bounded(&mut parent, MAX_UPGRADE_DIALOG_FRAME_BYTES)
     })
     .await
-    .context("dialog task failed")?
-    .context("the dialog gave no answer")?;
+    .context("dialog task failed")?;
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(error) => {
+            // Reaping and waiting for the pipe block, so not on a runtime
+            // worker. A failed task has dropped the guard, which still kills
+            // and reaps the child.
+            let (status, printed) =
+                tokio::task::spawn_blocking(move || (guard.end(), stderr.finish(STDERR_TAIL_WAIT)))
+                    .await
+                    .unwrap_or((None, None));
+            return Err(child_failure(
+                "the dialog",
+                &error,
+                status,
+                printed.as_deref(),
+            ));
+        }
+    };
     if reply.capability != capability {
         bail!("dialog authentication failed");
     }
@@ -715,6 +761,77 @@ mod tests {
         assert_eq!(snapshot.visible_rows.len(), snapshot.rows);
         assert_eq!(snapshot.title, "Upgrade question");
         assert_eq!(snapshot.cursor_row, -1);
+    }
+
+    /// The upgrade question's Window, as the dialog child builds it, passes
+    /// every check `run_window` makes before it connects to the compositor,
+    /// from one Window to the largest prompt. Dialog snapshots once had no
+    /// visible row identities, which `TerminalSnapshot::validate` refuses,
+    /// so the question never mapped.
+    #[test]
+    fn upgrade_windows_pass_the_checks_before_the_compositor() {
+        // The renderer the dialog child configures, from the default
+        // configuration: Fontconfig's `monospace`.
+        crate::app::consent::configure_dialog_renderer(&splinterm::config::AppConfig::default())
+            .unwrap();
+        let listed = u32::try_from(MAX_LISTED_WINDOWS).unwrap();
+        for windows in [
+            vec![window(5, 0, 0)],
+            vec![window(5, 3, 12), window(6, 1, 128)],
+            (1..=listed).map(|pid| window(pid, 32, 128)).collect(),
+            (1..=64).map(|pid| window(pid, 32, 128)).collect(),
+        ] {
+            let dialog = prompt(windows);
+            dialog.validate().unwrap();
+            for shortcut in [shortcut(), None] {
+                let (decision, _receiver) = std_mpsc::channel();
+                let options = dialog_window_options(&dialog, decision, shortcut);
+                let snapshot = options.snapshot.as_ref().unwrap();
+                assert_eq!(snapshot.validate().map_err(|error| error.message), Ok(()));
+                splinterm::check_window_options(options).unwrap();
+            }
+        }
+    }
+
+    /// A dialog child that fails before answering is reaped, and the error
+    /// says what it printed and how it ended instead of only that its answer
+    /// never came.
+    #[tokio::test]
+    async fn a_dialog_that_fails_before_answering_says_why() {
+        let mut failing = Command::new("sh");
+        failing.args([
+            "-c",
+            "echo 'splinterm graphical client failed: no compositor' >&2; exit 1",
+        ]);
+        let error = ask_dialog_process(
+            failing,
+            prompt(vec![window(5, 0, 0)]),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.starts_with(
+                "the dialog failed: splinterm graphical client failed: no compositor (exit status: 1; "
+            ),
+            "{error}"
+        );
+
+        let mut silent = Command::new("sh");
+        silent.args(["-c", "exit 3"]);
+        let error = ask_dialog_process(
+            silent,
+            prompt(vec![window(5, 0, 0)]),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.starts_with("the dialog gave no answer (exit status: 3): "),
+            "{error}"
+        );
     }
 
     #[test]

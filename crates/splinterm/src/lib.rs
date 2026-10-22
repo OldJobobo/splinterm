@@ -47,4 +47,4 @@ pub use frontend::{
     TerminalGridLimits, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
     WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
 };
-pub use wayland::run as run_window;
+pub use wayland::{check_window_options, run as run_window};

@@ -23,7 +23,10 @@ use nix::{
     poll::{PollFd, PollFlags, PollTimeout, poll},
     sys::socket::{getsockopt, sockopt::PeerPidfd},
 };
-use splinterd::install_prefix::InstallPrefix;
+use splinterd::{
+    child_stderr::{STDERR_TAIL_WAIT, StderrTail, child_failure},
+    install_prefix::InstallPrefix,
+};
 use splinterm_core::{LairId, SplintId};
 use splinterm_protocol::{
     AccessGrant, AccessGrantSource, AccessLevel, AccessScope, AuditPeer, CONSENT_CAPABILITY_BYTES,
@@ -1796,9 +1799,11 @@ fn prompt_blocking(
         .arg("consent")
         .stdin(Stdio::from(OwnedFd::from(child_read)))
         .stdout(Stdio::from(OwnedFd::from(child)))
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("launch trusted consent client {}", executable.display()))?;
+    // Why a client that fails before answering failed, for the daemon log.
+    let stderr = StderrTail::capture(&mut process);
     // Every path below reaps the client before it returns, and only then
     // does this drop: it removes the dialog shortcut entry the client
     // registered, even when the client was killed (`dialog_shortcut`), on a
@@ -1818,13 +1823,29 @@ fn prompt_blocking(
         Ok(reply) => reply,
         Err(error) => {
             let _ = process.kill();
-            let _ = process.wait();
-            return Err(error);
+            let status = process.wait().ok();
+            let printed = stderr.finish(STDERR_TAIL_WAIT);
+            return Err(child_failure(
+                "the consent client",
+                &error,
+                status,
+                printed.as_deref(),
+            ));
         }
     };
     let status = process.wait().context("wait for consent client")?;
     if !status.success() || reply.capability != capability {
-        bail!("consent client authentication failed");
+        let error = anyhow::anyhow!("consent client authentication failed");
+        if status.success() {
+            return Err(error);
+        }
+        let printed = stderr.finish(STDERR_TAIL_WAIT);
+        return Err(child_failure(
+            "the consent client",
+            &error,
+            Some(status),
+            printed.as_deref(),
+        ));
     }
     if let ConsentDecision::Grant { duration } = reply.decision
         && !prompt.offers(duration)

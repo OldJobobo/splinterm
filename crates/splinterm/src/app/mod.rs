@@ -31,6 +31,6 @@ mod upgrade_dialog;
 mod window;
 mod window_resume;
 
-pub(crate) use cli::run;
+pub(crate) use cli::{is_dialog_child, run};
 pub(crate) use remote_status::RemoteNotConnected;
 pub(crate) use window_resume::run_resumed;

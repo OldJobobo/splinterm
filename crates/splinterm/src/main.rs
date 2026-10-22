@@ -1,6 +1,7 @@
 mod app;
 mod handoff_acquire;
 
+use splinterd::child_stderr::CLIENT_FAILURE_PREFIX;
 use splinterm::diagnostics::{
     DiagnosticErrorCode, ExitClass, finish_global, global as graphical_diagnostics,
 };
@@ -58,11 +59,45 @@ async fn run_client(window_resume: Option<handoff_acquire::AcquiredWindowResume>
             }
             if graphical_diagnostics().is_some() {
                 finish_global(ExitClass::Unknown, Some(DiagnosticErrorCode::InternalError));
-                eprintln!("splinterm graphical client failed");
+                eprintln!("{}", graphical_failure(&error, app::is_dialog_child()));
             } else {
                 eprintln!("{error:#}");
             }
             std::process::exit(1);
         }
+    }
+}
+
+/// The line a failed graphical client prints. An ordinary graphical client
+/// prints only that it failed, never arbitrary error text, because its
+/// standard error can reach the desktop session's journal; the diagnostics
+/// log records its category. A trusted dialog child's standard error is a
+/// private pipe to the command that asked, which reports it bounded
+/// (`splinterd::child_stderr`), so the child adds its error chain: without
+/// it, a dialog that fails before it maps leaves no reason anywhere.
+fn graphical_failure(error: &anyhow::Error, dialog_child: bool) -> String {
+    if dialog_child {
+        format!("{CLIENT_FAILURE_PREFIX}: {error:#}")
+    } else {
+        CLIENT_FAILURE_PREFIX.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::graphical_failure;
+
+    #[test]
+    fn only_a_dialog_child_reports_its_error_chain() {
+        let error = anyhow::anyhow!("terminal snapshot metadata is invalid")
+            .context("show the trusted dialog");
+        assert_eq!(
+            graphical_failure(&error, true),
+            "splinterm graphical client failed: show the trusted dialog: terminal snapshot metadata is invalid"
+        );
+        assert_eq!(
+            graphical_failure(&error, false),
+            "splinterm graphical client failed"
+        );
     }
 }
