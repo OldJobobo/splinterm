@@ -258,8 +258,8 @@ placeholders at expiry, and its panes acquire control the ordinary way.
 
 ## Amendment: remembered agent grants (ADR 0014)
 
-[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and not yet
-implemented, adds remembered agent grants: "Always for this workspace" answers
+[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and implemented on
+`main`, adds remembered agent grants: "Always for this workspace" answers
 kept in a daemon-owned store. They are durable user state, like policy, not
 handoff state, and this ADR treats them as follows:
 

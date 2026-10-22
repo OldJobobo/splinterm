@@ -72,8 +72,8 @@ supported automation. No third-party grant is persisted across daemon restart.
 
 ## Amendment: easy agent access (ADR 0014)
 
-[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and not yet
-implemented, changes three parts of this decision. The daemon-launched trusted
+[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and implemented on
+`main`, changes three parts of this decision. The daemon-launched trusted
 client, the private inherited descriptor, the one-use capability, and the
 bounded framing stay as decided here.
 

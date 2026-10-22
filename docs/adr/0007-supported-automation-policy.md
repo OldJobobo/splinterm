@@ -285,8 +285,8 @@ status needs no new scope: it follows `topology_metadata_read`.
 
 ### Amendment: remembered consent grants (ADR 0014)
 
-[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and not yet
-implemented, adds a second persistent authority source beside the policy file:
+[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and implemented on
+`main`, adds a second persistent authority source beside the policy file:
 grants the person answers with "Always for this workspace" in the trusted
 consent window, kept in a daemon-owned store separate from `policy.json`. It
 also adds a daemon-lifetime "While this workspace is open" grant keyed by the

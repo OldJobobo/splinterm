@@ -531,10 +531,13 @@ continuity, reusable templates, or cross-machine saved-layout synchronization.
 
 The daemon owns all running shells. Stopping it, installing a private-protocol-
 incompatible version, or resetting it ends those processes. A package upgrade
-also replaces the trusted client inode: close and reopen every existing
-Splinterm Window after replacement so it uses the exact client sibling adjacent
-to the running daemon. To back up and clear
-every session in one guarded workflow:
+also replaces the trusted client inode. A Window opened before the upgrade
+keeps working, including new tabs and panes, while it runs, until it is
+live-upgraded or reopened; new launches use the new install. A client that
+executes another program loses that trust, and a fresh launch must match the
+installed `splinterm` next to the running daemon (or, after a verified live
+upgrade, the exact client snapshot that daemon pinned). To back up and clear every
+session in one guarded workflow:
 
 ```bash
 splinterm reset
@@ -559,8 +562,9 @@ reattaches every pane from the serving daemon within about 30 seconds, and
 resumes input. If it cannot, it keeps its last screen, stays paused, and says
 "Lost connection to splinterd — reopen from the launcher"; its terminals may
 still be running and reopen from the Recent Dojos picker. A local Window whose
-client was replaced by the package upgrade gives up at once: the daemon trusts
-only the installed `splinterm`, which a Window reopened from the launcher runs.
+client was replaced by the package upgrade gives up at once: a fresh client must match
+the installed `splinterm` (or the client snapshot a live-upgraded daemon
+pinned), which a Window reopened from the launcher runs.
 
 ## Remote human use
 
