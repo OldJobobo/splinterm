@@ -53,7 +53,9 @@
         "agent_status_get",
         "access_list",
         "access_revoke",
-        "access_revoke_all"
+        "access_revoke_all",
+        "mcp_setup",
+        "mcp_remove"
       ]
     },
     "ok": {
@@ -2061,6 +2063,106 @@
               "properties": {
                 "data": {
                   "$ref": "#/$defs/access_revoke_all_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "required": [
+            "resource"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "mcp_setup"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/mcp_setup_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "required": [
+            "resource"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "mcp_remove"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/mcp_remove_success"
                 },
                 "truncated": {
                   "const": false
@@ -4492,6 +4594,405 @@
                 ]
               }
             ]
+          }
+        }
+      ]
+    },
+    "mcp_setup_path": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/[^\\u0000-\\u001f\\u007f-\\u009f]*$"
+    },
+    "mcp_claude_code_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command",
+        "args",
+        "env"
+      ],
+      "properties": {
+        "type": {
+          "const": "stdio"
+        },
+        "command": {
+          "$ref": "#/$defs/mcp_setup_path"
+        },
+        "args": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "env": {
+          "type": "object",
+          "maxProperties": 0
+        }
+      }
+    },
+    "mcp_codex_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "env_vars"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/mcp_setup_path"
+        },
+        "env_vars": {
+          "const": [
+            "SPLINTERM_SPLINT_ID",
+            "SPLINTERM_SPLINT_INCARNATION"
+          ]
+        }
+      }
+    },
+    "mcp_vscode_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command",
+        "args"
+      ],
+      "properties": {
+        "type": {
+          "const": "stdio"
+        },
+        "command": {
+          "$ref": "#/$defs/mcp_setup_path"
+        },
+        "args": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "mcp_setup_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "config_path",
+        "config_format",
+        "server_name",
+        "action",
+        "changed",
+        "dry_run",
+        "written",
+        "adapter_path",
+        "entry",
+        "grants_access"
+      ],
+      "properties": {
+        "host": {
+          "enum": [
+            "claude_code",
+            "codex",
+            "vscode"
+          ]
+        },
+        "config_path": {
+          "$ref": "#/$defs/mcp_setup_path"
+        },
+        "config_format": {
+          "enum": [
+            "json",
+            "jsonc",
+            "toml"
+          ]
+        },
+        "server_name": {
+          "const": "splinterm"
+        },
+        "action": {
+          "enum": [
+            "created",
+            "added",
+            "replaced",
+            "unchanged"
+          ]
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "written": {
+          "type": "boolean"
+        },
+        "adapter_path": {
+          "$ref": "#/$defs/mcp_setup_path"
+        },
+        "entry": {
+          "type": "object"
+        },
+        "grants_access": {
+          "const": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "unchanged"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "changed": {
+                "const": false
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "changed": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dry_run": {
+                "const": false
+              },
+              "changed": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "written": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "written": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "host": {
+                "const": "claude_code"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "config_format": {
+                "const": "json"
+              },
+              "entry": {
+                "$ref": "#/$defs/mcp_claude_code_entry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "host": {
+                "const": "codex"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "config_format": {
+                "const": "toml"
+              },
+              "entry": {
+                "$ref": "#/$defs/mcp_codex_entry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "host": {
+                "const": "vscode"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "config_format": {
+                "const": "jsonc"
+              },
+              "entry": {
+                "$ref": "#/$defs/mcp_vscode_entry"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "mcp_remove_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "config_path",
+        "config_format",
+        "server_name",
+        "action",
+        "changed",
+        "dry_run",
+        "written",
+        "grants_access"
+      ],
+      "properties": {
+        "host": {
+          "enum": [
+            "claude_code",
+            "codex",
+            "vscode"
+          ]
+        },
+        "config_path": {
+          "$ref": "#/$defs/mcp_setup_path"
+        },
+        "config_format": {
+          "enum": [
+            "json",
+            "jsonc",
+            "toml"
+          ]
+        },
+        "server_name": {
+          "const": "splinterm"
+        },
+        "action": {
+          "enum": [
+            "removed",
+            "absent"
+          ]
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "written": {
+          "type": "boolean"
+        },
+        "grants_access": {
+          "const": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "absent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "changed": {
+                "const": false
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "changed": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dry_run": {
+                "const": false
+              },
+              "changed": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "written": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "written": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "host": {
+                "const": "claude_code"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "config_format": {
+                "const": "json"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "host": {
+                "const": "codex"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "config_format": {
+                "const": "toml"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "host": {
+                "const": "vscode"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "config_format": {
+                "const": "jsonc"
+              }
+            }
           }
         }
       ]

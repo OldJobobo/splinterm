@@ -14,6 +14,7 @@ mod keymap_cli;
 mod launcher_check;
 mod local_service;
 mod machine;
+mod mcp_setup;
 mod omarchy_hint;
 mod omarchy_integration;
 mod pane_bridge;

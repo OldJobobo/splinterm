@@ -162,6 +162,9 @@ pub(crate) async fn run() -> Result<()> {
     if let Command::Access { command } = command {
         return run_access_command(command, output, schema_major, timeout_ms, remote).await;
     }
+    if let Command::Mcp { command } = command {
+        return super::mcp_setup::run(command, output, schema_major, timeout_ms, remote.is_some());
+    }
     if output == Some(OutputMode::Json) {
         let focus_command = matches!(&command, Command::Focus);
         match run_machine_command(
@@ -677,6 +680,7 @@ async fn run_headless_on(
         | Command::Relay { .. }
         | Command::AgentStatus { .. }
         | Command::Access { .. }
+        | Command::Mcp { .. }
         | Command::Remote { .. }
         | Command::Reset { .. } => {
             unreachable!("graphical, policy, or relay command returned before daemon connection")

@@ -120,6 +120,13 @@ pub(in crate::app) enum Command {
         #[command(subcommand)]
         command: AccessCommand,
     },
+    /// Add Splinterm's MCP server to an agent host's configuration, or remove
+    /// it. Setup grants no access: the agent asks the first time it needs a
+    /// workspace.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Bridge private protocol bytes over non-terminal stdin/stdout.
     Relay {
         /// Use stdin and stdout as one byte-transparent automation transport.
@@ -675,6 +682,51 @@ pub(in crate::app) enum AccessCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub(in crate::app) enum McpCommand {
+    /// Add the installed splinterm-mcp adapter to the host's MCP servers as
+    /// `splinterm`. Grants no access and writes no policy.
+    Setup {
+        #[arg(value_enum)]
+        host: McpHostArg,
+        /// Print the exact change without writing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite a different existing `splinterm` entry.
+        #[arg(long)]
+        replace: bool,
+        /// Edit this file instead of the host's own user configuration.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        /// Start this adapter instead of the one installed next to splinterm.
+        #[arg(long, value_name = "PATH")]
+        adapter: Option<PathBuf>,
+    },
+    /// Remove the `splinterm` entry from the host's MCP servers. Revokes no
+    /// grant.
+    Remove {
+        #[arg(value_enum)]
+        host: McpHostArg,
+        /// Print the exact change without writing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Edit this file instead of the host's own user configuration.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+}
+
+/// An MCP host `splinterm mcp` can configure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(in crate::app) enum McpHostArg {
+    /// Claude Code, user scope (`~/.claude.json`).
+    ClaudeCode,
+    /// Codex CLI (`~/.codex/config.toml`).
+    Codex,
+    /// Visual Studio Code, default profile (`~/.config/Code/User/mcp.json`).
+    Vscode,
 }
 
 #[derive(Debug, Subcommand)]

@@ -1,0 +1,27 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v2",
+    "request_id": "1",
+    "operation": "mcp_setup",
+    "ok": true,
+    "truncated": false,
+    "data": {
+      "host": "vscode",
+      "config_path": "/home/alice/.config/Code/User/mcp.json",
+      "config_format": "jsonc",
+      "server_name": "splinterm",
+      "action": "unchanged",
+      "changed": true,
+      "dry_run": false,
+      "written": false,
+      "adapter_path": "/usr/bin/splinterm-mcp",
+      "entry": {
+        "args": [],
+        "command": "/usr/bin/splinterm-mcp",
+        "type": "stdio"
+      },
+      "grants_access": false
+    }
+  }
+}

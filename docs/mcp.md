@@ -3,9 +3,91 @@
 `splinterm-mcp` is a local, bounded MCP stdio server supporting `2025-06-18`
 and `2025-11-25` (preferred). It is an
 optional split package and a separately authorized third-party client, not a
-trusted part of `splinterd`. Installing it grants nothing: the daemon continues
-to deny operations until the owner installs an exact executable path/digest
-policy.
+trusted part of `splinterd`. Installing it, or adding it to an agent host,
+grants nothing: the daemon denies every operation until the person grants
+access in Splinterm's consent prompt or writes an exact executable path and
+digest policy.
+
+## Set up an agent host
+
+One command adds the installed adapter to an agent host:
+
+```bash
+splinterm mcp setup claude-code    # or codex, or vscode
+splinterm mcp setup codex --dry-run
+```
+
+It adds one MCP server, named `splinterm`, that starts the adapter, and changes
+nothing else. **Setup grants no access and writes no policy.** The first time
+the agent needs a workspace, it asks with `request_lair_access`, and you answer
+in Splinterm's prompt (see [Easy agent access](#easy-agent-access)). Start a new
+session of the host to load the server.
+
+| Host | File | Entry | Same as |
+| --- | --- | --- | --- |
+| `claude-code` | `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json` when that is set (user scope) | `mcpServers.splinterm`: `{"type": "stdio", "command": ADAPTER, "args": [], "env": {}}` | `claude mcp add --scope user splinterm -- ADAPTER` |
+| `codex` | `~/.codex/config.toml`, or `$CODEX_HOME/config.toml` when that is set | `[mcp_servers.splinterm]` with `command = ADAPTER` and `env_vars = ["SPLINTERM_SPLINT_ID", "SPLINTERM_SPLINT_INCARNATION"]` | `codex mcp add splinterm -- ADAPTER`, plus the variables Codex must forward for [agent status](#reporting-agent-status) |
+| `vscode` | `Code/User/mcp.json` or `Code - OSS/User/mcp.json` under `~/.config` (or `$XDG_CONFIG_HOME`), whichever exists | `servers.splinterm`: `{"type": "stdio", "command": ADAPTER, "args": []}` | The `.vscode/mcp.json` form below, in the default profile |
+
+The Claude Code and Codex entries are byte-for-byte what Claude Code 2.1.308
+and codex-cli 0.144.5 write, checked in a temporary home. The VS Code entry
+follows the documented form below; it was not checked against an installed
+VS Code. With neither or both VS Code directories present, setup asks for
+`--config PATH`.
+
+**Which adapter.** `ADAPTER` is the `splinterm-mcp` installed next to the
+`splinterm` you run: `/usr/bin/splinterm-mcp` for the package. When that file
+is in the Nix store, whose paths change with every upgrade, setup writes the
+first Nix profile entry from ADR 0014's list that resolves to the same file,
+such as `~/.nix-profile/bin/splinterm-mcp`. `--adapter PATH` starts another
+adapter, such as a development build, which is offered only the shorter grant
+durations. Without an installed adapter, setup stops with `not_found` and
+changes nothing.
+
+**What setup changes, and what it refuses.**
+
+- `--dry-run` prints the exact change as a diff of only the changed lines,
+  without context lines, and writes nothing. When a neighbouring entry gains a
+  separating comma, its last line is shown.
+- Running it again changes nothing, and the file is not rewritten.
+- It edits the file in place. Other servers, other settings, their order and
+  spacing, and comments in VS Code's file stay as they are.
+- A different existing `splinterm` entry is left alone, and setup stops with
+  `confirmation_required`. Review it; `--replace` overwrites it.
+- It writes nothing to a file it cannot edit safely: malformed JSON or TOML,
+  duplicate keys at any depth, a server list that is not an object or table, a
+  Codex entry written as an inline table or with dotted keys, a symbolic link,
+  a file with other hard links, a file owned by another user or writable by
+  group or others, a file over 64 MiB, or a directory owned by another user or
+  writable by everyone.
+- Writes are atomic. The new text goes to a new file in the same directory, with
+  the old file's mode (`0600` for a new file), is synced, and is renamed over
+  the old file only if that has not changed since it was read; then the
+  directory is synced. A missing `~/.codex` is created with mode `0700`.
+- `--config PATH` edits another file in the host's format, such as a trusted
+  project's `.vscode/mcp.json` or a VS Code profile's `mcp.json`.
+
+`splinterm mcp remove HOST` removes only the `splinterm` entry, with the same
+checks and `--dry-run`. It revokes nothing: `splinterm access list` shows the
+adapter's grants, and `splinterm access revoke` ends them.
+
+Claude Code rewrites `~/.claude.json` while it runs, so a session that is open
+during setup can write its older copy back. Run setup with no Claude Code
+session open, or check afterwards with `claude mcp get splinterm`.
+
+**Machine output.** `--output json` writes one `splinterm.cli.v2` document
+(`dist/schemas/v2/cli-envelope.schema.json`) with operation `mcp_setup` or
+`mcp_remove`. Its data has `host`, `config_path`, `config_format` (`json`,
+`jsonc`, or `toml`), `server_name`, `action` (`created`, `added`, `replaced`,
+or `unchanged` for setup; `removed` or `absent` for remove), `changed`,
+`dry_run`, and `written`; setup adds `adapter_path` and the `entry` it wrote.
+`grants_access` is always `false`. A removal never echoes the entry it
+removed, which may hold secrets. Failures are `not_found` (no adapter or VS Code
+directory; exit 5), `invalid_argument` (a refused file, directory, or path;
+exit 5), `confirmation_required` (a different entry without `--replace`;
+exit 3), and `internal` (exit 70, retryable when the file changed during the
+edit). `splinterm mcp` never contacts the daemon and refuses `--remote` and
+`--timeout-ms`.
 
 ## Install identity and launch
 
@@ -21,7 +103,7 @@ Use the resulting lowercase digest in the policy examples below. The canonical
 package path is `/usr/bin/splinterm-mcp`; authorizing a build-tree path, basename,
 MCP client name, Unix UID, or another `splinterm` executable does not authorize
 it. The host needs only the daemon-discovery environment used by other local
-clients:
+clients. This is the entry `splinterm mcp setup claude-code` writes:
 
 ```json
 {
@@ -36,7 +118,11 @@ clients:
 }
 ```
 
-### Claude Code 2.1.218
+### Manual setup
+
+Use these when you prefer the host's own command or edit its file by hand.
+
+#### Claude Code 2.1.218
 
 The installed Claude Code CLI accepts a local stdio server directly:
 
@@ -49,7 +135,18 @@ Use `--scope project` only in a trusted project; Claude Code asks approval for
 project-local MCP configuration. Remove it with `claude mcp remove --scope user
 splinterm`.
 
-### Visual Studio Code 1.125.0
+#### Codex CLI 0.144.5
+
+```bash
+codex mcp add splinterm -- /usr/bin/splinterm-mcp
+codex mcp list
+```
+
+Then add the `env_vars` line from [Reporting agent status](#reporting-agent-status)
+to the `[mcp_servers.splinterm]` table it writes in `~/.codex/config.toml`.
+Remove it with `codex mcp remove splinterm`.
+
+#### Visual Studio Code 1.125.0
 
 The installed VS Code CLI accepts a stdio definition:
 
@@ -219,9 +316,11 @@ behavior.
 > **Status:** partly implemented for 0.2. The contract is fixed by
 > [ADR 0014](adr/0014-easy-agent-access.md) and described for users in
 > [Easy agent access](automation.md#easy-agent-access). Levels, durations,
-> remembered grants, the prompt, pending requests, and the access list with
-> per-entry revoke (`splinterm access`) work as described here. **Agent
-> access** in the command palette and one-step MCP setup are still planned.
+> remembered grants, the prompt, pending requests, the access list with
+> per-entry revoke (`splinterm access`), and one-step host setup
+> ([`splinterm mcp setup`](#set-up-an-agent-host)) work as described here.
+> Still planned: **Agent access** in the command palette, the Explorer marks,
+> and the waiting indicator in Windows.
 
 **Levels.** `request_lair_access` asks for one of three levels for a workspace
 (a Lair): **Look**, **Look and type**, or **Manage**. The person answers once
@@ -367,7 +466,7 @@ server process. A host that starts stdio servers with the agent's full
 environment forwards them automatically. A host that filters the server
 environment must forward both variables explicitly. Codex starts stdio servers
 with a whitelisted environment, so add them to its server entry in
-`~/.codex/config.toml`:
+`~/.codex/config.toml` (`splinterm mcp setup codex` writes this entry):
 
 ```toml
 [mcp_servers.splinterm]
@@ -424,7 +523,8 @@ transport.
 A package upgrade changes the binary digest. Stop MCP hosts, review the new
 binary, update the policy digest explicitly, reload policy, then reconnect. The
 package never edits or broadens policy. Removing `splinterm-mcp` removes its
-binary/docs; user policy remains user-owned.
+binary/docs; user policy and host configuration remain user-owned. Remove a
+host entry with `splinterm mcp remove HOST`.
 
 To revoke immediately, remove/narrow the rule and reload policy, then terminate
 the MCP host if desired. Reload disconnects affected daemon connections and
