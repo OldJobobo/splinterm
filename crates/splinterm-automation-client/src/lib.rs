@@ -44,12 +44,18 @@ use tokio_util::sync::CancellationToken;
 
 mod access;
 mod daemon_handoff;
+mod mcp_setup;
 mod reconnect;
 
 pub use access::{
     AccessRevokeIdError, access_entry_id, access_kind_name, access_level_name,
     access_list_envelope, access_revoke_all_envelope, access_revoke_envelope, consent_scope_name,
     parse_access_entry_id, parse_access_revoke_target, public_display_text,
+};
+
+pub use mcp_setup::{
+    MAX_MCP_SETUP_PATH_BYTES, McpAdapterIdentity, McpConfigFormat, McpHostName, McpSetupAction,
+    McpSetupOperation, McpSetupOutcome, mcp_setup_envelope,
 };
 
 pub use daemon_handoff::{

@@ -1,0 +1,28 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v2",
+    "request_id": "1",
+    "operation": "mcp_remove",
+    "ok": true,
+    "truncated": false,
+    "data": {
+      "host": "codex",
+      "config_path": "/home/alice/.codex/config.toml",
+      "config_format": "toml",
+      "server_name": "splinterm",
+      "action": "removed",
+      "changed": true,
+      "dry_run": false,
+      "written": true,
+      "grants_access": false,
+      "entry": {
+        "command": "/usr/bin/splinterm-mcp",
+        "env_vars": [
+          "SPLINTERM_SPLINT_ID",
+          "SPLINTERM_SPLINT_INCARNATION"
+        ]
+      }
+    }
+  }
+}

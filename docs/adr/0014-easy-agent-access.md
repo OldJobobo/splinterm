@@ -3,8 +3,9 @@
 - **Status:** Accepted for `0.2.0`; implementation in progress (the grant
   engine, the consent prompt, pending requests, and the access list with
   per-entry revoke and Revoke all access through the daemon API and the human
-  and JSON CLI are implemented; the access list and revoke UI in the command
-  palette, the Explorer marks, and one-step setup are pending)
+  and JSON CLI, and one-step MCP host setup (`splinterm mcp setup`) are
+  implemented; the access list and revoke UI in the command palette, the
+  Explorer marks, and the waiting indicator are pending)
 - **Date:** 2026-10-20
 - **Amends:** [ADR 0005](0005-trusted-consent-broker.md) (consent outcomes,
   prompt input, and persistence), [ADR 0007](0007-supported-automation-policy.md)

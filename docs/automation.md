@@ -101,7 +101,8 @@ resource-revision hints because those operations expose no resource data.
 
 The implemented v2 one-shot names are frozen as follows. Human-only local
 administration commands such as `policy`, `relay`, and `reset` are deliberately
-outside this inventory.
+outside this inventory. `mcp setup` and `mcp remove` are local file edits that
+never contact the daemon; see [Set up an agent host](mcp.md#set-up-an-agent-host).
 
 | Command | `operation` |
 | --- | --- |
@@ -139,6 +140,8 @@ outside this inventory.
 | `agent-status set STATE [...]` | `agent_status_set` |
 | `agent-status clear [...]` | `agent_status_clear` |
 | `agent-status get [SPLINT_ID]` | `agent_status_get` |
+| `mcp setup HOST [--dry-run] [--replace]` | `mcp_setup` |
+| `mcp remove HOST [--dry-run] [--force]` | `mcp_remove` |
 
 The NDJSON subscription commands are:
 
@@ -287,9 +290,10 @@ verification, and lifecycle guidance.
 
 > **Status:** partly implemented for 0.2. The contract is fixed by
 > [ADR 0014](adr/0014-easy-agent-access.md). The access levels, the three
-> durations, remembered grants, the prompt, pending requests, and the access
+> durations, remembered grants, the prompt, pending requests, the access
 > list with per-entry revoke and **Revoke all access** through
-> `splinterm access` work as described below. Still planned: **Agent access**
+> `splinterm access`, and one-step agent setup through `splinterm mcp setup`
+> work as described below. Still planned: **Agent access**
 > in the command palette, the Explorer marks, and the waiting indicator in
 > Windows. Until the palette uses the new list, its **Revoke all access** ends
 > the grants the Window shows and every pending request, and leaves
@@ -305,6 +309,19 @@ What it protects: it keeps cooperating agents inside what you agreed to and
 shows you which agent can reach what. It is not a sandbox. A program running as
 your account can already read your files and run commands, and can edit the
 remembered-grant store, without asking Splinterm.
+
+### Setting up an agent
+
+`splinterm mcp setup claude-code` (or `codex`, or `vscode`) adds the installed
+MCP adapter to that agent host's own configuration in one step. `--dry-run`
+shows the exact change first, a second run changes nothing, and
+`splinterm mcp remove HOST` takes the entry out again. Setup grants no access
+and writes no policy: the agent asks for a level the first time it needs a
+workspace, and you answer in the prompt described below. Setup also says when
+the adapter it names can never be offered "Always", such as a development
+build or a raw Nix store path. See
+[Set up an agent host](mcp.md#set-up-an-agent-host) for the files, entries, and
+safety checks.
 
 ### Access levels
 
