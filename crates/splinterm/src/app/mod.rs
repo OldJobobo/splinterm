@@ -1,6 +1,7 @@
 //! Binary-owned application services.
 
 mod access_cli;
+mod access_monitor;
 mod agent_status_cli;
 mod cli;
 mod commands;

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use splinterm_core::{LairRetention, SplintId};
 
 use super::{
+    agent_access::{AccessMarks, AccessReach, mark_text},
     agent_status::{self, AgentAggregate, AgentGlyphs},
     text_edit::BoundedTextEditor,
     topology::LairExplorerActivationTarget,
@@ -142,6 +143,9 @@ pub(crate) struct LairExplorerUi {
     context_pressed: Option<(NavigationNodeId, splinterm_core::TopologyRevision)>,
     agent_status_enabled: bool,
     agent_glyphs: AgentGlyphs,
+    /// Which workspaces, Dojos, and Splints an agent can reach, is connected
+    /// to, or asks for (ADR 0014). Shown in words in each row's status.
+    access_marks: AccessMarks,
 }
 
 impl Default for LairExplorerUi {
@@ -161,6 +165,7 @@ impl Default for LairExplorerUi {
             context_pressed: None,
             agent_status_enabled: true,
             agent_glyphs: AgentGlyphs::default(),
+            access_marks: AccessMarks::default(),
         }
     }
 }
@@ -262,6 +267,60 @@ impl LairExplorerUi {
         self.agent_status_enabled = enabled;
         self.ensure_selection_visible();
         true
+    }
+
+    /// Replaces the agent access marks; whether any row may change.
+    pub(crate) fn set_access_marks(&mut self, marks: AccessMarks) -> bool {
+        if self.access_marks == marks {
+            return false;
+        }
+        self.access_marks = marks;
+        true
+    }
+
+    fn splint_reach(&self, splint: &NavigationExplorerSplint) -> AccessReach {
+        match splint.id {
+            NavigationNodeId::Splint { splint_id, .. } => self.access_marks.splint(splint_id),
+            _ => AccessReach::None,
+        }
+    }
+
+    /// How far an agent reaches the whole Dojo, and some Splint in it.
+    fn dojo_reach(&self, dojo: &NavigationExplorerDojo) -> (AccessReach, AccessReach) {
+        let whole = match dojo.id {
+            NavigationNodeId::Dojo { dojo_id, .. } => self.access_marks.dojo(dojo_id),
+            _ => AccessReach::None,
+        };
+        let part = dojo
+            .splints
+            .iter()
+            .map(|splint| self.splint_reach(splint))
+            .max()
+            .unwrap_or_default();
+        (whole, part)
+    }
+
+    fn lair_mark(
+        &self,
+        lair: &crate::navigation_projection::NavigationExplorerLair,
+    ) -> Option<String> {
+        let NavigationNodeId::Lair(lair_id) = lair.id else {
+            return None;
+        };
+        let part = lair
+            .dojos
+            .iter()
+            .map(|dojo| {
+                let (whole, part) = self.dojo_reach(dojo);
+                whole.max(part)
+            })
+            .max()
+            .unwrap_or_default();
+        mark_text(
+            self.access_marks.lair(lair_id),
+            part,
+            self.access_marks.waiting(lair_id),
+        )
     }
 
     /// Icons, or ASCII when the embedded icon face is unavailable.
@@ -704,11 +763,14 @@ impl LairExplorerUi {
                     .flat_map(|dojo| &dojo.splints)
                     .filter_map(|splint| splint.agent_status.as_ref()),
             );
-            let status = format!(
-                "{} · {}{}",
-                lifecycle_label(lair.lifecycle()),
-                retention_label(lair.retention),
-                self.aggregate_suffix(&aggregate)
+            let status = with_access_mark(
+                self.lair_mark(lair),
+                format!(
+                    "{} · {}{}",
+                    lifecycle_label(lair.lifecycle()),
+                    retention_label(lair.retention),
+                    self.aggregate_suffix(&aggregate)
+                ),
             );
             rows.push(LairExplorerRow {
                 id: lair.id,
@@ -765,10 +827,14 @@ impl LairExplorerUi {
                 .filter_map(|splint| splint.agent_status.as_ref()),
         );
         let base = format!("{} · {attachment}", lifecycle_label(dojo.lifecycle()));
-        let status = row_status(
-            pending,
-            &format!("{base}{}", self.aggregate_suffix(&aggregate)),
-            blocker,
+        let (whole, part) = self.dojo_reach(dojo);
+        let status = with_access_mark(
+            mark_text(whole, part, 0),
+            row_status(
+                pending,
+                &format!("{base}{}", self.aggregate_suffix(&aggregate)),
+                blocker,
+            ),
         );
         rows.push(LairExplorerRow {
             id: dojo.id,
@@ -804,7 +870,10 @@ impl LairExplorerUi {
             let pending = self
                 .pending
                 .is_some_and(|pending| pending.id() == splint.id);
-            let status = row_status(pending, &state, blocker);
+            let status = with_access_mark(
+                mark_text(self.splint_reach(splint), AccessReach::None, 0),
+                row_status(pending, &state, blocker),
+            );
             rows.push(LairExplorerRow {
                 id: splint.id,
                 kind: LairExplorerRowKind::Splint,
@@ -1054,6 +1123,15 @@ fn nearest_surviving_parent(
             }
         })
     })
+}
+
+/// Puts the agent access mark first, in words, so a narrow Explorer keeps it
+/// and assistive technology reads it with the row (ADR 0014).
+fn with_access_mark(mark: Option<String>, status: String) -> String {
+    match mark {
+        Some(mark) => format!("{mark} · {status}"),
+        None => status,
+    }
 }
 
 fn row_status(pending: bool, state: &str, blocker: Option<&str>) -> String {
@@ -2124,5 +2202,88 @@ pub(super) mod tests {
         assert!(expanded_rows(&mut explorer)[2].agent_column.is_some());
         assert!(explorer.apply_agent_status(splint_id, 3, None));
         assert!(explorer.rows().iter().all(|row| row.agent_column.is_none()));
+    }
+
+    #[test]
+    fn access_marks_say_in_words_who_can_reach_or_is_connected_and_who_waits() {
+        use crate::frontend::agent_access::{
+            AccessSnapshot,
+            tests::{entry, remembered_key},
+        };
+        use splinterm_protocol::{AccessEntryKey, AccessEntryKind, RememberedStoreStatus};
+        let view = view();
+        let NavigationNodeId::Lair(work) = view.lairs[0].id else {
+            unreachable!()
+        };
+        let NavigationNodeId::Lair(notes) = view.lairs[1].id else {
+            unreachable!()
+        };
+        let NavigationNodeId::Splint { splint_id, .. } = view.lairs[0].dojos[0].splints[0].id
+        else {
+            unreachable!()
+        };
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view);
+        let before = expanded_rows(&mut explorer);
+        assert!(before.iter().all(|row| !row.status.contains("Agent")));
+
+        // A Splint once grant, connected; a while-open grant for "notes",
+        // not connected; and a request waiting about "notes".
+        let mut once = entry(
+            AccessEntryKey::Grant { grant_id: 17 },
+            AccessEntryKind::Once,
+            work,
+        );
+        once.splint_id = Some(splint_id);
+        once.incarnation = Some(3);
+        once.connections = 1;
+        let session = entry(
+            AccessEntryKey::Grant { grant_id: 18 },
+            AccessEntryKind::WorkspaceSession,
+            notes,
+        );
+        let pending = entry(
+            AccessEntryKey::Pending { request_id: 4 },
+            AccessEntryKind::Pending,
+            notes,
+        );
+        let mut snapshot = AccessSnapshot::new(9, RememberedStoreStatus::Available);
+        snapshot.entries = vec![once, session, pending];
+        assert!(explorer.set_access_marks(AccessMarks::from_snapshot(&snapshot)));
+        assert!(!explorer.set_access_marks(AccessMarks::from_snapshot(&snapshot)));
+        let rows = expanded_rows(&mut explorer);
+        let status = |label: &str| {
+            let row = rows.iter().find(|row| row.label == label).unwrap();
+            assert_eq!(row.status, row.accessible_status, "{label}");
+            row.status.clone()
+        };
+        assert_eq!(status("work"), "Agent connected to part · Running · Saved");
+        assert_eq!(
+            status("editor"),
+            "Agent connected to part · Running · Current"
+        );
+        assert_eq!(status("shell"), "Agent connected · Running");
+        assert!(
+            status("notes").starts_with("Agent asking for access · Agent can reach · "),
+            "{}",
+            status("notes")
+        );
+
+        // A remembered grant for the whole workspace marks it, not its rows.
+        let mut remembered = entry(remembered_key(), AccessEntryKind::Remembered, work);
+        remembered.connections = 0;
+        snapshot.entries = vec![remembered];
+        assert!(explorer.set_access_marks(AccessMarks::from_snapshot(&snapshot)));
+        let rows = expanded_rows(&mut explorer);
+        assert!(rows[0].status.starts_with("Agent can reach · "));
+        assert!(rows[1..].iter().all(|row| !row.status.contains("Agent")));
+
+        // The marks end with the access.
+        assert!(explorer.set_access_marks(AccessMarks::default()));
+        assert!(
+            expanded_rows(&mut explorer)
+                .iter()
+                .all(|row| !row.status.contains("Agent"))
+        );
     }
 }

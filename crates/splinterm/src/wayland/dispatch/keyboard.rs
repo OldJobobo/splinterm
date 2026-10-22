@@ -4,12 +4,11 @@ use super::super::{
     ActionId, App, CommandPaletteShortcutAction, Connection, ExitClass, KeyEvent, KeyboardHandler,
     KeymapPress, Keysym, Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle,
     RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
-    WindowTopologyCommand, binding_help_repeat_consumed, close_other_tabs_command,
-    command_palette_shortcut_action, consume_detached_enter_press, font_zoom_action,
-    keymap_press_consumes_key, keymap_press_for, lair_lifecycle_command, pane_focus_action,
-    pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
-    shortcut_paused_during_handoff, tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard,
-    wl_surface,
+    WindowTopologyCommand, close_other_tabs_command, command_palette_shortcut_action,
+    consume_detached_enter_press, font_zoom_action, keymap_press_consumes_key, keymap_press_for,
+    lair_lifecycle_command, pane_focus_action, pane_topology_action,
+    session_picker_shortcut_action, shortcut_action_for, shortcut_paused_during_handoff,
+    tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
 };
 
 impl KeyboardHandler for App {
@@ -581,7 +580,7 @@ impl KeyboardHandler for App {
             }
             return;
         }
-        if binding_help_repeat_consumed(self.modal.binding_help.is_some(), event.keysym) {
+        if self.modal_repeat_consumed(event.keysym) {
             return;
         }
         if self.owned_field_consumes_repeat(&event) {

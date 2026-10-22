@@ -41,6 +41,7 @@ mod reconnect;
 use reconnect::{ManagedReconnect, reconnect_managed_window};
 
 use super::{
+    access_monitor::{AccessMonitor, abandoned_access_updates},
     pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane_at_incarnation},
     session_catalog::{
         GraphicalLairLifetime, automation_launch, creation_directory, graphical_create_request,
@@ -522,7 +523,8 @@ async fn apply_topology_command(
         | WindowTopologyCommand::ActivateTab { .. }
         | WindowTopologyCommand::CloseTab { .. }
         | WindowTopologyCommand::CloseTabs { .. }
-        | WindowTopologyCommand::ClearAgentStatus { .. } => {
+        | WindowTopologyCommand::ClearAgentStatus { .. }
+        | WindowTopologyCommand::Access(_) => {
             unreachable!("session commands are handled by the topology manager")
         }
     };
@@ -3389,6 +3391,10 @@ fn abandoned_command_updates(
         WindowTopologyCommand::ExplorerContext { command, .. } => *command,
         command => command,
     };
+    if let Some(updates) = abandoned_access_updates(&command, "splinterd was upgrading; try again")
+    {
+        return updates;
+    }
     let mut updates = Vec::with_capacity(2);
     if let WindowTopologyCommand::Split {
         dojo_id,
@@ -3607,6 +3613,7 @@ pub(in crate::app) async fn run_topology_manager(
     let mut poll_priority = false;
     let mut explorer_observation = ExplorerObservation::default();
     let mut agent_status_observation = AgentStatusObservation::default();
+    let mut access = AccessMonitor::default();
     let initial_lair_id = initial_identity.lair_id;
     let initial_dojo_id = initial_identity.dojo_id;
     let mut transient_owners = HashMap::new();
@@ -3708,6 +3715,7 @@ pub(in crate::app) async fn run_topology_manager(
                     answered_reconnect = Some(epoch);
                     explorer_observation = ExplorerObservation::default();
                     agent_status_observation = AgentStatusObservation::default();
+                    access.reset();
                     if close_window {
                         window_closing = true;
                         break;
@@ -3721,6 +3729,16 @@ pub(in crate::app) async fn run_topology_manager(
                 ReconnectOutcome::WindowGone => break,
             }
         }
+        // The access list and its revokes (ADR 0014) never edit topology.
+        let command = match command {
+            Some(WindowTopologyCommand::Access(command)) => {
+                if !access.handle(command, &mut connection, &updates).await {
+                    break;
+                }
+                continue;
+            }
+            command => command,
+        };
         let command = if let Some(command) = command {
             match handle_session_manager_command(
                 &factory,
@@ -3783,6 +3801,7 @@ pub(in crate::app) async fn run_topology_manager(
                         answered_reconnect = Some(epoch);
                         explorer_observation = ExplorerObservation::default();
                         agent_status_observation = AgentStatusObservation::default();
+                        access.reset();
                         if close_window {
                             window_closing = true;
                             break;
@@ -3821,6 +3840,9 @@ pub(in crate::app) async fn run_topology_manager(
                 .await
                 .is_err()
         {
+            break;
+        }
+        if access.due(std::time::Instant::now()) && !access.poll(&mut connection, &updates).await {
             break;
         }
         // The placeholder exists only in the frontend until this mutation is

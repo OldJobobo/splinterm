@@ -84,10 +84,10 @@ pub(crate) use icons::{ChromeIcon, chrome_icons_available};
 #[cfg(test)]
 use images::{KITTY_BACKGROUND_Z_THRESHOLD, SnapshotImage, compare_snapshot_images, image_tier};
 pub(crate) use overlays::actions::{
-    CommandPaletteLayout, CommandPaletteTextCache, DojoPromptLayout, TabContextMenuLayout,
-    command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
-    paint_command_palette, paint_dojo_prompt, paint_tab_context_menu, tab_context_menu_hit_test,
-    tab_context_menu_layout,
+    CommandPaletteLayout, CommandPaletteTextCache, DojoPromptLayout, PaletteBody,
+    TabContextMenuLayout, command_palette_hit_test, command_palette_layout,
+    command_palette_row_hit_test, dojo_prompt_hit_test, dojo_prompt_layout, paint_command_palette,
+    paint_dojo_prompt, paint_tab_context_menu, tab_context_menu_hit_test, tab_context_menu_layout,
 };
 #[allow(
     unused_imports,

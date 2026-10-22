@@ -5,7 +5,10 @@ use splinterm_core::{
 };
 use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
-use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
+use super::{
+    FontUpdate, SessionPickerItem, ThemeUpdate, WindowAccessCommand, WindowAccessUpdate,
+    WindowPaneOptions,
+};
 use crate::navigation_projection::{
     NavigationAction, NavigationExplorerSplintTarget, NavigationExplorerView, NavigationNodeId,
     WindowAgentStatus,
@@ -226,6 +229,8 @@ pub enum WindowTopologyCommand {
         splint_id: SplintId,
         incarnation: u64,
     },
+    /// The **Agent access** list and its revokes (ADR 0014).
+    Access(WindowAccessCommand),
 }
 
 impl WindowTopologyCommand {
@@ -241,7 +246,12 @@ impl WindowTopologyCommand {
             | Self::RequestSessionPicker
             | Self::RequestLairExplorer { .. }
             | Self::RequestSelector { .. }
-            | Self::ActivateTab { .. } => false,
+            | Self::ActivateTab { .. }
+            // Listing and revoking access only read or reduce authority, so
+            // the Window never holds them for a pause. While the Window waits
+            // out a handoff, the topology manager abandons them like any
+            // other daemon request, and a revoke says nothing was revoked.
+            | Self::Access(_) => false,
             Self::ExplorerContext { command, .. } => command.paused_during_handoff(),
             Self::OpenDojo { target, .. } => target.action != NavigationAction::ActivateDojo,
             Self::FocusSplint { target } => {
@@ -345,6 +355,8 @@ pub enum WindowTopologyUpdate {
     },
     Theme(ThemeUpdate),
     Font(FontUpdate),
+    /// The access inventory, or the outcome of an access command.
+    Access(WindowAccessUpdate),
     /// Plan 0061 M3.12b: after a daemon connection lost during a handoff, the
     /// topology manager reconnected and resnapshotted every tab (the `Apply`
     /// updates ahead of this one). `exited` names the Splints that ended

@@ -11,6 +11,7 @@ use crate::navigation_projection::{
 
 use super::{
     LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, WindowTopologyCommand,
+    agent_access::{RevokeAccessUi, WindowAccessCommand},
     text_edit::BoundedTextEditor,
 };
 
@@ -290,6 +291,8 @@ pub(crate) enum DojoPromptUi {
     PreviewLair(LairPromptTarget),
     RestoreLair(RestoreLairUi),
     TerminateLair(TerminateLairUi),
+    /// Revoking agent access, or its result (ADR 0014).
+    RevokeAccess(RevokeAccessUi),
 }
 
 impl DojoPromptUi {
@@ -298,11 +301,18 @@ impl DojoPromptUi {
     }
 
     pub(crate) const fn is_preview(&self) -> bool {
-        matches!(self, Self::PreviewLair(_))
+        match self {
+            Self::PreviewLair(_) => true,
+            Self::RevokeAccess(prompt) => prompt.is_notice(),
+            _ => false,
+        }
     }
 
     pub(crate) const fn uses_layout_summary(&self) -> bool {
-        matches!(self, Self::PreviewLair(_) | Self::RestoreLair(_))
+        matches!(
+            self,
+            Self::PreviewLair(_) | Self::RestoreLair(_) | Self::RevokeAccess(_)
+        )
     }
 
     pub(crate) fn title_and_body(&self) -> (&'static str, String) {
@@ -355,6 +365,7 @@ impl DojoPromptUi {
                     }
                 ),
             ),
+            Self::RevokeAccess(prompt) => prompt.title_and_body(),
         }
     }
 
@@ -365,7 +376,8 @@ impl DojoPromptUi {
             Self::Terminate(_)
             | Self::PreviewLair(_)
             | Self::RestoreLair(_)
-            | Self::TerminateLair(_) => None,
+            | Self::TerminateLair(_)
+            | Self::RevokeAccess(_) => None,
         }
     }
 
@@ -376,7 +388,8 @@ impl DojoPromptUi {
             Self::Terminate(_)
             | Self::PreviewLair(_)
             | Self::RestoreLair(_)
-            | Self::TerminateLair(_) => None,
+            | Self::TerminateLair(_)
+            | Self::RevokeAccess(_) => None,
         }
     }
 
@@ -384,6 +397,7 @@ impl DojoPromptUi {
         match self {
             Self::RestoreLair(_) => Some("Restore"),
             Self::Terminate(_) | Self::TerminateLair(_) => Some("Terminate"),
+            Self::RevokeAccess(prompt) => prompt.confirmation_label(),
             Self::Rename(_) | Self::RenameLair(_) | Self::PreviewLair(_) => None,
         }
     }
@@ -393,6 +407,7 @@ impl DojoPromptUi {
             Self::Terminate(prompt) => Some(prompt.decision()),
             Self::RestoreLair(prompt) => Some(prompt.decision()),
             Self::TerminateLair(prompt) => Some(prompt.decision()),
+            Self::RevokeAccess(prompt) => prompt.decision(),
             Self::Rename(_) | Self::RenameLair(_) | Self::PreviewLair(_) => None,
         }
     }
@@ -1192,6 +1207,7 @@ pub(crate) enum BuiltInCommandId {
     RequestControl,
     ReleaseControl,
     ForceControl,
+    AgentAccess,
     RevokeAllAccess,
     AcceptControlTransfer,
     DenyControlTransfer,
@@ -1253,6 +1269,7 @@ impl BuiltInCommandId {
         Self::RequestControl,
         Self::ReleaseControl,
         Self::ForceControl,
+        Self::AgentAccess,
         Self::RevokeAllAccess,
         Self::AcceptControlTransfer,
         Self::DenyControlTransfer,
@@ -1337,7 +1354,12 @@ pub(crate) struct CommandPaletteContext {
     pub(crate) viewport_detached: bool,
     pub(crate) controller_active: bool,
     pub(crate) forced_control_transfer: bool,
-    pub(crate) grant_ids: Vec<u64>,
+    /// Whether **Revoke all access** may have something to revoke: unknown
+    /// (true) until the access inventory was read, then whether it lists a
+    /// consent grant or a pending request.
+    pub(crate) revoke_all_available: bool,
+    /// Access requests waiting for the person's answer (ADR 0014).
+    pub(crate) access_waiting: u32,
     pub(crate) pending_transfer_id: Option<u64>,
     /// Live incarnation of the focused Splint while it shows agent status.
     pub(crate) agent_status_incarnation: Option<u64>,
@@ -1405,10 +1427,8 @@ pub(crate) enum BuiltInCommandDispatch {
         target: SplintId,
         action: CommandControlAction,
     },
-    RevokeAccess {
-        target: SplintId,
-        grant_ids: Vec<u64>,
-    },
+    /// Opens the **Agent access** list.
+    AgentAccess,
     Rename(DojoActionTarget),
     ConfirmTermination(DojoActionTarget),
     RecentSessions,
@@ -1875,6 +1895,15 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId:
         shortcut_action: Some(ActionId::ForceControl),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::AgentAccess,
+        category: CommandCategory::Control,
+        title: "Agent access",
+        keywords: &[
+            "agent", "access", "grants", "list", "revoke", "waiting", "pending", "request", "mcp",
+        ],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::RevokeAllAccess,
         category: CommandCategory::Control,
         title: "Revoke all access",
@@ -1985,6 +2014,7 @@ pub(crate) const fn command_paused_during_handoff(id: BuiltInCommandId) -> bool 
         | BuiltInCommandId::ResetZoom
         | BuiltInCommandId::DetachWindow
         | BuiltInCommandId::ReleaseControl
+        | BuiltInCommandId::AgentAccess
         | BuiltInCommandId::RevokeAllAccess => false,
     }
 }
@@ -2020,7 +2050,7 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
             context.forced_control_transfer && !context.controller_active
         }
         BuiltInCommandId::ReleaseControl => context.controller_active,
-        BuiltInCommandId::RevokeAllAccess => !context.grant_ids.is_empty(),
+        BuiltInCommandId::RevokeAllAccess => context.revoke_all_available,
         BuiltInCommandId::ClearAgentStatus => context.agent_status_incarnation.is_some(),
         BuiltInCommandId::AcceptControlTransfer | BuiltInCommandId::DenyControlTransfer => {
             context.pending_transfer_id.is_some()
@@ -2057,7 +2087,8 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         | BuiltInCommandId::ZoomIn
         | BuiltInCommandId::ZoomOut
         | BuiltInCommandId::ResetZoom
-        | BuiltInCommandId::DetachWindow => true,
+        | BuiltInCommandId::DetachWindow
+        | BuiltInCommandId::AgentAccess => true,
     }
 }
 
@@ -2158,6 +2189,14 @@ impl CommandPaletteUi {
 
     pub(crate) const fn hovered(&self) -> Option<BuiltInCommandId> {
         self.hovered
+    }
+
+    /// Live text a row shows in its shortcut column instead: **Agent access**
+    /// says how many requests wait for an answer, so a queued prompt is
+    /// visible from the palette (ADR 0014).
+    pub(crate) fn badge(&self, command: BuiltInCommandId) -> Option<String> {
+        (command == BuiltInCommandId::AgentAccess && self.context.access_waiting > 0)
+            .then(|| format!("{} waiting", self.context.access_waiting))
     }
 
     pub(crate) fn update_hovered(&mut self, hovered: Option<BuiltInCommandId>) -> bool {
@@ -2515,10 +2554,12 @@ pub(crate) fn command_dispatch(
                 incarnation: context.agent_status_incarnation?,
             })
         }
-        BuiltInCommandId::RevokeAllAccess => BuiltInCommandDispatch::RevokeAccess {
-            target: context.splint_id,
-            grant_ids: context.grant_ids.clone(),
-        },
+        BuiltInCommandId::AgentAccess => BuiltInCommandDispatch::AgentAccess,
+        // Counts first: the person confirms the exact numbers a dry run
+        // reports, and the daemon revokes every duration (ADR 0014).
+        BuiltInCommandId::RevokeAllAccess => BuiltInCommandDispatch::Topology(
+            WindowTopologyCommand::Access(WindowAccessCommand::CountRevokeAll),
+        ),
         BuiltInCommandId::AcceptControlTransfer => BuiltInCommandDispatch::Control {
             target: context.splint_id,
             action: CommandControlAction::Accept(context.pending_transfer_id?),
@@ -2565,7 +2606,8 @@ mod tests {
             viewport_detached: true,
             controller_active: false,
             forced_control_transfer: true,
-            grant_ids: vec![7, 9],
+            revoke_all_available: true,
+            access_waiting: 0,
             pending_transfer_id: Some(42),
             agent_status_incarnation: Some(9),
         })
@@ -3320,7 +3362,7 @@ mod tests {
         );
         let mut palette = palette();
         assert!(palette.append_text("control"));
-        assert_eq!(palette.filtered().len(), 6);
+        assert_eq!(palette.filtered().len(), 7);
         while palette.backspace() {}
         assert!(palette.append_text("history"));
         assert_eq!(palette.filtered().len(), 5);
@@ -3396,10 +3438,22 @@ mod tests {
         );
         assert_eq!(
             command_dispatch(BuiltInCommandId::RevokeAllAccess, &context),
-            Some(BuiltInCommandDispatch::RevokeAccess {
-                target: context.splint_id,
-                grant_ids: vec![7, 9],
-            })
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::Access(WindowAccessCommand::CountRevokeAll)
+            ))
+        );
+        let nothing_to_revoke = CommandPaletteContext {
+            revoke_all_available: false,
+            ..context.clone()
+        };
+        assert!(!command_enabled(
+            BuiltInCommandId::RevokeAllAccess,
+            &nothing_to_revoke
+        ));
+        // The list opens whatever it holds, including "no access".
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::AgentAccess, &nothing_to_revoke),
+            Some(BuiltInCommandDispatch::AgentAccess)
         );
         assert_eq!(
             command_dispatch(BuiltInCommandId::NewSession, &context),
@@ -3738,5 +3792,110 @@ mod tests {
             assert!(!pane_menu.action_enabled(id), "{id:?}");
             assert_eq!(pane_menu.dispatch(id), None, "{id:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_access_palette_tests {
+    use super::*;
+
+    fn palette(access_waiting: u32, revoke_all_available: bool) -> CommandPaletteUi {
+        let mut context = tests_context();
+        context.access_waiting = access_waiting;
+        context.revoke_all_available = revoke_all_available;
+        CommandPaletteUi::new(context)
+    }
+
+    fn tests_context() -> CommandPaletteContext {
+        let splint_id = SplintId::new();
+        CommandPaletteContext {
+            lair_id: LairId::new(),
+            lair_retention: LairRetention::Disposable,
+            dojo_id: DojoId::new(),
+            dojo_name: "current".to_owned(),
+            pane_count: 1,
+            splint_id,
+            dojo_splints: vec![(splint_id, 1)],
+            other_dojo_ids: Vec::new(),
+            previous_dojo_id: None,
+            next_dojo_id: None,
+            tab_move: CommandTabMoveAvailability::Neither,
+            focus_left: None,
+            focus_right: None,
+            focus_up: None,
+            focus_down: None,
+            clipboard_image_available: false,
+            viewport_detached: false,
+            controller_active: true,
+            forced_control_transfer: false,
+            revoke_all_available: true,
+            access_waiting: 0,
+            pending_transfer_id: None,
+            agent_status_incarnation: None,
+        }
+    }
+
+    #[test]
+    fn agent_access_is_a_palette_entry_found_by_waiting_and_badged_while_requests_wait() {
+        let mut ui = palette(2, true);
+        assert!(ui.append_text("waiting"));
+        assert_eq!(ui.filtered(), [BuiltInCommandId::AgentAccess]);
+        assert_eq!(
+            ui.selected_enabled_command(),
+            Some(BuiltInCommandId::AgentAccess)
+        );
+        assert_eq!(
+            ui.badge(BuiltInCommandId::AgentAccess).as_deref(),
+            Some("2 waiting")
+        );
+        assert_eq!(ui.badge(BuiltInCommandId::RevokeAllAccess), None);
+        assert_eq!(palette(0, true).badge(BuiltInCommandId::AgentAccess), None);
+        // Reading and revoking access never waits out a daemon handoff: both
+        // only read or reduce authority.
+        assert!(!command_paused_during_handoff(
+            BuiltInCommandId::AgentAccess
+        ));
+        assert!(!command_paused_during_handoff(
+            BuiltInCommandId::RevokeAllAccess
+        ));
+        let mut paused = palette(0, true);
+        paused.set_mutations_paused(true);
+        assert_eq!(
+            paused.dispatch(BuiltInCommandId::AgentAccess),
+            Some(BuiltInCommandDispatch::AgentAccess)
+        );
+        assert!(paused.dispatch(BuiltInCommandId::RevokeAllAccess).is_some());
+        assert_eq!(
+            command_descriptor(BuiltInCommandId::AgentAccess).title,
+            "Agent access"
+        );
+    }
+
+    #[test]
+    fn revoke_prompts_are_bounded_default_cancel_and_send_only_access_commands() {
+        use splinterm_protocol::AccessRevocationCounts;
+        let counts = AccessRevocationCounts {
+            remembered: 1,
+            ..AccessRevocationCounts::default()
+        };
+        let mut prompt = DojoPromptUi::RevokeAccess(RevokeAccessUi::all(counts, false));
+        assert!(prompt.uses_layout_summary());
+        assert!(!prompt.is_preview());
+        assert!(!prompt.is_rename());
+        assert_eq!(prompt.input(), None);
+        assert!(prompt.editor_mut().is_none());
+        assert_eq!(prompt.confirmation_label(), Some("Revoke all"));
+        assert_eq!(prompt.decision(), Some(TerminationDecision::Cancel));
+        let notice = DojoPromptUi::RevokeAccess(RevokeAccessUi::notice(
+            "REVOKE ALL ACCESS",
+            "Nothing to revoke.",
+        ));
+        assert!(notice.is_preview());
+        assert_eq!(notice.decision(), None);
+        assert_eq!(notice.confirmation_label(), None);
+        assert_eq!(
+            notice.title_and_body(),
+            ("REVOKE ALL ACCESS", "Nothing to revoke.".to_owned())
+        );
     }
 }

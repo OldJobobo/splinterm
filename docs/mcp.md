@@ -355,14 +355,13 @@ behavior.
 
 ### Easy agent access
 
-> **Status:** partly implemented for 0.2. The contract is fixed by
+> **Status:** implemented for 0.2. The contract is fixed by
 > [ADR 0014](adr/0014-easy-agent-access.md) and described for users in
 > [Easy agent access](automation.md#easy-agent-access). Levels, durations,
 > remembered grants, the prompt, pending requests, the access list with
-> per-entry revoke (`splinterm access`), and one-step host setup
+> per-entry revoke (`splinterm access` and **Agent access** in the command
+> palette), the Explorer marks, the waiting indicator, and one-step host setup
 > ([`splinterm mcp setup`](#set-up-an-agent-host)) work as described here.
-> Still planned: **Agent access** in the command palette, the Explorer marks,
-> and the waiting indicator in Windows.
 
 **Levels.** `request_lair_access` asks for one of three levels for a workspace
 (a Lair): **Look**, **Look and type**, or **Manage**. The person answers once

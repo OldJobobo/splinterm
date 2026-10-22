@@ -128,7 +128,7 @@ use crate::diagnostics::{
     DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, global as diagnostics,
 };
 use crate::frontend::{
-    AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
+    AgentAccessUi, AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
     BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction, CommandHistoryAction,
     CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability, CommandZoomAction,
     DojoPromptUi, FontUpdate, LairDirection, LairExplorerDecision, LairExplorerFilter,
@@ -156,7 +156,7 @@ use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
     ChromeSource, ChromeSurface, ChromeText, ChromeTextStyle, CommandPaletteLayout,
     CommandPaletteTextCache, CursorPresentation, DojoPromptLayout, HistoryOverlayStatus,
-    LairExplorerLayout, LairExplorerPresentationMode, PickerHitTarget, RenderContext,
+    LairExplorerLayout, LairExplorerPresentationMode, PaletteBody, PickerHitTarget, RenderContext,
     SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
     SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
     background_bgra, chrome_panel_fill, chrome_panel_palette, clear_snapshot_caches,
@@ -176,6 +176,7 @@ use crate::{
     viewport::ScrollbackViewport,
 };
 
+mod agent_access;
 mod agent_status;
 mod chrome;
 mod clipboard;
@@ -1027,6 +1028,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         },
         explorer: LairExplorerUi::default(),
         accessibility: navigation_accessibility::WindowAccessibility::new(update_waker.clone()),
+        access: agent_access::WindowAccess::default(),
         handoff: HandoffFrontend::new(options.handoff_status.take(), &update_waker),
         tab_state: TabsState {
             tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
@@ -1053,6 +1055,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             trusted_consent,
             copy_mode: None,
             binding_help: None,
+            agent_access: None,
             command_palette: None,
             command_palette_layout: None,
             command_palette_pressed: None,
@@ -2147,6 +2150,8 @@ struct ModalState {
     trusted_consent: Option<TrustedConsentUi>,
     copy_mode: Option<CopyModeState>,
     binding_help: Option<BindingHelpUi>,
+    /// The **Agent access** list, shown in the open command palette.
+    agent_access: Option<AgentAccessUi>,
     command_palette: Option<CommandPaletteUi>,
     command_palette_layout: Option<CommandPaletteLayout>,
     command_palette_pressed: Option<BuiltInCommandId>,
@@ -2244,6 +2249,7 @@ struct App {
     panes: PanesState,
     explorer: LairExplorerUi,
     accessibility: navigation_accessibility::WindowAccessibility,
+    access: agent_access::WindowAccess,
     tab_state: TabsState,
     modal: ModalState,
     scheduling: SchedulingState,
@@ -4975,8 +4981,10 @@ impl App {
             input_modal_open: self.modal.input_modal_open(),
             consent_or_picker_open: self.consent_or_picker_open(),
             explorer_focused: self.explorer.focused(),
-            binding_help: self.modal.binding_help.is_some(),
-            command_palette: self.modal.command_palette.is_some(),
+            // A prompt above the palette owns the keyboard.
+            binding_help: self.modal.binding_help.is_some() && self.modal.dojo_prompt.is_none(),
+            command_palette: self.modal.command_palette.is_some()
+                && self.modal.dojo_prompt.is_none(),
             dojo_prompt_input: self
                 .modal
                 .dojo_prompt
@@ -4991,17 +4999,28 @@ impl App {
         let input_modal_open = self.modal.input_modal_open();
         let consent_or_picker_open = self.consent_or_picker_open();
         let explorer_search = self.explorer.focused() && self.explorer.search_active();
+        // The palette's field is the access list's search while it shows,
+        // and no field, nor binding help's, while a prompt stands above it.
+        let prompt_open = self.modal.dojo_prompt.is_some();
+        let palette_field = if prompt_open {
+            None
+        } else if let Some(access) = self.modal.agent_access.as_mut() {
+            Some(access.editor_mut())
+        } else {
+            self.modal
+                .command_palette
+                .as_mut()
+                .map(CommandPaletteUi::editor_mut)
+        };
         Self::select_owned_field(
             input_modal_open,
             consent_or_picker_open,
             self.modal
                 .binding_help
                 .as_mut()
+                .filter(|_| !prompt_open)
                 .map(BindingHelpUi::editor_mut),
-            self.modal
-                .command_palette
-                .as_mut()
-                .map(CommandPaletteUi::editor_mut),
+            palette_field,
             self.modal
                 .dojo_prompt
                 .as_mut()
@@ -5055,11 +5074,16 @@ impl App {
                 .binding_help
                 .as_mut()
                 .map(BindingHelpUi::editor_mut),
-            OwnedFieldTarget::CommandPalette => self
-                .modal
-                .command_palette
-                .as_mut()
-                .map(CommandPaletteUi::editor_mut),
+            OwnedFieldTarget::CommandPalette => {
+                if let Some(access) = self.modal.agent_access.as_mut() {
+                    Some(access.editor_mut())
+                } else {
+                    self.modal
+                        .command_palette
+                        .as_mut()
+                        .map(CommandPaletteUi::editor_mut)
+                }
+            }
             OwnedFieldTarget::DojoPrompt => self
                 .modal
                 .dojo_prompt
@@ -5082,7 +5106,9 @@ impl App {
                 self.refresh_command_palette();
             }
             OwnedFieldTarget::CommandPalette => {
-                if let Some(palette) = self.modal.command_palette.as_mut() {
+                if let Some(access) = self.modal.agent_access.as_mut() {
+                    access.editor_changed();
+                } else if let Some(palette) = self.modal.command_palette.as_mut() {
                     palette.editor_changed();
                 }
                 self.refresh_command_palette();
@@ -5529,6 +5555,7 @@ impl App {
     fn show_command_palette(&mut self) -> Result<()> {
         self.input.prefix_state.clear();
         self.modal.binding_help = None;
+        self.modal.agent_access = None;
         anyhow::ensure!(
             self.command_palette_available(),
             "command palette is unavailable"
@@ -5600,14 +5627,8 @@ impl App {
             viewport_detached: !self.panes.pane.scrollback_viewport.is_live(),
             controller_active: self.panes.pane.controller_active,
             forced_control_transfer: self.input.forced_control_transfer,
-            grant_ids: self
-                .panes
-                .pane
-                .authority
-                .grants
-                .iter()
-                .map(|(id, _)| *id)
-                .collect(),
+            revoke_all_available: self.access.revoke_all_available(),
+            access_waiting: self.access.waiting(),
             pending_transfer_id: self.panes.pane.pending_control_transfer,
             agent_status_incarnation: self.tab_state.agent.clearable_incarnation(splint_id),
         }));
@@ -5664,6 +5685,7 @@ impl App {
             return false;
         }
         self.modal.binding_help = None;
+        self.modal.agent_access = None;
         self.modal.command_palette_layout = None;
         self.modal.command_palette_pressed = None;
         self.modal.command_palette_text_cache.clear();
@@ -6052,23 +6074,7 @@ impl App {
                 self.update_window_title();
                 Ok(())
             })(),
-            BuiltInCommandDispatch::RevokeAccess { target, grant_ids } => (|| -> Result<()> {
-                anyhow::ensure!(
-                    self.panes.focused_splint() == Some(target),
-                    "captured access target is no longer focused"
-                );
-                for id in &grant_ids {
-                    self.send_command(WindowCommand::RevokeAccess(*id));
-                }
-                self.send_command(WindowCommand::CancelPendingAccess);
-                self.panes
-                    .pane
-                    .authority
-                    .grants
-                    .retain(|(id, _)| !grant_ids.contains(id));
-                self.update_window_title();
-                Ok(())
-            })(),
+            BuiltInCommandDispatch::AgentAccess => self.show_agent_access(queue_handle),
             BuiltInCommandDispatch::Rename(target) => {
                 self.show_dojo_prompt(DojoPromptUi::rename(
                     target.dojo_id,
@@ -6429,6 +6435,7 @@ impl App {
             DojoPromptUi::PreviewLair(_) => "Splinterm — Saved Lair Preview",
             DojoPromptUi::RestoreLair(_) => "Splinterm — Restore Saved Lair",
             DojoPromptUi::TerminateLair(_) => "Splinterm — Confirm Lair Termination",
+            DojoPromptUi::RevokeAccess(prompt) => prompt.window_title(),
         };
         self.modal.dojo_prompt = Some(prompt);
         self.modal.dojo_prompt_layout = None;
@@ -6448,12 +6455,29 @@ impl App {
         self.modal.dojo_prompt_layout = None;
         self.modal.dojo_prompt_pressed = None;
         self.modal.dojo_prompt_text_cache.clear();
-        self.modal.command_palette_reconcile_pending = true;
+        if self.modal.command_palette.is_some() {
+            // A revoke prompt opened above the palette returns to it.
+            if self.modal.agent_access.is_some() || self.modal.binding_help.is_some() {
+                self.update_window_title();
+            } else {
+                self.surface.window.set_title("Splinterm — Commands");
+            }
+        } else {
+            self.modal.command_palette_reconcile_pending = true;
+        }
         self.presentation.full_redraw = true;
         true
     }
 
     fn execute_dojo_prompt(&mut self) {
+        if let Some(DojoPromptUi::RevokeAccess(prompt)) = self.modal.dojo_prompt.as_ref() {
+            let command = prompt.command();
+            self.close_dojo_prompt();
+            if let Some(command) = command {
+                self.execute_access_prompt(command);
+            }
+            return;
+        }
         let command = match self.modal.dojo_prompt.as_ref() {
             Some(DojoPromptUi::Rename(prompt)) => prompt.command(),
             Some(DojoPromptUi::Terminate(prompt)) => prompt.command(),
@@ -6461,6 +6485,7 @@ impl App {
             Some(DojoPromptUi::PreviewLair(_)) | None => None,
             Some(DojoPromptUi::RestoreLair(prompt)) => prompt.command(),
             Some(DojoPromptUi::TerminateLair(prompt)) => prompt.command(),
+            Some(DojoPromptUi::RevokeAccess(_)) => unreachable!("access prompts return above"),
         };
         if command.is_none()
             && self
@@ -7366,6 +7391,9 @@ impl App {
         };
         let target = command_palette_hit_test(committed_layout, event.position);
         let inside_panel = rect_contains(committed_layout.panel, event.position);
+        if self.modal.agent_access.is_some() {
+            return self.handle_agent_access_pointer(event, inside_panel);
+        }
         let mut changed = false;
         let mut execute = None;
         match event.kind {
@@ -7459,6 +7487,9 @@ impl App {
                                 changed |= confirmation.select(decision);
                             }
                             Some(DojoPromptUi::TerminateLair(confirmation)) => {
+                                changed |= confirmation.select(decision);
+                            }
+                            Some(DojoPromptUi::RevokeAccess(confirmation)) => {
                                 changed |= confirmation.select(decision);
                             }
                             Some(
@@ -7929,6 +7960,10 @@ impl App {
             self.surface.window.set_title("Splinterm — Key bindings");
             return;
         }
+        if self.modal.agent_access.is_some() {
+            self.surface.window.set_title("Splinterm — Agent access");
+            return;
+        }
         if let Some(title) = self.terminal_window_title() {
             self.surface.window.set_title(title);
         }
@@ -7950,6 +7985,12 @@ impl App {
             self.panes.pane.pending_control_transfer.is_some() && !self.handoff_paused(),
             Some(&self.panes.pane.search),
         );
+        // A queued access prompt is announced, never shown with focus
+        // (ADR 0014): the person answers it when they get to it.
+        let title = match crate::frontend::waiting_title(self.access.waiting()) {
+            Some(waiting) => format!("{title} — {waiting}"),
+            None => title,
+        };
         // The compositor title carries the upgrade banner too, so it stays
         // truthful about whether typing reaches the terminal.
         Some(match self.handoff.banner_text() {
@@ -8100,6 +8141,17 @@ impl App {
                         Keysym::Escape => close = true,
                         _ => {}
                     },
+                    DojoPromptUi::RevokeAccess(confirmation) => match event.keysym {
+                        Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down | Keysym::Tab => {
+                            changed = confirmation.move_selection();
+                        }
+                        Keysym::Return | Keysym::KP_Enter if confirmation.is_notice() => {
+                            close = true;
+                        }
+                        Keysym::Return | Keysym::KP_Enter => execute = true,
+                        Keysym::Escape => close = true,
+                        _ => {}
+                    },
                 }
             }
             if execute {
@@ -8174,6 +8226,10 @@ impl App {
             } else if changed {
                 self.refresh_command_palette();
             }
+            return;
+        }
+        if self.modal.agent_access.is_some() {
+            self.handle_agent_access_key(event.keysym);
             return;
         }
         if self.modal.command_palette.is_some() {
@@ -8527,7 +8583,16 @@ impl App {
             return;
         }
         match shortcut_action_for(&self.input.keymap, event, self.input.modifiers) {
+            Some(ActionId::RevokeAllAccess)
+                if self.tab_state.managed_tabs && self.tab_state.topology_commands.is_some() =>
+            {
+                // Every duration, through the daemon's count and confirmation.
+                self.begin_revoke_all_access();
+                return;
+            }
             Some(ActionId::RevokeAllAccess) => {
+                // A single-pane Window has no topology manager: it ends the
+                // grants it shows and every pending request.
                 let ids: Vec<_> = self
                     .panes
                     .pane
@@ -9333,6 +9398,12 @@ impl App {
                     incarnation,
                 } => {
                     if self.apply_agent_status_cleared(splint_id, incarnation) {
+                        self.presentation.full_redraw = true;
+                        changed = true;
+                    }
+                }
+                WindowTopologyUpdate::Access(update) => {
+                    if self.apply_access_update(update) {
                         self.presentation.full_redraw = true;
                         changed = true;
                     }
@@ -10821,7 +10892,15 @@ impl App {
         } else {
             None
         };
-        let command_palette_layout = if let Some(help) = self.modal.binding_help.as_ref() {
+        let command_palette_layout = if let Some(access) = self.modal.agent_access.as_ref() {
+            let placeholders = vec![BuiltInCommandId::RecentSessions; access.rows().len()];
+            command_palette_layout(
+                self.content_rect(),
+                &placeholders,
+                access.selected_index(),
+                access.visible_start(),
+            )
+        } else if let Some(help) = self.modal.binding_help.as_ref() {
             let placeholders = vec![BuiltInCommandId::RecentSessions; help.rows().len()];
             command_palette_layout(
                 self.content_rect(),
@@ -11379,7 +11458,13 @@ impl App {
                 &self.input.keymap,
                 self.modal.command_palette_pressed,
                 self.input.keyboard_focused,
-                self.modal.binding_help.as_ref(),
+                if let Some(access) = self.modal.agent_access.as_ref() {
+                    PaletteBody::AgentAccess(access)
+                } else if let Some(help) = self.modal.binding_help.as_ref() {
+                    PaletteBody::BindingHelp(help)
+                } else {
+                    PaletteBody::Commands
+                },
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
