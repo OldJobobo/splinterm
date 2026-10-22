@@ -16200,7 +16200,10 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_frame_runs_owner_topology_cleanup() {
-        time::timeout(Duration::from_secs(2), async {
+        // Only a hang guard. The connection goes through `serve_client`, so the
+        // daemon hashes this peer's executable, the unoptimized test binary,
+        // which alone can take seconds on a loaded package-check host.
+        time::timeout(Duration::from_secs(30), async {
             let state = test_state(true);
             let (mut client, server) = UnixStream::pair().unwrap();
             let task = tokio::spawn(serve_client(server, state.clone()));
