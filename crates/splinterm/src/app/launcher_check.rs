@@ -58,8 +58,8 @@ use super::{
     local_service::user_systemctl_output,
     upgrade::reason_line,
     upgrade_dialog::{
-        CAPABILITY_BYTES, DialogPrompt, MAX_DIALOG_COLUMNS, ask_dialog_child, dialog_capability,
-        dialog_rows, run_dialog_client,
+        CAPABILITY_BYTES, DialogAnswer, DialogPrompt, MAX_DIALOG_COLUMNS, ask_dialog_child,
+        dialog_capability, dialog_rows, run_dialog_client,
     },
 };
 
@@ -576,6 +576,15 @@ pub(in crate::app) fn dialog_lines(question: &RestartQuestion) -> Vec<String> {
     lines
 }
 
+/// What the launcher prints, before the [`not_now_lines`], when nobody
+/// answered the dialog in time.
+pub(in crate::app) fn no_answer_line() -> String {
+    format!(
+        "splinterm: no answer within {} seconds, so nothing was restarted.",
+        RESPOND_WITHIN.as_secs()
+    )
+}
+
 /// What the launcher prints when the answer is "Not now".
 pub(in crate::app) fn not_now_lines(question: &RestartQuestion) -> Vec<String> {
     let mut lines =
@@ -961,7 +970,11 @@ async fn ask(question: &RestartQuestion) -> bool {
         }
     };
     match ask_dialog_child(RESTART_DIALOG_COMMAND, request, RESPOND_WITHIN).await {
-        Ok(restart) => restart,
+        Ok(DialogAnswer::Answered(restart)) => restart,
+        Ok(DialogAnswer::NoAnswer) => {
+            eprintln!("{}", no_answer_line());
+            false
+        }
         Err(error) => {
             eprintln!(
                 "splinterm: could not ask about restarting ({error:#}); nothing was restarted."
@@ -1362,6 +1375,17 @@ mod tests {
         let unattended = unattended_lines(&question).join(" ");
         assert!(unattended.contains("does not ask"), "{unattended}");
         assert!(unattended.contains("4 running shells"), "{unattended}");
+    }
+
+    /// No answer in time is plain "Not now", not a dialog failure.
+    #[test]
+    fn no_answer_says_so_plainly() {
+        let line = no_answer_line();
+        assert_eq!(
+            line,
+            "splinterm: no answer within 120 seconds, so nothing was restarted."
+        );
+        assert!(!line.contains("could not ask"), "{line}");
     }
 
     #[test]

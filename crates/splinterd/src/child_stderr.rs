@@ -63,8 +63,36 @@ impl StderrTail {
 }
 
 /// How a failed Splinterm graphical client's last line on standard error
-/// begins. A dialog child adds its error chain after it.
+/// begins; its error chain follows ([`client_failure_line`]).
 pub const CLIENT_FAILURE_PREFIX: &str = "splinterm graphical client failed";
+
+/// The longest [`client_failure_line`]: with the newline it is printed
+/// with, it fits the [`MAX_CHILD_STDERR_BYTES`] tail an asker keeps, so the
+/// tail still begins with [`CLIENT_FAILURE_PREFIX`].
+pub const MAX_CLIENT_FAILURE_LINE_BYTES: usize = MAX_CHILD_STDERR_BYTES - 1;
+
+/// The line every failed Splinterm graphical client, a trusted dialog
+/// child or not, prints last on standard error: [`CLIENT_FAILURE_PREFIX`],
+/// then its error chain as one printable line ([`one_line`]), at most
+/// [`MAX_CLIENT_FAILURE_LINE_BYTES`] bytes long. The chain is the client's
+/// own errors; a configuration it cannot load is named only by category
+/// before it gets here, so no configuration value is printed.
+#[must_use]
+pub fn client_failure_line(error: &anyhow::Error) -> String {
+    let Some(reason) = one_line(format!("{error:#}").as_bytes()) else {
+        return CLIENT_FAILURE_PREFIX.to_owned();
+    };
+    let mut line = format!("{CLIENT_FAILURE_PREFIX}: {reason}");
+    if line.len() > MAX_CLIENT_FAILURE_LINE_BYTES {
+        let mut end = MAX_CLIENT_FAILURE_LINE_BYTES - '…'.len_utf8();
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push('…');
+    }
+    line
+}
 
 /// What a dialog child reported in `bytes`, its standard error's tail: its
 /// last [`CLIENT_FAILURE_PREFIX`] line when there is one, so the lines a
@@ -212,6 +240,48 @@ mod tests {
             child_failure("the dialog", &error, None, None).to_string(),
             "the dialog gave no answer (not reaped): failed to fill whole buffer"
         );
+    }
+
+    #[test]
+    fn a_client_failure_line_carries_the_chain_on_one_bounded_printable_line() {
+        let error = anyhow::anyhow!("no compositor").context("connect to Wayland");
+        assert_eq!(
+            client_failure_line(&error),
+            "splinterm graphical client failed: connect to Wayland: no compositor"
+        );
+        let hostile = anyhow::anyhow!("bad\u{1b}[31m\u{202e}name\nsecond line");
+        assert_eq!(
+            client_failure_line(&hostile),
+            "splinterm graphical client failed: bad\u{fffd}[31m\u{fffd}name; second line"
+        );
+        assert_eq!(
+            client_failure_line(&anyhow::anyhow!(" \n ")),
+            "splinterm graphical client failed"
+        );
+        // ASCII fills the bound exactly; wide characters stop short of it.
+        for filler in ["a", "日"] {
+            let long = client_failure_line(&anyhow::anyhow!(
+                "{}",
+                filler.repeat(MAX_CHILD_STDERR_BYTES)
+            ));
+            assert!(
+                long.len() <= MAX_CLIENT_FAILURE_LINE_BYTES,
+                "{}",
+                long.len()
+            );
+            assert!(long.ends_with('…'));
+            if filler == "a" {
+                assert_eq!(long.len(), MAX_CLIENT_FAILURE_LINE_BYTES);
+            }
+            // Printed with its newline, the whole line survives the bounded
+            // tail an asker keeps, so it reports the line, prefix and all.
+            let printed = format!("{long}\n");
+            let tail = read_tail(&mut printed.as_bytes(), MAX_CHILD_STDERR_BYTES);
+            assert_eq!(tail, printed.as_bytes(), "{filler}");
+            let reported = report(&tail).unwrap();
+            assert!(reported.starts_with(CLIENT_FAILURE_PREFIX), "{reported}");
+            assert_eq!(reported, long, "{filler}");
+        }
     }
 
     #[test]

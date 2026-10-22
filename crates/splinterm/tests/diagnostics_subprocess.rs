@@ -147,8 +147,11 @@ fn sigint_writes_graceful_terminal_record() {
     assert_graceful_signal(rustix::process::Signal::INT, libc::SIGINT, "sigint");
 }
 
+/// Every failed graphical command says why on its last line, as a trusted
+/// dialog child does, but a configuration value the loader only warns
+/// about never reaches standard error or the diagnostics log.
 #[test]
-fn graphical_top_level_error_never_formats_arbitrary_error_text() {
+fn a_graphical_top_level_error_reports_its_chain_without_configuration_values() {
     let root = test_directory("top-level-error");
     let config = root.join("invalid-config.ini");
     fs::write(&config, format!("[font]\nsize={PANIC_SENTINEL}\n")).unwrap();
@@ -162,7 +165,16 @@ fn graphical_top_level_error_never_formats_arbitrary_error_text() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("splinterm graphical client failed"));
+    let last = stderr.lines().last().unwrap_or_default();
+    assert!(
+        last.starts_with("splinterm graphical client failed: ")
+            && last.len() > "splinterm graphical client failed: ".len(),
+        "{stderr}"
+    );
+    assert_eq!(
+        splinterd::child_stderr::report(&output.stderr).as_deref(),
+        Some(last)
+    );
     assert!(!stderr.contains(PANIC_SENTINEL));
     assert_eq!(summary(&root).unwrap().exit_class, Some(ExitClass::Unknown));
     assert!(!retained_text(&root).contains(PANIC_SENTINEL));
@@ -170,8 +182,8 @@ fn graphical_top_level_error_never_formats_arbitrary_error_text() {
 }
 
 /// A trusted dialog child's standard error is a private pipe to the command
-/// that asked, so a child that fails says why there, unlike an ordinary
-/// graphical client. Here each gets no prompt on its standard input.
+/// that asked, which reports the child's last line. Here each gets no
+/// prompt on its standard input.
 #[test]
 fn a_trusted_dialog_child_reports_its_error_chain() {
     for dialog in ["consent", "upgrade-dialog", "restart-dialog"] {
@@ -208,12 +220,13 @@ fn a_trusted_dialog_child_reports_its_error_chain() {
     }
 }
 
-/// What a dialog child prints reaches its asker's log, so a configuration
-/// it cannot load never puts a value on its standard error: it names only
-/// the category. A value the loader only warns about stays off it too.
+/// What a graphical command prints can reach the desktop journal, and what
+/// a dialog child prints reaches its asker's log, so a configuration either
+/// cannot load never puts a value on standard error: it names only the
+/// category. A value the loader only warns about stays off it too.
 #[test]
-fn a_trusted_dialog_child_never_formats_configuration_values() {
-    for dialog in ["consent", "upgrade-dialog", "restart-dialog"] {
+fn a_graphical_command_never_formats_configuration_values() {
+    for dialog in ["launch", "consent", "upgrade-dialog", "restart-dialog"] {
         for (contents, fails_to_load) in [
             (
                 format!("[integration]\ndialog-shortcut={PANIC_SENTINEL}\n"),

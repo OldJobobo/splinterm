@@ -181,18 +181,20 @@ impl PointerHandler for App {
                         }
                         continue;
                     }
-                    if let Some(consent) = self.modal.trusted_consent.as_mut()
-                        && button == BTN_LEFT
-                    {
+                    if self.modal.trusted_consent.is_some() && button == BTN_LEFT {
                         let (x, y) = event.position;
+                        let in_action_area = self.trusted_consent_action_area_at(y);
+                        let proceed_area = x >= f64::from(self.surface.logical_width) / 2.0;
+                        let Some(consent) = self.modal.trusted_consent.as_mut() else {
+                            continue;
+                        };
                         let now = std::time::Instant::now();
                         // A click inside is the only thing that engages a
                         // trusted dialog's keyboard; focus never does.
                         consent.engage(now);
-                        // The bottom action areas answer; a click on a
-                        // duration's row only selects it.
-                        let input = if y >= f64::from(self.surface.logical_height) * 0.78 {
-                            let proceed_area = x >= f64::from(self.surface.logical_width) / 2.0;
+                        // The bottom action areas, below the text, answer; a
+                        // click on a duration's row only selects it.
+                        let input = if in_action_area {
                             consent.action_area_input(proceed_area, now)
                         } else {
                             cell.and_then(|position| consent.row_input(position.row, now))

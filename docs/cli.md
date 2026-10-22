@@ -216,9 +216,12 @@ picker (`splinterm dojos`). Input stays paused in every Window until the answer.
   green right area proceeds. The dialog appears without taking keyboard focus,
   and its keys stay inert until you click inside it or press Ctrl+Alt+G (see
   [Trusted dialogs](usage.md#trusted-dialogs)); keys and the proceed click
-  count only about 600 ms after that, and held or repeating keys never count,
-  so typing meant for another Window cannot answer it. Closing the dialog or not
-  answering cancels. If the list of Windows is too long for the dialog, the last
+  count only about 600 ms after that, so typing meant for another Window cannot
+  answer it. Once armed, a key acts when it goes down: a key held down since
+  before arming never counts, and key repeats never do, but a key pressed after
+  arming counts as a press even if it is held. Closing the dialog or not
+  answering cancels; with no answer in time the command prints "No answer about
+  the Windows within N seconds; cancelling." If the list of Windows is too long for the dialog, the last
   line counts the rest. Without a graphical session either, the upgrade is
   cancelled.
 
@@ -270,10 +273,13 @@ daemon's build identity with the installed client's:
   **Restart now (ends N shells)**, with the daemon's exact count; for a daemon
   it cannot read, "ends about N shells" from a best-effort count of running
   workload units, or "all running shells". The dialog takes no keyboard focus;
-  keys count only about 600 ms after a click inside it or Ctrl+Alt+G, and key
-  repeats never count. When the daemon reports that nothing
-  blocks a live upgrade, the dialog says to choose **Not now** and run
-  `splinterm upgrade`;
+  keys count only about 600 ms after a click inside it or Ctrl+Alt+G. Once the
+  dialog is armed, `R` acts when it goes down, so a hold that began before
+  arming is ignored but one that begins after arming counts as a press; key
+  repeats never count. With no answer within 120 seconds the launcher prints
+  "splinterm: no answer within 120 seconds, so nothing was restarted." When the
+  daemon reports that nothing blocks a live upgrade, the dialog says to choose
+  **Not now** and run `splinterm upgrade`;
 - a daemon it cannot read whose executable is the installed `splinterd` is
   busy, not incompatible: the launch fails and says to try again;
 - an unattended launch, with an explicit app ID (such as the Omarchy
