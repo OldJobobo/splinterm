@@ -34,7 +34,11 @@ impl Home {
         fs::create_dir(root.join("bin")).unwrap();
         fs::write(&adapter, "#!/bin/false\n").unwrap();
         fs::set_permissions(&adapter, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::create_dir_all(root.join(".config/Code/User")).unwrap();
+        for directory in [".config", ".config/Code", ".config/Code/User"] {
+            fs::create_dir(root.join(directory)).unwrap();
+            fs::set_permissions(root.join(directory), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::set_permissions(root.join("bin"), fs::Permissions::from_mode(0o755)).unwrap();
         Self { root, adapter }
     }
 
@@ -133,6 +137,9 @@ fn assert_conforms(actual: &Value, fixture_name: &str, home: &Home) {
         assert!(path.ends_with(suffix), "{path} ends with {suffix}");
         if data.get("adapter_path").is_some() {
             assert_eq!(actual["data"]["adapter_path"], home.adapter());
+            // A temporary home's adapter is the user's own: never "Always".
+            assert_eq!(actual["data"]["adapter_identity"], "unprotected");
+            assert_eq!(actual["data"]["adapter_durable"], false);
             assert_eq!(actual["data"]["entry"]["command"], home.adapter());
             let mut entry = actual["data"]["entry"].clone();
             entry["command"] = data["entry"]["command"].clone();
@@ -274,6 +281,26 @@ fn machine_failures_are_typed_documents() {
     assert_eq!(duplicate.status.code(), Some(5), "{duplicate:?}");
     assert_eq!(document(&duplicate)["error"]["code"], "invalid_argument");
 
+    let foreign = "[mcp_servers.splinterm]\ncommand = \"/usr/bin/other-tool\"\n";
+    fs::create_dir(home.root.join(".codex")).unwrap();
+    fs::set_permissions(home.root.join(".codex"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(home.root.join(".codex/config.toml"), foreign).unwrap();
+    fs::set_permissions(
+        home.root.join(".codex/config.toml"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let refused = home.run(&["--output", "json", "mcp", "remove", "codex"]);
+    assert_eq!(refused.status.code(), Some(3), "{refused:?}");
+    assert_eq!(document(&refused)["error"]["code"], "confirmation_required");
+    assert_eq!(
+        fs::read_to_string(home.root.join(".codex/config.toml")).unwrap(),
+        foreign
+    );
+    let forced = home.run(&["--output", "json", "mcp", "remove", "codex", "--force"]);
+    assert!(forced.status.success(), "{forced:?}");
+    assert_eq!(document(&forced)["data"]["action"], "removed");
+
     let schema = home.run(&[
         "--output",
         "json",
@@ -349,6 +376,7 @@ fn unsupported_hosts_and_options_are_usage_errors() {
         &["--schema-major", "2", "mcp", "setup", "codex"][..],
         &["mcp", "remove", "codex", "--replace"][..],
         &["mcp", "remove", "codex", "--adapter", "/x"][..],
+        &["mcp", "setup", "codex", "--force"][..],
     ] {
         let output = home.run(arguments);
         assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");

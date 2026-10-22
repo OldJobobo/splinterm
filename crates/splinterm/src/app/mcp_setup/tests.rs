@@ -9,6 +9,20 @@ use super::*;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+/// Creates `path` and any missing parents with mode 0755, whatever the umask.
+fn mkdirs(path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    let missing: Vec<PathBuf> = path
+        .ancestors()
+        .take_while(|ancestor| !ancestor.exists())
+        .map(Path::to_path_buf)
+        .collect();
+    fs::create_dir_all(path).unwrap();
+    for directory in missing {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 /// A private temporary home with an installed adapter.
 struct Home {
     root: PathBuf,
@@ -30,7 +44,7 @@ impl Home {
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let bin = root.join(directory);
-        fs::create_dir_all(&bin).unwrap();
+        mkdirs(&bin);
         let adapter = bin.join(ADAPTER_NAME);
         fs::write(&adapter, "#!/bin/false\n").unwrap();
         fs::set_permissions(&adapter, fs::Permissions::from_mode(0o755)).unwrap();
@@ -54,6 +68,7 @@ impl Home {
             host,
             dry_run: false,
             replace: false,
+            force: false,
             config: None,
             adapter: Some(self.adapter.clone()),
         }
@@ -73,7 +88,7 @@ impl Home {
 
     fn write(&self, relative: &str, text: &str) -> PathBuf {
         let path = self.root.join(relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mkdirs(path.parent().unwrap());
         fs::write(&path, text).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         path
@@ -173,7 +188,7 @@ fn claude_code_adds_the_server_list_when_there_is_none() {
 fn claude_config_dir_selects_the_file_claude_code_reads() {
     let home = Home::new();
     let directory = home.root.join("claude-config");
-    fs::create_dir(&directory).unwrap();
+    mkdirs(&directory);
     let environment = Environment {
         claude_config_dir: Some(directory.clone()),
         ..home.environment()
@@ -262,7 +277,7 @@ fn vscode_finds_exactly_one_user_directory() {
     let home = Home::new();
     let error = home.run(&home.setup(McpHostArg::Vscode)).unwrap_err();
     assert_eq!(kind(&error), FailureKind::NotFound);
-    fs::create_dir_all(home.root.join(".config/Code - OSS/User")).unwrap();
+    mkdirs(home.root.join(".config/Code - OSS/User"));
     let report = home.run(&home.setup(McpHostArg::Vscode)).unwrap();
     assert!(
         report
@@ -270,7 +285,7 @@ fn vscode_finds_exactly_one_user_directory() {
             .config_path
             .ends_with("/.config/Code - OSS/User/mcp.json")
     );
-    fs::create_dir_all(home.root.join(".config/Code/User")).unwrap();
+    mkdirs(home.root.join(".config/Code/User"));
     let error = home.run(&home.setup(McpHostArg::Vscode)).unwrap_err();
     assert_eq!(kind(&error), FailureKind::Invalid);
     let explicit = Request {
@@ -288,7 +303,7 @@ fn rerunning_setup_changes_nothing() {
         (McpHostArg::Vscode, ".config/Code/User/mcp.json"),
     ] {
         let home = Home::new();
-        fs::create_dir_all(home.root.join(".config/Code/User")).unwrap();
+        mkdirs(home.root.join(".config/Code/User"));
         home.run(&home.setup(host)).unwrap();
         let path = home.root.join(relative);
         let before = fs::read(&path).unwrap();
@@ -422,7 +437,7 @@ fn remove_handles_the_only_member_and_a_middle_member() {
     home.run(&home.remove(McpHostArg::ClaudeCode)).unwrap();
     assert_eq!(home.read(".claude.json"), "{\n  \"mcpServers\": {}\n}\n");
 
-    let middle = "{\n  \"mcpServers\": {\n    \"a\": {},\n    \"splinterm\": {\"command\": \"/x\"},\n    \"b\": {}\n  }\n}\n";
+    let middle = "{\n  \"mcpServers\": {\n    \"a\": {},\n    \"splinterm\": {\"command\": \"/x/splinterm-mcp\"},\n    \"b\": {}\n  }\n}\n";
     home.write(".claude.json", middle);
     home.run(&home.remove(McpHostArg::ClaudeCode)).unwrap();
     assert_eq!(
@@ -438,8 +453,7 @@ fn remove_handles_the_only_member_and_a_middle_member() {
         VSCODE_EXISTING.replace("}, // keep", "} // keep")
     );
 
-    let codex =
-        "[mcp_servers.splinterm]\ncommand = \"/x\"\n\n[mcp_servers.other]\ncommand = \"y\"\n";
+    let codex = "[mcp_servers.splinterm]\ncommand = \"/x/splinterm-mcp\"\n\n[mcp_servers.other]\ncommand = \"y\"\n";
     home.write(".codex/config.toml", codex);
     home.run(&home.remove(McpHostArg::Codex)).unwrap();
     assert_eq!(
@@ -582,6 +596,7 @@ fn symlinked_and_unsafe_targets_are_refused() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o620)).unwrap();
     let error = home.run(&home.setup(McpHostArg::ClaudeCode)).unwrap_err();
     assert_eq!(kind(&error), FailureKind::Invalid);
+    assert!(format!("{error:#}").contains("`chmod g-w '"), "{error:#}");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     fs::hard_link(&path, home.root.join("second-link")).unwrap();
     let error = home.run(&home.setup(McpHostArg::ClaudeCode)).unwrap_err();
@@ -596,8 +611,22 @@ fn symlinked_and_unsafe_targets_are_refused() {
         ..home.setup(McpHostArg::ClaudeCode)
     };
     let error = home.run(&request).unwrap_err();
-    assert!(format!("{error:#}").contains("writable by every user"));
+    let message = format!("{error:#}");
+    assert!(message.contains("`chmod g-w,o-w '"), "{message}");
     assert!(!home.root.join("shared/mcp.json").exists());
+    // A user-private-group umask (002) makes directories 0775: refused with the
+    // exact command.
+    fs::set_permissions(home.root.join("shared"), fs::Permissions::from_mode(0o775)).unwrap();
+    let message = format!("{:#}", home.run(&request).unwrap_err());
+    assert!(
+        message.contains(&format!("`chmod g-w '{}/shared'`", home.root.display())),
+        "{message}"
+    );
+    // A sticky shared directory, like /tmp, is never something to chmod.
+    fs::set_permissions(home.root.join("shared"), fs::Permissions::from_mode(0o1777)).unwrap();
+    let message = format!("{:#}", home.run(&request).unwrap_err());
+    assert!(message.contains("shared directory"), "{message}");
+    fs::set_permissions(home.root.join("shared"), fs::Permissions::from_mode(0o755)).unwrap();
 
     let directory = Request {
         config: Some(home.root.join("bin")),
@@ -637,7 +666,7 @@ fn paths_with_spaces_and_quotes_are_escaped_for_each_format() {
     let home = Home::with_adapter_dir("opt/my \"agent\" tools\\bin");
     let adapter = home.adapter();
     assert!(adapter.contains(' ') && adapter.contains('"') && adapter.contains('\\'));
-    fs::create_dir_all(home.root.join(".config/Code/User")).unwrap();
+    mkdirs(home.root.join(".config/Code/User"));
     home.run(&home.setup(McpHostArg::ClaudeCode)).unwrap();
     let claude: serde_json::Value = serde_json::from_str(&home.read(".claude.json")).unwrap();
     assert_eq!(
@@ -721,10 +750,10 @@ fn the_adapter_is_the_one_installed_next_to_splinterm() {
 fn a_nix_store_adapter_is_named_by_its_profile_entry() {
     let home = Home::with_adapter_dir("store/abc-splinterm/bin");
     let profile = home.root.join(".nix-profile/bin");
-    fs::create_dir_all(&profile).unwrap();
+    mkdirs(&profile);
     symlink(&home.adapter, profile.join(ADAPTER_NAME)).unwrap();
     let other = home.root.join("other-profile");
-    fs::create_dir_all(&other).unwrap();
+    mkdirs(&other);
     symlink(home.root.join("elsewhere"), other.join(ADAPTER_NAME)).unwrap();
     let executable = home.root.join("store/abc-splinterm/bin/splinterm");
     let entries = vec![other.join(ADAPTER_NAME), profile.join(ADAPTER_NAME)];
@@ -743,7 +772,7 @@ fn a_nix_store_adapter_is_named_by_its_profile_entry() {
         profile.join(ADAPTER_NAME).to_str().unwrap()
     );
     let environment = Environment {
-        user: Some("alice".to_owned()),
+        account: Some((home.root.clone(), OsString::from("alice"))),
         ..home.environment()
     };
     let listed = nix_profile_entries(&environment);
@@ -832,4 +861,246 @@ fn the_json_reader_rejects_what_hosts_would_misread() {
         parse_value("{/* c */ \"a\": [1,], // d\n}", Dialect::Jsonc).unwrap(),
         serde_json::json!({"a": [1]})
     );
+}
+
+#[test]
+fn claude_code_legacy_configuration_is_named_not_edited() {
+    let home = Home::new();
+    home.write(".claude/.config.json", "{\"numStartups\": 1}\n");
+    let error = home.run(&home.setup(McpHostArg::ClaudeCode)).unwrap_err();
+    assert_eq!(kind(&error), FailureKind::Invalid);
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(".claude/.config.json") && message.contains("--config"),
+        "{message}"
+    );
+    assert!(!home.root.join(".claude.json").exists());
+    let explicit = Request {
+        config: Some(home.root.join(".claude/.config.json")),
+        ..home.setup(McpHostArg::ClaudeCode)
+    };
+    assert_eq!(home.run(&explicit).unwrap().outcome.action, Action::Added);
+
+    // Claude Code ignores an empty legacy file, and so does setup.
+    let home = Home::new();
+    home.write(".claude/.config.json", "");
+    let report = home.run(&home.setup(McpHostArg::ClaudeCode)).unwrap();
+    assert_eq!(report.outcome.action, Action::Created);
+
+    // Under CLAUDE_CONFIG_DIR the legacy file is that directory's own.
+    let home = Home::new();
+    home.write("cfg/.config.json", "{}\n");
+    let environment = Environment {
+        claude_config_dir: Some(home.root.join("cfg")),
+        ..home.environment()
+    };
+    let error = execute(&home.setup(McpHostArg::ClaudeCode), &environment).unwrap_err();
+    assert_eq!(kind(&error), FailureKind::Invalid);
+    assert!(format!("{error:#}").contains("cfg/.config.json"));
+}
+
+#[test]
+fn a_dry_run_refuses_what_the_real_run_refuses() {
+    let home = Home::new();
+    let environment = Environment {
+        codex_home: Some(home.root.join("missing")),
+        ..home.environment()
+    };
+    let dry = Request {
+        dry_run: true,
+        ..home.setup(McpHostArg::Codex)
+    };
+    assert_eq!(
+        kind(&execute(&dry, &environment).unwrap_err()),
+        FailureKind::NotFound
+    );
+    let elsewhere = Request {
+        dry_run: true,
+        config: Some(home.root.join("nowhere/mcp.json")),
+        ..home.setup(McpHostArg::Vscode)
+    };
+    assert_eq!(
+        kind(&home.run(&elsewhere).unwrap_err()),
+        FailureKind::NotFound
+    );
+    assert!(!home.root.join("nowhere").exists());
+    // Removing from a file that does not exist changes nothing either way.
+    let remove = Request {
+        dry_run: true,
+        config: Some(home.root.join("nowhere/mcp.json")),
+        ..home.remove(McpHostArg::Vscode)
+    };
+    assert_eq!(home.run(&remove).unwrap().outcome.action, Action::Absent);
+}
+
+#[test]
+fn an_entry_codex_mcp_add_wrote_is_updated_without_replace() {
+    for args in ["", "args = []\n"] {
+        let home = Home::new();
+        let existing = format!(
+            "model = \"o3\"\n\n[mcp_servers.splinterm]\ncommand = \"{}\"\n{args}",
+            home.adapter()
+        );
+        home.write(".codex/config.toml", &existing);
+        let report = home.run(&home.setup(McpHostArg::Codex)).unwrap();
+        assert_eq!(report.outcome.action, Action::Updated, "{args:?}");
+        assert!(human(&report).starts_with("Updated "));
+        assert_eq!(
+            home.read(".codex/config.toml"),
+            format!(
+                "model = \"o3\"\n\n[mcp_servers.splinterm]\ncommand = \"{}\"\nenv_vars = [\"SPLINTERM_SPLINT_ID\", \"SPLINTERM_SPLINT_INCARNATION\"]\n",
+                home.adapter()
+            )
+        );
+        let again = home.run(&home.setup(McpHostArg::Codex)).unwrap();
+        assert_eq!(again.outcome.action, Action::Unchanged);
+    }
+    let home = Home::new();
+    for table in [
+        "command = \"/elsewhere/splinterm-mcp\"\n".to_owned(),
+        format!("command = \"{}\"\nargs = [\"--x\"]\n", home.adapter()),
+        format!(
+            "command = \"{}\"\nstartup_timeout_sec = 5\n",
+            home.adapter()
+        ),
+        format!(
+            "command = \"{}\"\n\n[mcp_servers.splinterm.env]\nA = \"1\"\n",
+            home.adapter()
+        ),
+    ] {
+        let existing = format!("[mcp_servers.splinterm]\n{table}");
+        home.write(".codex/config.toml", &existing);
+        let error = home.run(&home.setup(McpHostArg::Codex)).unwrap_err();
+        assert_eq!(kind(&error), FailureKind::Conflict, "{table}");
+        assert_eq!(home.read(".codex/config.toml"), existing);
+    }
+}
+
+#[test]
+fn remove_leaves_an_entry_it_did_not_write_unless_forced() {
+    let home = Home::new();
+    let foreign = "{\n  \"mcpServers\": {\n    \"splinterm\": {\"command\": \"/usr/bin/other-tool\"}\n  }\n}\n";
+    home.write(".claude.json", foreign);
+    for dry_run in [true, false] {
+        let request = Request {
+            dry_run,
+            ..home.remove(McpHostArg::ClaudeCode)
+        };
+        let error = home.run(&request).unwrap_err();
+        assert_eq!(kind(&error), FailureKind::Conflict);
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("/usr/bin/other-tool") && message.contains("--force"),
+            "{message}"
+        );
+    }
+    assert_eq!(home.read(".claude.json"), foreign);
+    let forced = Request {
+        force: true,
+        ..home.remove(McpHostArg::ClaudeCode)
+    };
+    assert_eq!(home.run(&forced).unwrap().outcome.action, Action::Removed);
+    assert_eq!(home.read(".claude.json"), "{\n  \"mcpServers\": {}\n}\n");
+
+    let commandless = "[mcp_servers.splinterm]\nurl = \"http://localhost:1\"\n";
+    home.write(".codex/config.toml", commandless);
+    let error = home.run(&home.remove(McpHostArg::Codex)).unwrap_err();
+    assert_eq!(kind(&error), FailureKind::Conflict);
+    assert!(format!("{error:#}").contains("no command"));
+    assert_eq!(home.read(".codex/config.toml"), commandless);
+}
+
+#[test]
+fn the_adapter_identity_follows_adr_0014() {
+    let tree = Home::new();
+    let uid = rustix::process::geteuid().as_raw();
+    let environment = Environment {
+        identity_tree: tree.root.clone(),
+        identity_root: IdentityRoot::at(tree.root.clone(), vec![uid]),
+        account: Some((PathBuf::from("/home/alice"), OsString::from("alice"))),
+        ..Environment::default()
+    };
+    let install = |relative: &str| {
+        let path = tree.root.join(relative);
+        mkdirs(path.parent().unwrap());
+        fs::write(&path, "#!/bin/false\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    install("usr/bin/splinterm-mcp");
+    let packaged = Path::new("/usr/bin/splinterm-mcp");
+    assert_eq!(
+        classify_adapter(&environment, packaged),
+        McpAdapterIdentity::ProtectedInstall
+    );
+    fs::set_permissions(tree.root.join("usr/bin"), fs::Permissions::from_mode(0o775)).unwrap();
+    assert_eq!(
+        classify_adapter(&environment, packaged),
+        McpAdapterIdentity::Unprotected
+    );
+
+    let object = "0123456789abcdfghijklmnpqrsvwxyz-splinterm";
+    install(&format!("nix/store/{object}/bin/splinterm-mcp"));
+    fs::set_permissions(
+        tree.root.join("nix/store"),
+        fs::Permissions::from_mode(0o1775),
+    )
+    .unwrap();
+    let store_path = format!("/nix/store/{object}/bin/splinterm-mcp");
+    assert_eq!(
+        classify_adapter(&environment, Path::new(&store_path)),
+        McpAdapterIdentity::NixStore
+    );
+    let link = |relative: &str, target: &str| {
+        let path = tree.root.join(relative);
+        mkdirs(path.parent().unwrap());
+        symlink(target, path).unwrap();
+    };
+    let into_store = format!("../../../../nix/store/{object}/bin/splinterm-mcp");
+    link("home/alice/.nix-profile/bin/splinterm-mcp", &into_store);
+    assert_eq!(
+        classify_adapter(
+            &environment,
+            Path::new("/home/alice/.nix-profile/bin/splinterm-mcp")
+        ),
+        McpAdapterIdentity::NixProfile
+    );
+    // A link outside the profile list still ends in the store.
+    link("home/alice/tools/bin/splinterm-mcp", &into_store);
+    assert_eq!(
+        classify_adapter(
+            &environment,
+            Path::new("/home/alice/tools/bin/splinterm-mcp")
+        ),
+        McpAdapterIdentity::NixStore
+    );
+    assert_eq!(
+        classify_adapter(&environment, Path::new("/missing/splinterm-mcp")),
+        McpAdapterIdentity::Unprotected
+    );
+
+    // A user-owned adapter in a real home: never "Always", and setup says so.
+    let home = Home::new();
+    let report = home.run(&home.setup(McpHostArg::Codex)).unwrap();
+    assert_eq!(
+        report.outcome.adapter_identity,
+        Some(McpAdapterIdentity::Unprotected)
+    );
+    let text = human(&report);
+    assert!(text.contains("will not offer \"Always\""), "{text}");
+    let report = Report {
+        outcome: McpSetupOutcome {
+            adapter_identity: Some(McpAdapterIdentity::NixStore),
+            ..report.outcome
+        },
+        ..report
+    };
+    assert!(human(&report).contains("garbage collection"));
+    let report = Report {
+        outcome: McpSetupOutcome {
+            adapter_identity: Some(McpAdapterIdentity::ProtectedInstall),
+            ..report.outcome
+        },
+        ..report
+    };
+    assert!(!human(&report).contains("Note:"));
 }

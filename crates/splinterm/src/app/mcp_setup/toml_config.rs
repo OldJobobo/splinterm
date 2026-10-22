@@ -59,6 +59,21 @@ impl TomlEntry {
         )
     }
 
+    /// Whether `current` is this entry as `codex mcp add` writes it: the same
+    /// command, no arguments, and nothing else, so only the forwarded
+    /// variables are missing. Such an entry is brought up to date without
+    /// `--replace`.
+    pub(super) fn upgrades(&self, current: &Value) -> bool {
+        let Some(table) = current.as_table() else {
+            return false;
+        };
+        table.get("command").and_then(Value::as_str) == Some(self.command.as_str())
+            && table
+                .get("args")
+                .is_none_or(|args| args.as_array().is_some_and(Vec::is_empty))
+            && table.keys().all(|key| key == "command" || key == "args")
+    }
+
     pub(super) fn to_value(&self) -> Value {
         let mut table = Table::new();
         table.insert("command".to_owned(), Value::String(self.command.clone()));
@@ -299,6 +314,7 @@ pub(super) fn plan_setup(text: Option<&str>, entry: &TomlEntry, replace: bool) -
     let action = match existing(&document)? {
         None => Action::Added,
         Some(current) if *current == value => return Ok(Plan::unchanged(Action::Unchanged)),
+        Some(current) if entry.upgrades(current) => Action::Updated,
         Some(_) if !replace => return Err(super::conflict()),
         Some(_) => Action::Replaced,
     };
@@ -328,9 +344,13 @@ pub(super) fn plan_remove(text: Option<&str>) -> Result<Plan> {
         return Ok(Plan::unchanged(Action::Absent));
     };
     let document = parse(text)?;
-    if existing(&document)?.is_none() {
+    let Some(current) = existing(&document)? else {
         return Ok(Plan::unchanged(Action::Absent));
-    }
+    };
+    let command = current
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let ranges = sections(text);
     if ranges.is_empty() {
         return Err(super::unsafe_edit());
@@ -346,5 +366,5 @@ pub(super) fn plan_remove(text: Option<&str>) -> Result<Plan> {
         .expect("the container is a table")
         .remove(SERVER_NAME);
     verify(&new_text, &expected)?;
-    Ok(Plan::change(Action::Removed, new_text))
+    Ok(Plan::removal(new_text, command))
 }

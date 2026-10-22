@@ -61,6 +61,9 @@ pub enum McpSetupAction {
     Added,
     /// Setup with `--replace`: a different `splinterm` entry was replaced.
     Replaced,
+    /// Setup: an older Splinterm entry for the same adapter (a Codex entry
+    /// without `env_vars`) was brought up to date without `--replace`.
+    Updated,
     /// Setup: the file already holds exactly this entry.
     Unchanged,
     /// Remove: the `splinterm` entry was removed.
@@ -80,10 +83,35 @@ impl McpSetupAction {
         match operation {
             McpSetupOperation::Setup => matches!(
                 self,
-                Self::Created | Self::Added | Self::Replaced | Self::Unchanged
+                Self::Created | Self::Added | Self::Replaced | Self::Updated | Self::Unchanged
             ),
             McpSetupOperation::Remove => matches!(self, Self::Removed | Self::Absent),
         }
+    }
+}
+
+/// How ADR 0014 identifies the adapter an entry starts, which decides whether
+/// "Always for this workspace" can be offered for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAdapterIdentity {
+    /// Root-owned and unwritable along its whole path, like the package.
+    ProtectedInstall,
+    /// One of ADR 0014's Nix profile entries, resolving into the store.
+    NixProfile,
+    /// A raw Nix store path: never "Always", and gone after an upgrade or
+    /// garbage collection.
+    NixStore,
+    /// Anything else, such as a development build or a user-writable
+    /// install: never "Always".
+    Unprotected,
+}
+
+impl McpAdapterIdentity {
+    /// Whether a remembered ("Always") grant can name this adapter.
+    #[must_use]
+    pub const fn durable(self) -> bool {
+        matches!(self, Self::ProtectedInstall | Self::NixProfile)
     }
 }
 
@@ -99,6 +127,8 @@ pub struct McpSetupOutcome {
     pub dry_run: bool,
     /// Setup only: the adapter executable the entry starts.
     pub adapter_path: Option<String>,
+    /// Setup only: how ADR 0014 identifies that adapter.
+    pub adapter_identity: Option<McpAdapterIdentity>,
     /// Setup only: the server entry, as JSON.
     pub entry: Option<Value>,
 }
@@ -119,6 +149,10 @@ struct McpSetupDataV2<'a> {
     written: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     adapter_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter_durable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter_identity: Option<McpAdapterIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     entry: Option<&'a Value>,
     grants_access: bool,
@@ -142,15 +176,20 @@ pub fn mcp_setup_envelope(outcome: &McpSetupOutcome) -> Result<CliEnvelopeV2> {
     public_path(&outcome.config_path, "host configuration path")?;
     match outcome.operation {
         McpSetupOperation::Setup => {
-            let (Some(adapter_path), Some(Value::Object(_))) =
-                (&outcome.adapter_path, &outcome.entry)
-            else {
-                bail!("MCP setup reports its adapter and entry");
+            let (Some(adapter_path), Some(Value::Object(_)), Some(_)) = (
+                &outcome.adapter_path,
+                &outcome.entry,
+                outcome.adapter_identity,
+            ) else {
+                bail!("MCP setup reports its adapter, the adapter's identity, and the entry");
             };
             public_path(adapter_path, "adapter path")?;
         }
         McpSetupOperation::Remove => {
-            if outcome.adapter_path.is_some() || outcome.entry.is_some() {
+            if outcome.adapter_path.is_some()
+                || outcome.entry.is_some()
+                || outcome.adapter_identity.is_some()
+            {
                 bail!("MCP removal never echoes an adapter or entry");
             }
         }
@@ -169,6 +208,8 @@ pub fn mcp_setup_envelope(outcome: &McpSetupOutcome) -> Result<CliEnvelopeV2> {
             dry_run: outcome.dry_run,
             written: changed && !outcome.dry_run,
             adapter_path: outcome.adapter_path.as_deref(),
+            adapter_durable: outcome.adapter_identity.map(McpAdapterIdentity::durable),
+            adapter_identity: outcome.adapter_identity,
             entry: outcome.entry.as_ref(),
             grants_access: false,
         })?,
@@ -190,6 +231,7 @@ mod tests {
             action,
             dry_run,
             adapter_path: Some("/usr/bin/splinterm-mcp".to_owned()),
+            adapter_identity: Some(McpAdapterIdentity::ProtectedInstall),
             entry: Some(serde_json::json!({"command": "/usr/bin/splinterm-mcp"})),
         }
     }
@@ -207,7 +249,17 @@ mod tests {
         assert_eq!(document["data"]["written"], true);
         assert_eq!(document["data"]["grants_access"], false);
         assert_eq!(document["data"]["adapter_path"], "/usr/bin/splinterm-mcp");
+        assert_eq!(document["data"]["adapter_durable"], true);
+        assert_eq!(document["data"]["adapter_identity"], "protected_install");
         assert!(document.get("resource").is_none());
+        let store = McpSetupOutcome {
+            adapter_identity: Some(McpAdapterIdentity::NixStore),
+            ..setup(McpSetupAction::Updated, false)
+        };
+        let document = data(&store);
+        assert_eq!(document["data"]["action"], "updated");
+        assert_eq!(document["data"]["adapter_durable"], false);
+        assert_eq!(document["data"]["adapter_identity"], "nix_store");
     }
 
     #[test]
@@ -229,6 +281,9 @@ mod tests {
         let mut control = setup(McpSetupAction::Added, false);
         control.adapter_path = Some("/usr/bin/splinterm-mcp\n".to_owned());
         assert!(mcp_setup_envelope(&control).is_err());
+        let mut unidentified = setup(McpSetupAction::Added, false);
+        unidentified.adapter_identity = None;
+        assert!(mcp_setup_envelope(&unidentified).is_err());
         let echoing = McpSetupOutcome {
             operation: McpSetupOperation::Remove,
             action: McpSetupAction::Removed,
@@ -237,6 +292,7 @@ mod tests {
         assert!(mcp_setup_envelope(&echoing).is_err());
         let remove = McpSetupOutcome {
             adapter_path: None,
+            adapter_identity: None,
             entry: None,
             ..echoing
         };
@@ -244,5 +300,6 @@ mod tests {
         assert_eq!(document["operation"], "mcp_remove");
         assert!(document["data"].get("entry").is_none());
         assert!(document["data"].get("adapter_path").is_none());
+        assert!(document["data"].get("adapter_durable").is_none());
     }
 }

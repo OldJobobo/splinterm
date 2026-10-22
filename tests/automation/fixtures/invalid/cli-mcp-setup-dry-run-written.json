@@ -16,6 +16,8 @@
       "dry_run": true,
       "written": true,
       "adapter_path": "/home/alice/.nix-profile/bin/splinterm-mcp",
+      "adapter_durable": true,
+      "adapter_identity": "protected_install",
       "entry": {
         "command": "/home/alice/.nix-profile/bin/splinterm-mcp",
         "env_vars": [

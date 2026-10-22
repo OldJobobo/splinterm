@@ -17,19 +17,20 @@ mod tests;
 
 use std::{
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt, fs,
     io::Write,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use splinterm::automation::{
-    CliEnvelopeV2, CliErrorCodeV2, MAX_MCP_SETUP_PATH_BYTES, McpConfigFormat, McpHostName,
-    McpSetupAction as Action, McpSetupOperation, McpSetupOutcome, mcp_setup_envelope,
+    CliEnvelopeV2, CliErrorCodeV2, MAX_MCP_SETUP_PATH_BYTES, McpAdapterIdentity, McpConfigFormat,
+    McpHostName, McpSetupAction as Action, McpSetupOperation, McpSetupOutcome, mcp_setup_envelope,
     write_json_document,
 };
+use splinterm_policy::durable_identity::{self, IdentityRoot};
 
 use super::{
     commands::{McpCommand, McpHostArg, OutputMode},
@@ -54,6 +55,8 @@ pub(super) struct Plan {
     pub(super) action: Action,
     /// The complete new file, or `None` when nothing changes.
     pub(super) new_text: Option<String>,
+    /// For a removal: the `command` of the entry removed, when it is a string.
+    pub(super) removed_command: Option<String>,
 }
 
 impl Plan {
@@ -61,6 +64,7 @@ impl Plan {
         Self {
             action,
             new_text: Some(new_text),
+            removed_command: None,
         }
     }
 
@@ -68,6 +72,15 @@ impl Plan {
         Self {
             action,
             new_text: None,
+            removed_command: None,
+        }
+    }
+
+    pub(super) fn removal(new_text: String, removed_command: Option<String>) -> Self {
+        Self {
+            action: Action::Removed,
+            new_text: Some(new_text),
+            removed_command,
         }
     }
 }
@@ -151,15 +164,37 @@ fn at_path(error: anyhow::Error, path: &Path) -> anyhow::Error {
     }
 }
 
-/// Process environment that selects host configuration locations. Each value
-/// is used only when it is set, non-empty, and absolute.
-#[derive(Clone, Debug, Default)]
+/// What selects host configuration locations and judges the adapter.
+///
+/// The host locations come from the process environment, as the hosts read
+/// them; each value is used only when it is set, non-empty, and absolute. The
+/// account whose Nix profile entries count comes from the password database,
+/// as ADR 0014 requires, never from the environment.
+#[derive(Clone, Debug)]
 pub(super) struct Environment {
     pub(super) home: Option<PathBuf>,
     pub(super) xdg_config_home: Option<PathBuf>,
     pub(super) claude_config_dir: Option<PathBuf>,
     pub(super) codex_home: Option<PathBuf>,
-    pub(super) user: Option<String>,
+    /// `HOME` and `USER` from the password database.
+    pub(super) account: Option<(PathBuf, OsString)>,
+    /// The tree standing in for `/` in the identity checks (tests only).
+    pub(super) identity_tree: PathBuf,
+    pub(super) identity_root: IdentityRoot,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self {
+            home: None,
+            xdg_config_home: None,
+            claude_config_dir: None,
+            codex_home: None,
+            account: None,
+            identity_tree: PathBuf::from("/"),
+            identity_root: IdentityRoot::system(),
+        }
+    }
 }
 
 fn absolute_env(name: &str, value: Option<OsString>) -> Result<Option<PathBuf>> {
@@ -183,9 +218,11 @@ impl Environment {
             xdg_config_home: absolute_env("XDG_CONFIG_HOME", env::var_os("XDG_CONFIG_HOME"))?,
             claude_config_dir: absolute_env("CLAUDE_CONFIG_DIR", env::var_os("CLAUDE_CONFIG_DIR"))?,
             codex_home: absolute_env("CODEX_HOME", env::var_os("CODEX_HOME"))?,
-            user: env::var("USER").ok().filter(|user| {
-                !user.is_empty() && !user.contains('/') && user != "." && user != ".."
-            }),
+            account: nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+                .ok()
+                .flatten()
+                .map(|user| (user.dir, OsString::from(user.name))),
+            ..Self::default()
         })
     }
 
@@ -237,13 +274,33 @@ impl Host {
     pub(super) fn default_path(self, environment: &Environment) -> Result<(PathBuf, bool)> {
         match self.name {
             // What `claude mcp add --scope user` writes.
-            McpHostName::ClaudeCode => Ok((
-                match &environment.claude_config_dir {
-                    Some(directory) => directory.join(".claude.json"),
-                    None => environment.home()?.join(".claude.json"),
-                },
-                false,
-            )),
+            McpHostName::ClaudeCode => {
+                // Claude Code 2.1.308 reads its legacy `.config.json` instead
+                // whenever that is a non-empty regular file.
+                let legacy = match &environment.claude_config_dir {
+                    Some(directory) => directory.join(".config.json"),
+                    None => environment.home()?.join(".claude/.config.json"),
+                };
+                if fs::metadata(&legacy)
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+                {
+                    return Err(failure(
+                        FailureKind::Invalid,
+                        format!(
+                            "Claude Code reads its configuration from the legacy file {} instead of .claude.json. Nothing was written; pass --config {} to set that file up",
+                            legacy.display(),
+                            file::shell_quote(&legacy)
+                        ),
+                    ));
+                }
+                Ok((
+                    match &environment.claude_config_dir {
+                        Some(directory) => directory.join(".claude.json"),
+                        None => environment.home()?.join(".claude.json"),
+                    },
+                    false,
+                ))
+            }
             // What `codex mcp add` writes.
             McpHostName::Codex => Ok(match &environment.codex_home {
                 Some(directory) => (directory.join("config.toml"), false),
@@ -337,26 +394,45 @@ fn public_path(path: &Path, what: &str) -> Result<String> {
 /// The Nix profile entries ADR 0014 accepts for a remembered grant, in its
 /// order, for the adapter's name.
 fn nix_profile_entries(environment: &Environment) -> Vec<PathBuf> {
-    let mut entries = vec![PathBuf::from("/run/current-system/sw/bin")];
-    if let Some(user) = &environment.user {
-        entries.push(Path::new("/etc/profiles/per-user").join(user).join("bin"));
+    environment
+        .account
+        .as_ref()
+        .and_then(|(home, user)| {
+            durable_identity::nix_profile_entries(home, user, OsStr::new(ADAPTER_NAME))
+        })
+        .map(Vec::from)
+        .unwrap_or_default()
+}
+
+/// How ADR 0014 would identify `path` as the executing file of an adapter
+/// process now: a protected install or Nix profile entry can be remembered
+/// ("Always"); a raw store path or anything else cannot. Advice only: the
+/// daemon checks every connection itself.
+pub(super) fn classify_adapter(environment: &Environment, path: &Path) -> McpAdapterIdentity {
+    let tree = &environment.identity_tree;
+    let physical = tree.join(path.strip_prefix("/").unwrap_or(path));
+    let Ok(metadata) = fs::metadata(&physical) else {
+        return McpAdapterIdentity::Unprotected;
+    };
+    let executing = (metadata.dev(), metadata.ino());
+    let root = &environment.identity_root;
+    if durable_identity::check_protected_install(root, path, executing).is_ok() {
+        return McpAdapterIdentity::ProtectedInstall;
     }
-    entries.push(PathBuf::from("/nix/var/nix/profiles/default/bin"));
-    if let Some(user) = &environment.user {
-        entries.push(
-            Path::new("/nix/var/nix/profiles/per-user")
-                .join(user)
-                .join("profile/bin"),
-        );
+    if let Some((home, user)) = &environment.account
+        && durable_identity::is_nix_profile_entry(path, home, user)
+        && durable_identity::resolve_nix_profile_entry(root, path, executing).is_ok()
+    {
+        return McpAdapterIdentity::NixProfile;
     }
-    if let Some(home) = &environment.home {
-        entries.push(home.join(".nix-profile/bin"));
-        entries.push(home.join(".local/state/nix/profile/bin"));
+    let in_store = fs::canonicalize(tree)
+        .and_then(|tree| Ok((tree, fs::canonicalize(&physical)?)))
+        .is_ok_and(|(tree, target)| target.starts_with(tree.join("nix/store")));
+    if in_store {
+        McpAdapterIdentity::NixStore
+    } else {
+        McpAdapterIdentity::Unprotected
     }
-    entries
-        .into_iter()
-        .map(|directory| directory.join(ADAPTER_NAME))
-        .collect()
 }
 
 /// The adapter installed next to `executable`. When that is a Nix store path,
@@ -418,6 +494,9 @@ pub(super) struct Request {
     pub(super) host: McpHostArg,
     pub(super) dry_run: bool,
     pub(super) replace: bool,
+    /// Remove only: remove a `splinterm` entry that starts something other
+    /// than `splinterm-mcp`.
+    pub(super) force: bool,
     pub(super) config: Option<PathBuf>,
     pub(super) adapter: Option<PathBuf>,
 }
@@ -436,18 +515,21 @@ impl From<McpCommand> for Request {
                 host,
                 dry_run,
                 replace,
+                force: false,
                 config,
                 adapter,
             },
             McpCommand::Remove {
                 host,
                 dry_run,
+                force,
                 config,
             } => Self {
                 operation: McpSetupOperation::Remove,
                 host,
                 dry_run,
                 replace: false,
+                force,
                 config,
                 adapter: None,
             },
@@ -462,6 +544,48 @@ pub(super) struct Report {
     pub(super) host: Host,
     pub(super) old_text: Option<String>,
     pub(super) new_text: Option<String>,
+    /// Problems that did not stop the change, such as an unconfirmed sync.
+    pub(super) warnings: Vec<String>,
+}
+
+/// Refuses, before anything is written and in a dry run too, a change the
+/// real run would refuse: a new file in a missing directory setup may not
+/// create, and removing an entry that starts something other than the
+/// adapter without `--force`.
+fn check_change(
+    request: &Request,
+    plan: &Plan,
+    path: &Path,
+    existing: bool,
+    create_directory: bool,
+) -> Result<()> {
+    if plan.new_text.is_some() && !existing && !create_directory {
+        let directory = path
+            .parent()
+            .context("configuration path has no directory")?;
+        if !file::check_directory(directory)? {
+            return Err(file::missing_directory(directory));
+        }
+    }
+    if plan.action == Action::Removed && !request.force {
+        let ours = plan.removed_command.as_deref().is_some_and(|command| {
+            Path::new(command).file_name() == Some(OsStr::new(ADAPTER_NAME))
+        });
+        if !ours {
+            let starts = plan
+                .removed_command
+                .as_deref()
+                .map_or_else(|| "no command".to_owned(), |command| format!("`{command}`"));
+            return Err(failure(
+                FailureKind::Conflict,
+                format!(
+                    "the `{SERVER_NAME}` entry in {} starts {starts}, not {ADAPTER_NAME}, which `splinterm mcp setup` never writes. Nothing was written; review it, then run remove again with --force to remove it",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Plans the change and, unless this is a dry run, writes it.
@@ -478,6 +602,9 @@ pub(super) fn execute(request: &Request, environment: &Environment) -> Result<Re
     } else {
         None
     };
+    let adapter_identity = adapter
+        .as_deref()
+        .map(|adapter| classify_adapter(environment, Path::new(adapter)));
     let existing = file::read(&path)?;
     let text = existing.as_ref().map(|existing| existing.text.as_str());
     let (plan, entry) = match (host.format, &adapter) {
@@ -507,10 +634,17 @@ pub(super) fn execute(request: &Request, environment: &Environment) -> Result<Re
         }
     };
     let plan = plan.map_err(|error| at_path(error, &path))?;
+    check_change(request, &plan, &path, existing.is_some(), create_directory)?;
+    let mut warnings = Vec::new();
     if let Some(new_text) = &plan.new_text
         && !request.dry_run
     {
-        file::write(&path, new_text, existing.as_ref(), create_directory)?;
+        warnings.extend(file::write(
+            &path,
+            new_text,
+            existing.as_ref(),
+            create_directory,
+        )?);
     }
     Ok(Report {
         outcome: McpSetupOutcome {
@@ -522,11 +656,13 @@ pub(super) fn execute(request: &Request, environment: &Environment) -> Result<Re
             action: plan.action,
             dry_run: request.dry_run,
             adapter_path: adapter,
+            adapter_identity,
             entry,
         },
         host,
         old_text: existing.map(|existing| existing.text),
         new_text: plan.new_text,
+        warnings,
     })
 }
 
@@ -572,6 +708,20 @@ fn push_line(out: &mut String, text: &str) {
     out.push('\n');
 }
 
+/// The one-line notice for an adapter "Always" can never be offered for.
+fn adapter_notice(outcome: &McpSetupOutcome) -> Option<String> {
+    let adapter = outcome.adapter_path.as_deref()?;
+    match outcome.adapter_identity? {
+        McpAdapterIdentity::NixStore => Some(format!(
+            "Note: {adapter} is a raw Nix store path, so Splinterm will not offer \"Always\" for it, and this entry stops working once an upgrade or garbage collection removes that path. Install splinterm-mcp into a Nix profile and run setup again."
+        )),
+        McpAdapterIdentity::Unprotected => Some(format!(
+            "Note: {adapter} is neither a protected install (owned by root and unwritable along its whole path) nor a Nix profile entry, so Splinterm will not offer \"Always\" for it; \"Just this once\" and \"While this workspace is open\" still work."
+        )),
+        McpAdapterIdentity::ProtectedInstall | McpAdapterIdentity::NixProfile => None,
+    }
+}
+
 /// The human report.
 pub(super) fn human(report: &Report) -> String {
     let outcome = &report.outcome;
@@ -582,6 +732,9 @@ pub(super) fn human(report: &Report) -> String {
         let change = match outcome.action {
             Action::Created => format!("create {path} with the `{SERVER_NAME}` MCP server"),
             Action::Replaced => format!("replace the `{SERVER_NAME}` MCP server in {path}"),
+            Action::Updated => format!(
+                "update the `{SERVER_NAME}` MCP server in {path} to forward the Splinterm variables"
+            ),
             Action::Removed => format!("remove the `{SERVER_NAME}` MCP server from {path}"),
             _ => format!("add the `{SERVER_NAME}` MCP server to {path}"),
         };
@@ -606,6 +759,9 @@ pub(super) fn human(report: &Report) -> String {
             Action::Replaced => format!(
                 "Replaced the `{SERVER_NAME}` MCP server in {label}'s configuration in {path}."
             ),
+            Action::Updated => format!(
+                "Updated the `{SERVER_NAME}` MCP server in {label}'s configuration in {path}: it now forwards SPLINTERM_SPLINT_ID and SPLINTERM_SPLINT_INCARNATION."
+            ),
             Action::Unchanged => format!(
                 "{label}'s configuration in {path} already has this `{SERVER_NAME}` MCP server; nothing changed."
             ),
@@ -620,6 +776,9 @@ pub(super) fn human(report: &Report) -> String {
         if let Some(adapter) = &outcome.adapter_path {
             push_line(&mut out, &format!("  command: {adapter}"));
         }
+    }
+    if let Some(notice) = adapter_notice(outcome) {
+        push_line(&mut out, &notice);
     }
     if outcome.operation == McpSetupOperation::Setup {
         push_line(&mut out, GRANTS_NOTHING);
@@ -648,6 +807,14 @@ fn bounded(message: &str) -> String {
         "MCP setup failed".to_owned()
     } else {
         message
+    }
+}
+
+/// Problems that did not stop the change go to standard error, never into
+/// the machine document.
+fn warn(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("warning: {warning}");
     }
 }
 
@@ -686,7 +853,10 @@ pub(super) fn run(
             }
             let result = Environment::from_process()
                 .and_then(|environment| execute(&request, &environment))
-                .and_then(|report| mcp_setup_envelope(&report.outcome));
+                .and_then(|report| {
+                    warn(&report.warnings);
+                    mcp_setup_envelope(&report.outcome)
+                });
             match result {
                 Ok(envelope) => write_json_document(&envelope),
                 Err(error) => {
@@ -706,6 +876,7 @@ pub(super) fn run(
                 usage_error("--schema-major and --timeout-ms require --output json or ndjson");
             }
             let report = execute(&request, &Environment::from_process()?)?;
+            warn(&report.warnings);
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(human(&report).as_bytes())?;
             stdout.flush()?;

@@ -54,8 +54,8 @@ pub use access::{
 };
 
 pub use mcp_setup::{
-    MAX_MCP_SETUP_PATH_BYTES, McpConfigFormat, McpHostName, McpSetupAction, McpSetupOperation,
-    McpSetupOutcome, mcp_setup_envelope,
+    MAX_MCP_SETUP_PATH_BYTES, McpAdapterIdentity, McpConfigFormat, McpHostName, McpSetupAction,
+    McpSetupOperation, McpSetupOutcome, mcp_setup_envelope,
 };
 
 pub use daemon_handoff::{

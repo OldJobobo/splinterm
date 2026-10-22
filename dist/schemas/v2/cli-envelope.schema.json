@@ -4683,6 +4683,8 @@
         "dry_run",
         "written",
         "adapter_path",
+        "adapter_durable",
+        "adapter_identity",
         "entry",
         "grants_access"
       ],
@@ -4712,6 +4714,7 @@
             "created",
             "added",
             "replaced",
+            "updated",
             "unchanged"
           ]
         },
@@ -4726,6 +4729,17 @@
         },
         "adapter_path": {
           "$ref": "#/$defs/mcp_setup_path"
+        },
+        "adapter_durable": {
+          "type": "boolean"
+        },
+        "adapter_identity": {
+          "enum": [
+            "protected_install",
+            "nix_profile",
+            "nix_store",
+            "unprotected"
+          ]
         },
         "entry": {
           "type": "object"
@@ -4837,6 +4851,32 @@
               },
               "entry": {
                 "$ref": "#/$defs/mcp_vscode_entry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "adapter_identity": {
+                "enum": [
+                  "protected_install",
+                  "nix_profile"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "adapter_durable": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "adapter_durable": {
+                "const": false
               }
             }
           }

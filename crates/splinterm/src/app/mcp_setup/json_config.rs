@@ -754,9 +754,12 @@ pub(super) fn plan_remove(text: Option<&str>, target: &JsonTarget<'_>) -> Result
     let Some(servers) = container.value.object() else {
         bail!("{} is not a JSON object", quote(target.container));
     };
-    let Some((index, _)) = servers.member(SERVER_NAME) else {
+    let Some((index, member)) = servers.member(SERVER_NAME) else {
         return Ok(Plan::unchanged(Action::Absent));
     };
+    let command = member.value.to_value()["command"]
+        .as_str()
+        .map(str::to_owned);
     let new_text = remove_member(text, servers, index);
     let mut expected = root.to_value();
     expected[target.container]
@@ -764,7 +767,7 @@ pub(super) fn plan_remove(text: Option<&str>, target: &JsonTarget<'_>) -> Result
         .expect("the container is an object")
         .remove(SERVER_NAME);
     verify(&new_text, target.dialect, &expected)?;
-    Ok(Plan::change(Action::Removed, new_text))
+    Ok(Plan::removal(new_text, command))
 }
 
 fn verify(text: &str, dialect: Dialect, expected: &Value) -> Result<()> {

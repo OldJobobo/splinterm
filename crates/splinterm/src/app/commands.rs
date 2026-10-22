@@ -712,6 +712,10 @@ pub(in crate::app) enum McpCommand {
         /// Print the exact change without writing it.
         #[arg(long)]
         dry_run: bool,
+        /// Remove a `splinterm` entry even when it starts something other than
+        /// splinterm-mcp.
+        #[arg(long)]
+        force: bool,
         /// Edit this file instead of the host's own user configuration.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
@@ -725,7 +729,8 @@ pub(in crate::app) enum McpHostArg {
     ClaudeCode,
     /// Codex CLI (`~/.codex/config.toml`).
     Codex,
-    /// Visual Studio Code, default profile (`~/.config/Code/User/mcp.json`).
+    /// Visual Studio Code, default profile (`~/.config/Code/User/mcp.json`); not
+    /// yet verified against a real install.
     Vscode,
 }
 

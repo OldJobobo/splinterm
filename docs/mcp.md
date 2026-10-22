@@ -30,46 +30,77 @@ session of the host to load the server.
 | `vscode` | `Code/User/mcp.json` or `Code - OSS/User/mcp.json` under `~/.config` (or `$XDG_CONFIG_HOME`), whichever exists | `servers.splinterm`: `{"type": "stdio", "command": ADAPTER, "args": []}` | The `.vscode/mcp.json` form below, in the default profile |
 
 The Claude Code and Codex entries are byte-for-byte what Claude Code 2.1.308
-and codex-cli 0.144.5 write, checked in a temporary home. The VS Code entry
-follows the documented form below; it was not checked against an installed
-VS Code. With neither or both VS Code directories present, setup asks for
-`--config PATH`.
+and codex-cli 0.144.5 write, checked in a temporary home. **The VS Code entry is
+not yet verified against a real install:** it follows the documented form
+below, and no installed VS Code was available to check it. With neither or
+both VS Code directories present, setup asks for `--config PATH`.
+
+Claude Code reads a legacy `.config.json` instead of `.claude.json` when that
+file is non-empty: `~/.claude/.config.json`, or `$CLAUDE_CONFIG_DIR/.config.json`.
+When it exists, setup names it, writes nothing, and asks you to pass it with
+`--config`.
 
 **Which adapter.** `ADAPTER` is the `splinterm-mcp` installed next to the
 `splinterm` you run: `/usr/bin/splinterm-mcp` for the package. When that file
 is in the Nix store, whose paths change with every upgrade, setup writes the
-first Nix profile entry from ADR 0014's list that resolves to the same file,
-such as `~/.nix-profile/bin/splinterm-mcp`. `--adapter PATH` starts another
-adapter, such as a development build, which is offered only the shorter grant
-durations. Without an installed adapter, setup stops with `not_found` and
+first ADR 0014 Nix profile entry that resolves to the same file, such as
+`~/.nix-profile/bin/splinterm-mcp`; the account's home and user name come from
+the password database, as the daemon's do. `--adapter PATH` starts another
+adapter. Without an installed adapter, setup stops with `not_found` and
 changes nothing.
+
+Setup also says how ADR 0014 will identify that adapter. A protected install
+(root-owned and unwritable along its whole path, like the package) or a Nix
+profile entry can be given "Always for this workspace". For anything else it
+prints one note: a development build or a user-writable install such as
+`~/.cargo/bin/splinterm-mcp` is offered only the two shorter durations, and a
+raw Nix store path (from `nix run`, for example) is never offered "Always" and
+stops working once an upgrade or garbage collection removes it.
 
 **What setup changes, and what it refuses.**
 
 - `--dry-run` prints the exact change as a diff of only the changed lines,
   without context lines, and writes nothing. When a neighbouring entry gains a
-  separating comma, its last line is shown.
+  separating comma, that entry's whole last line is shown, as it is in the
+  file. A dry run refuses everything the real run would refuse, including a
+  missing directory that setup does not create.
 - Running it again changes nothing, and the file is not rewritten.
 - It edits the file in place. Other servers, other settings, their order and
   spacing, and comments in VS Code's file stay as they are.
 - A different existing `splinterm` entry is left alone, and setup stops with
-  `confirmation_required`. Review it; `--replace` overwrites it.
-- It writes nothing to a file it cannot edit safely: malformed JSON or TOML,
-  duplicate keys at any depth, a server list that is not an object or table, a
-  Codex entry written as an inline table or with dotted keys, a symbolic link,
-  a file with other hard links, a file owned by another user or writable by
-  group or others, a file over 64 MiB, or a directory owned by another user or
-  writable by everyone.
-- Writes are atomic. The new text goes to a new file in the same directory, with
-  the old file's mode (`0600` for a new file), is synced, and is renamed over
-  the old file only if that has not changed since it was read; then the
-  directory is synced. A missing `~/.codex` is created with mode `0700`.
+  `confirmation_required`. Review it; `--replace` overwrites it. One exception:
+  a Codex entry that `codex mcp add` wrote for the same adapter (the same
+  command, no arguments, nothing else) is brought up to date with `env_vars`
+  without `--replace`, reported as `updated`.
+- It writes nothing to a file it cannot edit safely:
+  - malformed JSON or TOML, or duplicate keys at any depth;
+  - a server list that is not an object or table;
+  - a Codex entry written as an inline table or with dotted keys;
+  - a symbolic link or a file with other hard links;
+  - a file owned by another user, or over 64 MiB;
+  - a file or directory writable by its group or by others, or a directory
+    owned by another user.
+- A user-private group setup (umask `002`) makes files `0664` and directories
+  `0775`, which setup refuses. The refusal names the exact command to run,
+  such as `chmod g-w ~/.codex/config.toml`. A shared sticky directory such as
+  `/tmp` is refused outright.
+- The file is checked again on the opened descriptor before it is read.
+- Writes are atomic. The new text goes to a new file in the same directory and
+  is synced. It is renamed over the old file only if that has not changed since
+  it was read; then the directory is synced. If only that last sync fails, the
+  change is made and setup warns that its durability is not confirmed. A
+  missing `~/.codex` is created with mode `0700`.
+- The rewritten file keeps its mode (`0600` for a new file), but not its group,
+  ACLs, or extended attributes.
 - `--config PATH` edits another file in the host's format, such as a trusted
   project's `.vscode/mcp.json` or a VS Code profile's `mcp.json`.
 
 `splinterm mcp remove HOST` removes only the `splinterm` entry, with the same
-checks and `--dry-run`. It revokes nothing: `splinterm access list` shows the
-adapter's grants, and `splinterm access revoke` ends them.
+checks and `--dry-run`. If that entry starts anything other than a
+`splinterm-mcp`, which setup never writes, remove stops with
+`confirmation_required`; review it, then `--force` removes it. Removing revokes
+nothing: `splinterm access list` shows the adapter's grants, and
+`splinterm access revoke` ends them.
 
 Claude Code rewrites `~/.claude.json` while it runs, so a session that is open
 during setup can write its older copy back. Run setup with no Claude Code
@@ -77,17 +108,28 @@ session open, or check afterwards with `claude mcp get splinterm`.
 
 **Machine output.** `--output json` writes one `splinterm.cli.v2` document
 (`dist/schemas/v2/cli-envelope.schema.json`) with operation `mcp_setup` or
-`mcp_remove`. Its data has `host`, `config_path`, `config_format` (`json`,
-`jsonc`, or `toml`), `server_name`, `action` (`created`, `added`, `replaced`,
-or `unchanged` for setup; `removed` or `absent` for remove), `changed`,
-`dry_run`, and `written`; setup adds `adapter_path` and the `entry` it wrote.
+`mcp_remove`. Its data has:
+
+- `host`, `config_path`, `config_format` (`json`, `jsonc`, or `toml`), and
+  `server_name`;
+- `action`: `created`, `added`, `replaced`, `updated`, or `unchanged` for
+  setup; `removed` or `absent` for remove;
+- `changed`, `dry_run`, and `written`;
+- for setup only, `adapter_path`, `adapter_identity` (`protected_install`,
+  `nix_profile`, `nix_store`, or `unprotected`), `adapter_durable` (whether
+  "Always" can be offered), and the `entry` it wrote.
+
 `grants_access` is always `false`. A removal never echoes the entry it
-removed, which may hold secrets. Failures are `not_found` (no adapter or VS Code
-directory; exit 5), `invalid_argument` (a refused file, directory, or path;
-exit 5), `confirmation_required` (a different entry without `--replace`;
-exit 3), and `internal` (exit 70, retryable when the file changed during the
-edit). `splinterm mcp` never contacts the daemon and refuses `--remote` and
-`--timeout-ms`.
+removed, which may hold secrets. Failures are:
+
+- `not_found`: no adapter, no VS Code directory, or a missing directory; exit 5.
+- `invalid_argument`: a refused file, directory, or path; exit 5.
+- `confirmation_required`: a different entry without `--replace`, or a foreign
+  entry without `--force`; exit 3.
+- `internal`: exit 70, retryable when the file changed during the edit.
+
+Warnings go to standard error, never into the document. `splinterm mcp` never
+contacts the daemon and refuses `--remote` and `--timeout-ms`.
 
 ## Install identity and launch
 

@@ -16,6 +16,8 @@
       "dry_run": false,
       "written": true,
       "adapter_path": "/usr/bin/\u001b]0;x\u0007splinterm-mcp",
+      "adapter_durable": true,
+      "adapter_identity": "protected_install",
       "entry": {
         "args": [],
         "command": "/usr/bin/\u001b]0;x\u0007splinterm-mcp",

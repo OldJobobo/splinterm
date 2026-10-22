@@ -1,18 +1,20 @@
 //! Reading and atomically replacing one MCP host configuration file.
 //!
 //! The file must be a regular file with one link, owned by this user, and not
-//! writable by anyone else; setup never follows a symbolic link to it, so a
-//! file managed elsewhere (a dotfile link, a Nix store path) is left alone.
-//! Its directory may be reached through links, as `$HOME` often is, but must
-//! belong to this user and not be world-writable.
+//! writable by its group or by others; setup never follows a symbolic link to
+//! it, so a file managed elsewhere (a dotfile link, a Nix store path) is left
+//! alone. Its directory may be reached through links, as `$HOME` often is,
+//! but must belong to this user and not be writable by its group or by others
+//! either. The file's checks are repeated on the opened descriptor.
 //!
 //! A write goes to a new sibling file with the old file's mode, is synced, and
 //! is renamed over the target only if the target still has the identity, size,
 //! and modification time it had when it was read; the directory is then
-//! synced. An interrupted write leaves the old file intact.
+//! synced. An interrupted write leaves the old file intact. The rewrite keeps
+//! the file's mode but not its group, ACLs, or extended attributes.
 
 use std::{
-    fs::{self, File},
+    fs::{self, File, Metadata},
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     path::Path,
@@ -48,6 +50,41 @@ fn invalid(path: &Path, problem: &str) -> anyhow::Error {
     )
 }
 
+/// `path` quoted for a POSIX shell.
+pub(super) fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+/// The refusal for a group- or world-writable file or directory, with the
+/// exact command that fixes it. A umask of 002 (a user-private group) makes
+/// files 0664 and directories 0775, which this refuses too.
+fn writable(path: &Path, mode: u32) -> anyhow::Error {
+    let spec = match (mode & 0o020 != 0, mode & 0o002 != 0) {
+        (true, true) => "g-w,o-w",
+        (true, false) => "g-w",
+        _ => "o-w",
+    };
+    invalid(
+        path,
+        &format!(
+            "is writable by its group or by others. Run `chmod {spec} {}` so only you can write it, and try again",
+            shell_quote(path)
+        ),
+    )
+}
+
+/// The refusal when the configuration file's directory does not exist and
+/// setup may not create it.
+pub(super) fn missing_directory(directory: &Path) -> anyhow::Error {
+    failure(
+        FailureKind::NotFound,
+        format!(
+            "directory {} does not exist; nothing was written",
+            directory.display()
+        ),
+    )
+}
+
 /// Checks the directory that holds the configuration file. `Ok(false)` means
 /// it does not exist yet.
 pub(super) fn check_directory(directory: &Path) -> Result<bool> {
@@ -64,25 +101,21 @@ pub(super) fn check_directory(directory: &Path) -> Result<bool> {
     if metadata.uid() != uid() {
         return Err(invalid(directory, "belongs to another user"));
     }
-    if metadata.mode() & 0o002 != 0 {
-        return Err(invalid(directory, "is writable by every user"));
+    if metadata.mode() & 0o1002 == 0o1002 {
+        return Err(invalid(
+            directory,
+            "is a shared directory every user can write to; keep the configuration file elsewhere",
+        ));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(writable(directory, metadata.mode()));
     }
     Ok(true)
 }
 
-/// Reads the configuration file, or `None` when it does not exist.
-pub(super) fn read(path: &Path) -> Result<Option<Existing>> {
-    let directory = path
-        .parent()
-        .context("configuration path has no directory")?;
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            check_directory(directory)?;
-            return Ok(None);
-        }
-        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
-    };
+/// The file rules, applied to the path's `lstat` and again to the opened
+/// descriptor's `fstat`.
+fn check_file(path: &Path, metadata: &Metadata) -> Result<()> {
     if metadata.file_type().is_symlink() {
         return Err(invalid(
             path,
@@ -99,14 +132,28 @@ pub(super) fn read(path: &Path) -> Result<Option<Existing>> {
         return Err(invalid(path, "belongs to another user"));
     }
     if metadata.mode() & 0o022 != 0 {
-        return Err(invalid(
-            path,
-            "is writable by other users; fix its permissions first",
-        ));
+        return Err(writable(path, metadata.mode()));
     }
     if metadata.len() > MAX_CONFIG_BYTES {
         return Err(invalid(path, "is larger than 64 MiB"));
     }
+    Ok(())
+}
+
+/// Reads the configuration file, or `None` when it does not exist.
+pub(super) fn read(path: &Path) -> Result<Option<Existing>> {
+    let directory = path
+        .parent()
+        .context("configuration path has no directory")?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            check_directory(directory)?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    };
+    check_file(path, &metadata)?;
     check_directory(directory)?;
     let descriptor = rustix::fs::open(
         path,
@@ -119,6 +166,7 @@ pub(super) fn read(path: &Path) -> Result<Option<Existing>> {
     if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
         return Err(changed(path));
     }
+    check_file(path, &opened)?;
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
         .take(MAX_CONFIG_BYTES + 1)
@@ -160,24 +208,21 @@ fn still_as_read(path: &Path, existing: &Existing) -> bool {
 
 /// Atomically replaces (or creates) `path` with `contents`. `create_directory`
 /// allows creating a missing directory, mode `0700`, one level deep.
+///
+/// Returns a warning when the new file is in place but syncing its directory
+/// failed, so the change is made but its durability is not confirmed.
 pub(super) fn write(
     path: &Path,
     contents: &str,
     existing: Option<&Existing>,
     create_directory: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let directory = path
         .parent()
         .context("configuration path has no directory")?;
     if !check_directory(directory)? {
         if !create_directory {
-            return Err(failure(
-                FailureKind::NotFound,
-                format!(
-                    "directory {} does not exist; nothing was written",
-                    directory.display()
-                ),
-            ));
+            return Err(missing_directory(directory));
         }
         fs::DirBuilder::new()
             .mode(0o700)
@@ -231,11 +276,21 @@ pub(super) fn write(
                 }
             },
         }
-        File::open(directory)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result
+    result?;
+    // The rename has happened: the change is made either way.
+    Ok(File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .err()
+        .map(|error| {
+            format!(
+                "{} was written, but syncing {} failed ({error}), so the change may not survive a crash",
+                path.display(),
+                directory.display()
+            )
+        }))
 }

@@ -141,7 +141,7 @@ never contact the daemon; see [Set up an agent host](mcp.md#set-up-an-agent-host
 | `agent-status clear [...]` | `agent_status_clear` |
 | `agent-status get [SPLINT_ID]` | `agent_status_get` |
 | `mcp setup HOST [--dry-run] [--replace]` | `mcp_setup` |
-| `mcp remove HOST [--dry-run]` | `mcp_remove` |
+| `mcp remove HOST [--dry-run] [--force]` | `mcp_remove` |
 
 The NDJSON subscription commands are:
 
@@ -317,7 +317,9 @@ MCP adapter to that agent host's own configuration in one step. `--dry-run`
 shows the exact change first, a second run changes nothing, and
 `splinterm mcp remove HOST` takes the entry out again. Setup grants no access
 and writes no policy: the agent asks for a level the first time it needs a
-workspace, and you answer in the prompt described below. See
+workspace, and you answer in the prompt described below. Setup also says when
+the adapter it names can never be offered "Always", such as a development
+build or a raw Nix store path. See
 [Set up an agent host](mcp.md#set-up-an-agent-host) for the files, entries, and
 safety checks.
 
