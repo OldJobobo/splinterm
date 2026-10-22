@@ -27,7 +27,7 @@
 use anyhow::{Context, Result, bail};
 use splinterm::{
     automation::retry_until,
-    config::{ConfigLoad, load_default},
+    config::ConfigLoad,
     diagnostics::{
         DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global as diagnostics_global,
         initialize_graphical, install_termination_signal_task,
@@ -41,6 +41,7 @@ use splinterm_core::{DojoId, SplintId};
 use splinterm_protocol::{Request, Response, window_resume::WindowResumeRecord};
 
 use super::{
+    cli::load_graphical_configuration,
     pane_bridge::{UNTRUSTED_AFTER_UPGRADE, layout_splint_ids, refused_as_untrusted},
     window::{WindowResume, run_resumed_multipane_window},
 };
@@ -209,7 +210,7 @@ pub(crate) async fn run_resumed(resume: AcquiredWindowResume) -> Result<()> {
     let ConfigLoad {
         config,
         diagnostics,
-    } = load_default()?;
+    } = load_graphical_configuration()?;
     if !diagnostics.is_empty() {
         if let Some(client_diagnostics) = diagnostics_global() {
             client_diagnostics.emit(

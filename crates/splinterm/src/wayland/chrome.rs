@@ -7,15 +7,108 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     config::ResolvedTheme,
-    geometry::Rect,
+    frontend::{MINIMUM_ACTION_ROWS, action_area_top, dialog_text_rows},
+    geometry::{Rect, WindowGeometry, logical_extent_to_buffer},
     pane::{PaneChrome, PaneDivider, PaneLayout},
     renderer::{background_bgra, paint_box_drawing_cell},
 };
 use splinterm_core::SplintId;
 
-use super::{App, CachedFrameTitle};
+use super::{App, CachedFrameTitle, SCALE_DENOMINATOR};
 
-pub(super) fn paint_trusted_consent_chrome(canvas: &mut [u8], width: u32, height: u32) {
+/// The width of a trusted dialog's amber border, in buffer pixels.
+fn trusted_consent_border(width: u32, height: u32) -> u32 {
+    width.min(height).div_ceil(80).max(4)
+}
+
+/// Where a trusted dialog's action areas begin in its `width` by `height`
+/// buffer, whose grid starts `grid_top` pixels down and shows `text_rows`
+/// rows of text, each `cell_height` pixels tall: below the text, at least
+/// [`MINIMUM_ACTION_ROWS`] rows above the border
+/// ([`action_area_top`]).
+pub(super) fn trusted_consent_action_top(
+    width: u32,
+    height: u32,
+    grid_top: u32,
+    cell_height: u32,
+    text_rows: u32,
+) -> u32 {
+    let border = trusted_consent_border(width, height);
+    let text_bottom = grid_top.saturating_add(text_rows.saturating_mul(cell_height));
+    let minimum = cell_height
+        .saturating_mul(MINIMUM_ACTION_ROWS)
+        .saturating_add(border);
+    action_area_top(height, text_bottom, minimum)
+}
+
+impl App {
+    /// Where this trusted dialog's action areas begin, in buffer pixels, in
+    /// a `width` by `height` buffer that shows `geometry`'s grid. Without a
+    /// grid they take the bottom 22%.
+    pub(super) fn trusted_consent_action_top(
+        &self,
+        width: u32,
+        height: u32,
+        geometry: Option<&WindowGeometry>,
+    ) -> u32 {
+        let Some(geometry) = geometry else {
+            return trusted_consent_action_top(width, height, 0, 0, 0);
+        };
+        let text_rows = self
+            .panes
+            .pane
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| dialog_text_rows(&snapshot.visible_rows));
+        trusted_consent_action_top(
+            width,
+            height,
+            geometry.grid_rect.y,
+            geometry.cell.height,
+            u32::try_from(text_rows)
+                .unwrap_or(u32::MAX)
+                .min(geometry.rows),
+        )
+    }
+
+    /// Whether a click `y` logical pixels down this trusted dialog falls in
+    /// its action areas, exactly where [`paint_trusted_consent_chrome`]
+    /// paints them.
+    pub(super) fn trusted_consent_action_area_at(&self, y: f64) -> bool {
+        let scale_120 = self.surface.scale_120;
+        let content = self.content_rect();
+        let geometry = self.panes.pane.snapshot_frame.as_ref().and_then(|frame| {
+            self.panes
+                .pane
+                .window_geometry(frame, content.width, content.height, scale_120)
+                .ok()?
+                .translated(
+                    logical_extent_to_buffer(content.x, scale_120).ok()?,
+                    logical_extent_to_buffer(content.y, scale_120).ok()?,
+                )
+                .ok()
+        });
+        let Some(geometry) = geometry else {
+            return y >= f64::from(self.surface.logical_height) * 0.78;
+        };
+        let top = self.trusted_consent_action_top(
+            geometry.buffer_width(),
+            geometry.buffer_height(),
+            Some(&geometry),
+        );
+        y * f64::from(scale_120) / f64::from(SCALE_DENOMINATOR) >= f64::from(top)
+    }
+}
+
+/// Paints a trusted dialog's amber border and its red (left) and green
+/// (right) action areas, which begin `button_top` pixels down
+/// ([`App::trusted_consent_action_top`]).
+pub(super) fn paint_trusted_consent_chrome(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    button_top: u32,
+) {
     fn fill(canvas: &mut [u8], width: u32, x0: u32, y0: u32, x1: u32, y1: u32, rgb: u32) {
         let [_, red, green, blue] = rgb.to_be_bytes();
         for y in y0.min(y1)..y1 {
@@ -29,7 +122,7 @@ pub(super) fn paint_trusted_consent_chrome(canvas: &mut [u8], width: u32, height
             }
         }
     }
-    let border = width.min(height).div_ceil(80).max(4);
+    let border = trusted_consent_border(width, height);
     fill(canvas, width, 0, 0, width, border, 0x00e0_a030);
     fill(
         canvas,
@@ -50,7 +143,6 @@ pub(super) fn paint_trusted_consent_chrome(canvas: &mut [u8], width: u32, height
         height,
         0x00e0_a030,
     );
-    let button_top = height.saturating_mul(78) / 100;
     let middle = width / 2;
     fill(
         canvas,

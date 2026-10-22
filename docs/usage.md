@@ -439,8 +439,10 @@ gives it focus:
 Ctrl+Alt+G never answers. After either one, keys and the proceed or grant
 click count only about 600 ms later, and then `G` grants or proceeds (`R`
 restarts in the launcher's question) while `D`, `Escape`, or `Enter` deny or
-cancel. Held or repeating keys never count, and no key answers while Ctrl,
-Alt, or Super is held. The dialog's last line names the shortcut.
+cancel. Once armed, a key acts when it goes down: a key held down since before
+arming never counts, but one pressed after arming counts as a press even while
+it is held. Key repeats never count, and no key answers while Ctrl, Alt, or
+Super is held. The dialog's last line names the shortcut.
 
 Splinterm enables its Ctrl+Alt+G binding in Hyprland only while a dialog waits
 and disables it when the last one closes, however it closes, so applications

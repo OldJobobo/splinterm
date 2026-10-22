@@ -314,8 +314,12 @@ answer **Not now**, the default; only `R` or the green right area chooses
 **Restart now (ends N shells)**. The dialog appears without taking keyboard
 focus, and its keys stay inert until you click inside it or press Ctrl+Alt+G
 ([Trusted dialogs](usage.md#trusted-dialogs)); keys and the restart click count
-only about 600 ms after that, and held or repeating keys never count. Closing
-the dialog or no answer within 120 seconds means **Not now**.
+only about 600 ms after that. Once the dialog is armed, `R` acts when it goes
+down: a hold that begins before arming is ignored, but one that begins after
+arming counts as a press. Key repeats never count. Closing the dialog or no
+answer within 120 seconds means **Not now**; with no answer the launcher prints
+"splinterm: no answer within 120 seconds, so nothing was restarted." instead of
+a failure, and exits as for **Not now**.
 Before restarting, the launcher reads the daemon again and asks again if what
 the restart would end has changed. **Not now** opens nothing and changes
 nothing; the launcher exits with status 3. Without a graphical session, it

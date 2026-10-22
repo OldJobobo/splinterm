@@ -70,30 +70,24 @@ use super::{
     upgrade_dialog::run_upgrade_dialog_client,
 };
 
-/// Set once this process runs a trusted dialog child (`consent`,
-/// `upgrade-dialog`, or `restart-dialog`) and has tried to load its
-/// configuration. A failed load reports only its category; later errors
-/// print their chain, and those never quote a configuration value except a
-/// font pattern that cannot be resolved.
-static DIALOG_CHILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Whether this process is a trusted dialog child, whose standard error is
-/// a private pipe to the command that asked (`splinterd::child_stderr`).
-pub(crate) fn is_dialog_child() -> bool {
-    DIALOG_CHILD.load(std::sync::atomic::Ordering::Acquire)
-}
-
-/// Loads the configuration. From then on a dialog child reports its error
-/// chain to its asker, which logs it (`main.rs`), so a dialog child's failed
-/// load names only its category: a configuration error can quote a raw
-/// value and its path, which must not reach the asker's journal.
-fn load_configuration(dialog_child: bool) -> Result<ConfigLoad> {
+/// Loads the configuration. A failed graphical command prints its error
+/// chain (`main.rs`) to a standard error that can reach the desktop
+/// session's journal or, for a trusted dialog child, its asker's log, so a
+/// graphical command's failed load names only its category: a configuration
+/// error can quote a raw value and its path. Later errors never quote a
+/// configuration value except a font pattern that cannot be resolved.
+fn load_configuration(graphical: bool) -> Result<ConfigLoad> {
     let load = load_default();
-    if !dialog_child {
+    if !graphical {
         return load;
     }
-    DIALOG_CHILD.store(true, std::sync::atomic::Ordering::Release);
     load.map_err(|_| anyhow::anyhow!("configuration could not be loaded"))
+}
+
+/// [`load_configuration`] for a graphical command started outside [`run`],
+/// such as a Window resumed across a daemon upgrade.
+pub(in crate::app) fn load_graphical_configuration() -> Result<ConfigLoad> {
+    load_configuration(true)
 }
 
 #[allow(
@@ -280,10 +274,6 @@ pub(crate) async fn run() -> Result<()> {
     }
 
     let graphical = graphical_command(&command);
-    let dialog_child = matches!(
-        command,
-        Command::Consent | Command::UpgradeDialog | Command::RestartDialog
-    );
     if graphical {
         initialize_graphical()
             .map_err(|_| anyhow::anyhow!("graphical diagnostics initialization failed"))?
@@ -294,7 +284,7 @@ pub(crate) async fn run() -> Result<()> {
     let ConfigLoad {
         config,
         diagnostics,
-    } = load_configuration(dialog_child)?;
+    } = load_configuration(graphical)?;
     for diagnostic in diagnostics {
         if graphical {
             if let Some(client_diagnostics) = diagnostics_global() {

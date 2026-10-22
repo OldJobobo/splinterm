@@ -120,6 +120,44 @@ impl Engagement {
     }
 }
 
+/// The share of a trusted dialog's height its red and green action areas
+/// take while the text above them leaves room.
+pub(crate) const ACTION_AREA_PERCENT: u32 = 22;
+
+/// The shortest the action areas get, in cell rows, when the text needs the
+/// rest of the Window.
+pub(crate) const MINIMUM_ACTION_ROWS: u32 = 2;
+
+/// Where a trusted dialog's action areas begin, in pixels from the top of a
+/// Window `height` tall whose text ends `text_bottom` pixels from its top.
+///
+/// They take the bottom [`ACTION_AREA_PERCENT`] of the Window while the text
+/// ends above that. When a small Window (a tiled one, say) leaves the text
+/// no room, they shrink to begin where the text ends, down to
+/// `minimum_height`, so the actions never cover text that fits. Only text
+/// taller than the Window less `minimum_height` is clipped at the actions;
+/// the Window asks the compositor for a minimum size that avoids that
+/// ([`minimum_dialog_rows`]).
+pub(crate) fn action_area_top(height: u32, text_bottom: u32, minimum_height: u32) -> u32 {
+    let preferred = height.saturating_mul(100 - ACTION_AREA_PERCENT) / 100;
+    let lowest = height.saturating_sub(minimum_height);
+    text_bottom.min(lowest).max(preferred)
+}
+
+/// How many of a static dialog's `rows` hold text: up to and including the
+/// last one with a visible character.
+pub(crate) fn dialog_text_rows(rows: &[splinterm_protocol::TerminalRow]) -> usize {
+    rows.iter()
+        .rposition(|row| row.cells.iter().any(|cell| !cell.content.trim().is_empty()))
+        .map_or(0, |last| last + 1)
+}
+
+/// The fewest grid rows that show `text_rows` rows of dialog text above the
+/// shortest action areas, with one row to spare for the border.
+pub(crate) const fn minimum_dialog_rows(text_rows: usize) -> usize {
+    text_rows + MINIMUM_ACTION_ROWS as usize + 1
+}
+
 /// What the access consent dialog does with one key press or click.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConsentAction {
@@ -630,5 +668,70 @@ mod tests {
             TrustedDialogKind::default(),
             TrustedDialogKind::AccessConsent
         );
+    }
+
+    /// The action areas keep the bottom 22% while the text ends above it,
+    /// as before.
+    #[test]
+    fn roomy_dialogs_keep_their_action_areas_at_the_bottom_fifth() {
+        assert_eq!(action_area_top(1000, 500, 40), 780);
+        assert_eq!(action_area_top(1000, 780, 40), 780);
+        assert_eq!(action_area_top(375, 0, 40), 292);
+    }
+
+    /// In a small Window the action areas begin where the text ends, so they
+    /// never cover it, and keep at least their minimum height. Only text
+    /// taller than that leaves is clipped at them.
+    #[test]
+    fn action_areas_never_cover_text_that_fits_above_their_minimum() {
+        // The 2026-10-22 VM case: tiled 621×375, 18 px rows of text.
+        let row = 18;
+        let minimum = MINIMUM_ACTION_ROWS * row + 5;
+        for text_rows in 0..=24 {
+            let text_bottom = 4 + text_rows * row;
+            let top = action_area_top(375, text_bottom, minimum);
+            assert!(top >= 292, "{text_rows}: {top}");
+            if text_bottom <= 375 - minimum {
+                assert!(top >= text_bottom, "{text_rows}: {top} covers text");
+            } else {
+                assert_eq!(top, 375 - minimum, "{text_rows}: clipped at the minimum");
+            }
+        }
+        for height in 1..=600 {
+            for text_bottom in (0..=height).step_by(7) {
+                let top = action_area_top(height, text_bottom, minimum);
+                assert!(top <= height);
+                assert!(top >= height * 78 / 100);
+                assert!(
+                    top >= text_bottom || height - top <= minimum.max(height - height * 78 / 100),
+                    "{height} {text_bottom}: {top}"
+                );
+            }
+        }
+        // A Window too short for even the minimum keeps the bottom 22%.
+        assert_eq!(action_area_top(30, 30, 41), 23);
+    }
+
+    #[test]
+    fn dialog_text_ends_at_its_last_visible_character() {
+        fn row(text: &str) -> splinterm_protocol::TerminalRow {
+            splinterm_protocol::TerminalRow {
+                row_id: None,
+                linebreak: false,
+                cells: text
+                    .chars()
+                    .map(|character| splinterm_protocol::TerminalCell {
+                        content: character.to_string(),
+                        spacer_remaining: None,
+                        attributes: splinterm_protocol::CellAttributes::default(),
+                    })
+                    .collect(),
+            }
+        }
+        assert_eq!(dialog_text_rows(&[]), 0);
+        assert_eq!(dialog_text_rows(&[row(""), row("   ")]), 0);
+        let rows = [row("TITLE"), row(""), row("text"), row("  "), row("")];
+        assert_eq!(dialog_text_rows(&rows), 3);
+        assert_eq!(minimum_dialog_rows(3), 3 + 2 + 1);
     }
 }

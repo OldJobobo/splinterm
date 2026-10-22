@@ -1,7 +1,7 @@
 mod app;
 mod handoff_acquire;
 
-use splinterd::child_stderr::CLIENT_FAILURE_PREFIX;
+use splinterd::child_stderr::client_failure_line;
 use splinterm::diagnostics::{
     DiagnosticErrorCode, ExitClass, finish_global, global as graphical_diagnostics,
 };
@@ -59,7 +59,7 @@ async fn run_client(window_resume: Option<handoff_acquire::AcquiredWindowResume>
             }
             if graphical_diagnostics().is_some() {
                 finish_global(ExitClass::Unknown, Some(DiagnosticErrorCode::InternalError));
-                eprintln!("{}", graphical_failure(&error, app::is_dialog_child()));
+                eprintln!("{}", graphical_failure(&error));
             } else {
                 eprintln!("{error:#}");
             }
@@ -68,19 +68,14 @@ async fn run_client(window_resume: Option<handoff_acquire::AcquiredWindowResume>
     }
 }
 
-/// The line a failed graphical client prints. An ordinary graphical client
-/// prints only that it failed, never arbitrary error text, because its
-/// standard error can reach the desktop session's journal; the diagnostics
-/// log records its category. A trusted dialog child's standard error is a
-/// private pipe to the command that asked, which reports it bounded
-/// (`splinterd::child_stderr`), so the child adds its error chain: without
-/// it, a dialog that fails before it maps leaves no reason anywhere.
-fn graphical_failure(error: &anyhow::Error, dialog_child: bool) -> String {
-    if dialog_child {
-        format!("{CLIENT_FAILURE_PREFIX}: {error:#}")
-    } else {
-        CLIENT_FAILURE_PREFIX.to_owned()
-    }
+/// The line a failed graphical client prints: that it failed and its error
+/// chain, on one bounded printable line (`splinterd::child_stderr`), so a
+/// desktop launch that fails before a Window maps says why in the journal.
+/// A trusted dialog child's line is what its asker reports. A configuration
+/// that cannot be loaded is named only by category before this
+/// (`app::cli`), so no configuration value reaches standard error.
+fn graphical_failure(error: &anyhow::Error) -> String {
+    client_failure_line(error)
 }
 
 #[cfg(test)]
@@ -88,16 +83,16 @@ mod tests {
     use super::graphical_failure;
 
     #[test]
-    fn only_a_dialog_child_reports_its_error_chain() {
+    fn every_graphical_client_reports_its_error_chain() {
         let error = anyhow::anyhow!("terminal snapshot metadata is invalid")
             .context("show the trusted dialog");
         assert_eq!(
-            graphical_failure(&error, true),
+            graphical_failure(&error),
             "splinterm graphical client failed: show the trusted dialog: terminal snapshot metadata is invalid"
         );
         assert_eq!(
-            graphical_failure(&error, false),
-            "splinterm graphical client failed"
+            graphical_failure(&anyhow::anyhow!("no compositor")),
+            "splinterm graphical client failed: no compositor"
         );
     }
 }

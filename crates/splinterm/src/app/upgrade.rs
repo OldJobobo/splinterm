@@ -34,7 +34,10 @@ use splinterm_protocol::{
     HandoffUnresponsiveWindow, HandoffWindowIssue,
 };
 
-use super::{consent::trusted_label, upgrade_dialog::ask_in_dialog};
+use super::{
+    consent::trusted_label,
+    upgrade_dialog::{DialogAnswer, ask_in_dialog},
+};
 
 /// The safe manual path while live upgrade is unavailable, as the package
 /// scriptlets and `docs/headless.md` document it.
@@ -202,14 +205,27 @@ async fn ask(prompt: HandoffDecisionPrompt, interactive: bool) -> HandoffDecisio
     if interactive {
         return ask_in_terminal(prompt).await;
     }
+    let respond_within = prompt.respond_within;
     match ask_in_dialog(prompt).await {
-        Ok(true) => HandoffDecision::ProceedWithout,
-        Ok(false) => HandoffDecision::Cancel,
+        Ok(DialogAnswer::Answered(true)) => HandoffDecision::ProceedWithout,
+        Ok(DialogAnswer::Answered(false)) => HandoffDecision::Cancel,
+        Ok(DialogAnswer::NoAnswer) => {
+            eprintln!("{}", dialog_no_answer_line(respond_within));
+            HandoffDecision::Cancel
+        }
         Err(error) => {
             eprintln!("Could not ask about the Windows ({error:#}); cancelling.");
             HandoffDecision::Cancel
         }
     }
+}
+
+/// What the command prints when nobody answered the upgrade dialog in time.
+fn dialog_no_answer_line(respond_within: Duration) -> String {
+    format!(
+        "No answer about the Windows within {} seconds; cancelling.",
+        respond_within.as_secs()
+    )
 }
 
 fn provenance_label(provenance: HandoffBuildProvenance) -> &'static str {
@@ -1143,6 +1159,15 @@ mod tests {
             assert_eq!(decision, HandoffDecision::Cancel, "{answer:?}");
             assert!(note.is_some(), "{answer:?}");
         }
+    }
+
+    #[test]
+    fn an_unanswered_dialog_cancels_with_a_plain_line() {
+        let line = dialog_no_answer_line(Duration::from_millis(18_500));
+        assert_eq!(
+            line,
+            "No answer about the Windows within 18 seconds; cancelling."
+        );
     }
 
     #[test]

@@ -477,10 +477,11 @@ pub(in crate::app) fn dialog_capability() -> Result<Vec<u8>> {
     Ok(capability)
 }
 
-/// Asks the question in the dialog and returns whether to proceed. The
-/// answer must arrive within the prompt's `respond_within`; any failure is an
-/// error, which the caller treats as cancel.
-pub(in crate::app) async fn ask_in_dialog(prompt: HandoffDecisionPrompt) -> Result<bool> {
+/// Asks the question in the dialog and returns the answer, or
+/// [`DialogAnswer::NoAnswer`] when none arrived within the prompt's
+/// `respond_within`. Any failure is an error. The caller treats both as
+/// cancel.
+pub(in crate::app) async fn ask_in_dialog(prompt: HandoffDecisionPrompt) -> Result<DialogAnswer> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none_or(|display| display.is_empty()) {
         bail!(
             "there is no terminal to ask in and no graphical session for the dialog; run `splinterm upgrade --now` from a terminal Splinterm does not own"
@@ -495,16 +496,30 @@ pub(in crate::app) async fn ask_in_dialog(prompt: HandoffDecisionPrompt) -> Resu
     ask_dialog_child(UPGRADE_DIALOG_COMMAND, request, prompt.respond_within).await
 }
 
+/// How a trusted dialog question ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum DialogAnswer {
+    /// The person answered: `true` proceeds. Closing the dialog answers
+    /// `false`.
+    Answered(bool),
+    /// Nobody answered within the budget, and the child was killed and
+    /// reaped. Every caller treats this as "no" and says so plainly: it is
+    /// not a failure, so nothing the child printed (such as the fonts it
+    /// resolved) is reported.
+    NoAnswer,
+}
+
 /// Starts `/proc/self/exe <command>` as a trusted dialog child, sends it
 /// `request`, and returns its answer. The answer must arrive within `budget`
-/// and echo the request's capability; anything else is an error, which every
-/// caller treats as "no", and names what the child printed when it failed
-/// before answering. The child is killed and reaped unless it answered.
+/// and echo the request's capability. A reply that does not arrive in time
+/// is [`DialogAnswer::NoAnswer`]; anything else is an error, which names
+/// what the child printed when it failed before answering. Every caller
+/// treats both as "no". The child is killed and reaped unless it answered.
 pub(in crate::app) async fn ask_dialog_child<P: DialogPrompt>(
     command: &'static str,
     request: P,
     budget: Duration,
-) -> Result<bool> {
+) -> Result<DialogAnswer> {
     let mut child = Command::new("/proc/self/exe");
     child.arg(command);
     ask_dialog_process(child, request, budget).await
@@ -515,7 +530,7 @@ async fn ask_dialog_process<P: DialogPrompt>(
     mut command: Command,
     request: P,
     budget: Duration,
-) -> Result<bool> {
+) -> Result<DialogAnswer> {
     request.validate()?;
     install_dialog_signal_cleanup();
     let capability = request.capability().to_vec();
@@ -529,20 +544,30 @@ async fn ask_dialog_process<P: DialogPrompt>(
         .stderr(Stdio::piped())
         .spawn()
         .context("launch the dialog")?;
+    // `command` still holds the child's ends of the socket. Closing them
+    // here means a child that exits without answering is an end-of-file
+    // now, a failure, rather than a read that waits out the budget and
+    // looks like no answer.
+    drop(command);
     // Why a dialog that fails before answering failed (`child_stderr`).
     let stderr = StderrTail::capture(&mut process);
     let guard = DialogChild::new(process);
-    let reply = tokio::task::spawn_blocking(move || -> Result<DialogReply> {
-        parent.set_write_timeout(Some(budget))?;
-        parent.set_read_timeout(Some(budget))?;
-        write_private_frame_bounded(&mut parent, &request, MAX_UPGRADE_DIALOG_FRAME_BYTES)?;
-        read_private_frame_bounded(&mut parent, MAX_UPGRADE_DIALOG_FRAME_BYTES)
-    })
-    .await
-    .context("dialog task failed")?;
-    let reply = match reply {
-        Ok(reply) => reply,
-        Err(error) => {
+    let exchanged = tokio::task::spawn_blocking(move || exchange(&mut parent, &request, budget))
+        .await
+        .context("dialog task failed")?;
+    let reply = match exchanged {
+        Exchange::Reply(reply) => reply,
+        Exchange::NoAnswer => {
+            // Killed and reaped as for a failure, off a runtime worker, but
+            // what the child printed is neither awaited nor reported.
+            let _ = tokio::task::spawn_blocking(move || {
+                drop(stderr);
+                guard.end()
+            })
+            .await;
+            return Ok(DialogAnswer::NoAnswer);
+        }
+        Exchange::Failed(error) => {
             // Reaping and waiting for the pipe block, so not on a runtime
             // worker. A failed task has dropped the guard, which still kills
             // and reaps the child.
@@ -562,7 +587,55 @@ async fn ask_dialog_process<P: DialogPrompt>(
         bail!("dialog authentication failed");
     }
     guard.finish();
-    Ok(reply.proceed)
+    Ok(DialogAnswer::Answered(reply.proceed))
+}
+
+/// What came back on a dialog child's private socket.
+#[derive(Debug)]
+enum Exchange {
+    Reply(DialogReply),
+    /// The read timed out: nobody answered within the budget.
+    NoAnswer,
+    Failed(anyhow::Error),
+}
+
+/// Sends `request` to the child and reads its reply, each bounded by
+/// `budget`.
+fn exchange<P: Serialize>(parent: &mut UnixStream, request: &P, budget: Duration) -> Exchange {
+    if let Err(error) = send(parent, request, budget) {
+        return Exchange::Failed(error);
+    }
+    classify_reply(read_private_frame_bounded(
+        parent,
+        MAX_UPGRADE_DIALOG_FRAME_BYTES,
+    ))
+}
+
+fn send<P: Serialize>(parent: &mut UnixStream, request: &P, budget: Duration) -> Result<()> {
+    parent.set_write_timeout(Some(budget))?;
+    parent.set_read_timeout(Some(budget))?;
+    write_private_frame_bounded(parent, request, MAX_UPGRADE_DIALOG_FRAME_BYTES)
+}
+
+/// Tells a reply that did not come in time, the private socket's read
+/// timeout expiring (`EAGAIN`, or `ETIMEDOUT`), from every other failed read.
+fn classify_reply(read: Result<DialogReply>) -> Exchange {
+    match read {
+        Ok(reply) => Exchange::Reply(reply),
+        Err(error) if timed_out(&error) => Exchange::NoAnswer,
+        Err(error) => Exchange::Failed(error),
+    }
+}
+
+fn timed_out(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            )
+        })
+    })
 }
 
 #[cfg(test)]
@@ -803,6 +876,7 @@ mod tests {
             "-c",
             "echo 'splinterm graphical client failed: no compositor' >&2; exit 1",
         ]);
+        let started = Instant::now();
         let error = ask_dialog_process(
             failing,
             prompt(vec![window(5, 0, 0)]),
@@ -811,6 +885,9 @@ mod tests {
         .await
         .unwrap_err()
         .to_string();
+        // Reported when it exits, not when the budget runs out, which
+        // would be no answer.
+        assert!(started.elapsed() < Duration::from_secs(5), "{error}");
         assert!(
             error.starts_with(
                 "the dialog failed: splinterm graphical client failed: no compositor (exit status: 1; "
@@ -832,6 +909,61 @@ mod tests {
             error.starts_with("the dialog gave no answer (exit status: 3): "),
             "{error}"
         );
+    }
+
+    /// Only the private socket's read timeout is "no answer"; every other
+    /// failed read stays a failure that says why.
+    #[test]
+    fn only_a_timed_out_read_is_no_answer() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            let read = Err(anyhow::Error::from(io::Error::from(kind)));
+            assert!(matches!(classify_reply(read), Exchange::NoAnswer), "{kind}");
+            let wrapped = Err(anyhow::Error::from(io::Error::from(kind)).context("read the reply"));
+            assert!(
+                matches!(classify_reply(wrapped), Exchange::NoAnswer),
+                "{kind}"
+            );
+        }
+        for failed in [
+            anyhow::Error::from(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            anyhow::Error::from(io::Error::from(io::ErrorKind::ConnectionReset)),
+            anyhow::anyhow!("invalid private dialog frame length"),
+        ] {
+            assert!(
+                matches!(classify_reply(Err(failed)), Exchange::Failed(_)),
+                "a failure"
+            );
+        }
+        let reply = DialogReply {
+            capability: vec![1; CAPABILITY_BYTES],
+            proceed: true,
+        };
+        assert!(matches!(
+            classify_reply(Ok(reply)),
+            Exchange::Reply(DialogReply { proceed: true, .. })
+        ));
+    }
+
+    /// A dialog nobody answers within the budget ends as "no answer", not
+    /// as a failure carrying what the child printed, and is killed and
+    /// reaped without waiting out its own lifetime.
+    #[tokio::test]
+    async fn an_unanswered_dialog_is_no_answer_and_is_reaped() {
+        let mut lingering = Command::new("sh");
+        lingering.args([
+            "-c",
+            "echo 'Resolved primary regular: JetBrainsMono Nerd Font Regular' >&2; exec sleep 30",
+        ]);
+        let started = Instant::now();
+        let answer = ask_dialog_process(
+            lingering,
+            prompt(vec![window(5, 0, 0)]),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer, DialogAnswer::NoAnswer);
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

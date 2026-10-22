@@ -138,7 +138,7 @@ use crate::frontend::{
     TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi, TrustedDialogKey,
     TrustedInput, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
     WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, close_other_tabs_command,
-    lair_lifecycle_command, tab_menu_right_press,
+    dialog_text_rows, lair_lifecycle_command, minimum_dialog_rows, tab_menu_right_press,
 };
 use crate::geometry::{
     FontSize, OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -653,6 +653,9 @@ struct PreparedWindow {
     snapshot_frame: Option<SnapshotFrame>,
     initial_width: u32,
     initial_height: u32,
+    /// The smallest logical size a trusted dialog asks the compositor for
+    /// ([`trusted_dialog_minimum_size`]).
+    minimum_size: Option<(u32, u32)>,
 }
 
 /// The part of [`run`] before the compositor: input activation, snapshot
@@ -697,6 +700,15 @@ fn prepare_window(options: &mut WindowOptions) -> Result<PreparedWindow> {
             .checked_add(tab_strip_logical_height(options.theme))
             .context("initial tab strip height overflow")?;
     }
+    let minimum_size = options
+        .trusted_consent
+        .as_ref()
+        .and(options.snapshot.as_ref())
+        .zip(snapshot_frame.as_ref())
+        .map(|(snapshot, frame)| {
+            trusted_dialog_minimum_size(snapshot, frame, (initial_width, initial_height))
+        })
+        .transpose()?;
     Ok(PreparedWindow {
         render_context,
         inactive_options,
@@ -704,7 +716,28 @@ fn prepare_window(options: &mut WindowOptions) -> Result<PreparedWindow> {
         snapshot_frame,
         initial_width,
         initial_height,
+        minimum_size,
     })
+}
+
+/// The smallest logical size a trusted dialog showing `snapshot` asks the
+/// compositor for: its full width, and enough rows for its text above the
+/// shortest action areas (`frontend::trusted_dialog::action_area_top`),
+/// never more than its `initial` size. A compositor that honours it, such as
+/// Hyprland for a floating Window, keeps every line in view; in a smaller
+/// tiled Window the action areas still never cover text that fits.
+fn trusted_dialog_minimum_size(
+    snapshot: &TerminalSnapshot,
+    frame: &SnapshotFrame,
+    initial: (u32, u32),
+) -> Result<(u32, u32)> {
+    let rows = minimum_dialog_rows(dialog_text_rows(&snapshot.visible_rows));
+    let (width, height) = frame.initial_logical_size(
+        u16::try_from(snapshot.columns.max(1)).unwrap_or(u16::MAX),
+        u16::try_from(rows).unwrap_or(u16::MAX),
+        SCALE_DENOMINATOR,
+    )?;
+    Ok((width.min(initial.0), height.min(initial.1)))
 }
 
 /// Runs every check [`run`] makes on `options` that needs no compositor:
@@ -755,6 +788,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         snapshot_frame,
         initial_width,
         initial_height,
+        minimum_size,
     } = prepare_window(&mut options)?;
     let connection = Connection::connect_to_env().context("connect to Wayland compositor")?;
     let (globals, event_queue) =
@@ -815,6 +849,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let trusted_consent = options.trusted_consent;
     let session_picker = options.session_picker;
     window.set_app_id(window_app_id(trusted_consent.is_some(), &options.app_id).to_owned());
+    if minimum_size.is_some() {
+        window.set_min_size(minimum_size);
+    }
     window
         .set_buffer_scale(1)
         .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
@@ -10992,6 +11029,12 @@ impl App {
             self.scheduling.terminal_redraw_pending = terminal_priority;
             return Ok(());
         };
+        // Below the dialog's text, which must never be covered while it fits.
+        let trusted_action_top = self
+            .modal
+            .trusted_consent
+            .is_some()
+            .then(|| self.trusted_consent_action_top(width, height, window_geometry.as_ref()));
         let canvas = self
             .surface
             .pool
@@ -11258,8 +11301,8 @@ impl App {
                     self.presentation.theme.ui_accent,
                 );
             }
-            if self.modal.trusted_consent.is_some() {
-                paint_trusted_consent_chrome(canvas, width, height);
+            if let Some(button_top) = trusted_action_top {
+                paint_trusted_consent_chrome(canvas, width, height, button_top);
             }
             if full_transient_canvas_content {
                 self.surface.buffers[buffer_index].stale.mark_full();
@@ -14295,6 +14338,44 @@ mod tests {
         assert_eq!(options.app_id, crate::config::APP_ID);
         assert!(options.initial_tab_strip_visible);
         assert!(options.controller_title);
+    }
+
+    /// A trusted dialog asks for a minimum size that keeps its full width
+    /// and every text row above the shortest action areas; other Windows
+    /// ask for none.
+    #[test]
+    fn trusted_dialogs_ask_for_a_minimum_size_that_shows_their_text() {
+        let lines = (0..18).map(|line| format!("line {line}")).collect();
+        let snapshot =
+            crate::frontend::synthetic_text_snapshot(SplintId::new(), 1, "Upgrade question", lines);
+        assert_eq!((snapshot.columns, snapshot.rows), (72, 24));
+        let (decision, _receiver) = std::sync::mpsc::channel();
+        let mut dialog = WindowOptions {
+            snapshot: Some(snapshot.clone()),
+            trusted_consent: Some(TrustedConsentUi::restart(decision)),
+            initial_columns: 72,
+            initial_rows: 24,
+            ..WindowOptions::default()
+        };
+        let prepared = prepare_window(&mut dialog).unwrap();
+        let minimum = prepared.minimum_size.unwrap();
+        let frame = prepared.snapshot_frame.as_ref().unwrap();
+        assert_eq!(
+            minimum,
+            frame
+                .initial_logical_size(72, u16::try_from(minimum_dialog_rows(18)).unwrap(), 120)
+                .unwrap()
+        );
+        assert_eq!(minimum.0, prepared.initial_width);
+        assert!(minimum.1 < prepared.initial_height);
+
+        let mut plain = WindowOptions {
+            snapshot: Some(snapshot),
+            initial_columns: 72,
+            initial_rows: 24,
+            ..WindowOptions::default()
+        };
+        assert_eq!(prepare_window(&mut plain).unwrap().minimum_size, None);
     }
 
     #[test]

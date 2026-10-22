@@ -68,4 +68,7 @@ pub use topology::{
     LairPromptTarget, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
     SessionPickerTarget, WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate,
 };
-pub(crate) use trusted_dialog::{TrustedDialogKey, TrustedDialogKind};
+pub(crate) use trusted_dialog::{
+    MINIMUM_ACTION_ROWS, TrustedDialogKey, TrustedDialogKind, action_area_top, dialog_text_rows,
+    minimum_dialog_rows,
+};
