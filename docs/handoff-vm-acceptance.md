@@ -62,15 +62,18 @@ forces readiness**, and it stays available:
 - `omarchy-vm.sh package-build --vm-acceptance-live-handoff` and
   `package-install --confirm-guest-install --vm-acceptance-live-handoff`
   build and install such a package in the guest. The package description
-  reads "TEST-ONLY VM acceptance build (live handoff forced on): never ship".
+  reads "TEST-ONLY VM acceptance build: never ship".
 
-**Plain or TEST-ONLY packages.** `tools/testbed/handoff-vm-acceptance.py`, as
-checked in, still builds and installs TEST-ONLY packages for package A, package
-B, and the rollback round, and `s1-dry-run` expects the TEST-ONLY warning in the
-daemon log. To run the sequence on plain packages instead, those
-`package-build` and `package-install` invocations drop
-`--vm-acceptance-live-handoff`, and `s1-dry-run` does not expect the warning;
-every other pass condition is the same. Which packages a recorded session uses
+**Plain or TEST-ONLY packages.** `tools/testbed/handoff-vm-acceptance.py`
+builds and installs **plain** packages A and B by default, so the sequence
+proves the package users install. With
+`SPLINTERM_HANDOFF_VM_PACKAGES=test-only` it builds TEST-ONLY packages instead
+(`--vm-acceptance-live-handoff` on every `package-build` and
+`package-install`), and `s1-dry-run` then expects the TEST-ONLY warning in the
+daemon log; for plain packages it checks that `/usr/bin/splinterd` carries no
+marker. Every other pass condition is the same. The first build step records
+the kind in the private clone, and every later build or install step refuses a
+different one, so one run never mixes them. Which kind a recorded session uses
 is the operator's choice when approving it. `z2-plain-package` is mandatory
 either way.
 
@@ -116,7 +119,7 @@ pair identity differs from the running one:
 
   | Step | Change | Restore |
   |---|---|---|
-  | `p0-install-a`, `u3-package-b`, `r2-setup` | guest package replaced (TEST-ONLY builds); rollback copies saved under `$PKG/rollback/<ts>` | `z2-plain-package` (mandatory), which checks that no TEST-ONLY package or marker remains |
+  | `p0-install-a`, `u3-package-b`, `r2-setup` | guest package replaced (plain builds, or TEST-ONLY ones with `SPLINTERM_HANDOFF_VM_PACKAGES=test-only`); rollback copies saved under `$PKG/rollback/<ts>` | `z2-plain-package` (mandatory), which checks that no TEST-ONLY package or marker remains |
   | `p0-install-mcp` (optional) | `splinterm-mcp` installed | `sudo pacman -R splinterm-mcp` if `p0-package-status` showed it absent |
   | `r3-rollback` | `/usr/bin/splinterm` replaced by a byte-identical copy (`cp -p`, then rename): a new inode only, so `pacman -Qk` stays clean | the temporary `/usr/bin/.splinterm.vm-acceptance` is removed by `z1-cleanup` if a step aborted between copy and rename; `z2` reinstalls the file |
   | `x1-memfd-noexec` (optional; guest kernel 6.6 or later only) | `vm.memfd_noexec` set to 2 | the recorded value, checked by x1 and again by `z1-cleanup` (which restores it if x1 aborted). On kernels 6.3–6.5 the sysctl can only be raised, so x1 refuses to run there: only a reboot would restore it |
@@ -137,8 +140,8 @@ The step IDs are the helper's. Each step's full commands are in `plan`.
 | `p0-status` | `status` | Guest up, Hyprland running, ydotool active |
 | `p0-package-status` | `package-status` | Recorded, including whether `splinterm-mcp` is installed and the guest's `splinterd.service` state |
 | `p0-sysctl` | `exec`: record `vm.memfd_noexec`, kernel | 0 or 1 |
-| `p0-build-a` | `package-build --vm-acceptance-live-handoff` | Package A builds; for a TEST-ONLY package, validation prints the TEST-ONLY banner |
-| `p0-install-a` | `package-install --confirm-guest-install --vm-acceptance-live-handoff` | Installed, with rollback copies saved; the private install check passes |
+| `p0-build-a` | record the package kind; `package-build` (with `--vm-acceptance-live-handoff` for TEST-ONLY packages) | Package A builds; for a TEST-ONLY package, validation prints the TEST-ONLY banner |
+| `p0-install-a` | check the recorded package kind; `package-install --confirm-guest-install` (with `--vm-acceptance-live-handoff` for TEST-ONLY packages) | Installed, with rollback copies saved; the private install check passes |
 | `p0-save-a` | `exec`: copy package A's files outside the guest source checkout | Copied, for the rollback round |
 | `p0-install-mcp` (optional, for M1) | `exec`: `sudo pacman -U` package A's `splinterm-mcp` | Installed |
 
@@ -149,7 +152,7 @@ The step IDs are the helper's. Each step's full commands are in `plan`.
 | `s1-launch` | `package-launch` | W1 maps on workspace 8 |
 | `s1-record` | `desktop-exec`: record W1, the daemon, focus, cursor, monitors | Recorded |
 | `s1-smoke` | guard, type `echo smoke-ok` | Echoed; no other Window moved. On failure: `package-stop` and abort |
-| `s1-dry-run` | `exec`: `splinterm upgrade` | Generation 1, local package build, rollback copy kept, "nothing blocks it"; for TEST-ONLY packages, the daemon log has the TEST-ONLY warning |
+| `s1-dry-run` | `exec`: `splinterm upgrade` | Generation 1, local package build, rollback copy kept, "nothing blocks it"; for plain packages, `/usr/bin/splinterd` carries no TEST-ONLY marker; for TEST-ONLY packages, the daemon log has the TEST-ONLY warning |
 
 ### Phase 2: setup
 
@@ -159,7 +162,7 @@ The step IDs are the helper's. Each step's full commands are in `plan`.
 | `u2-extra-window` | `package-launch-extra launch` | W2 maps; its PID and address are recorded; focus returns to W1 |
 | `m1-prepare` (optional) | `exec`: `splinterm new mcp-probe -- cat`; `package-config splinterm/policy.json`; `SIGHUP` | A policy rule for `/usr/bin/splinterm-mcp` (its guest SHA-256) over the probe Lair is published |
 | `m1-start` (optional) | `exec`: start `tools/testbed/handoff-mcp-probe.py run` | The probe holds an MCP session with a controller handle and waits |
-| `u3-package-b` | private-clone empty commit; `package-build --vm-acceptance-live-handoff`; `package-install …` | B is installed; the same daemon process still serves generation 1 from its replaced inode, and nothing blocks |
+| `u3-package-b` | private-clone empty commit; `package-build` and `package-install …` (with `--vm-acceptance-live-handoff` for TEST-ONLY packages) | B is installed; the same daemon process still serves generation 1 from its replaced inode, and nothing blocks |
 
 ### Phase 3: adoption round (daemon A, package B installed)
 

@@ -175,7 +175,7 @@ class InstallerSafetyTest(unittest.TestCase):
                 [line for line in derived if line not in original],
                 [
                     "  cargo build --frozen --release --features splinterd/vm-acceptance-live-handoff \\",
-                    "  pkgdesc='TEST-ONLY VM acceptance build (live handoff forced on): never ship'",
+                    "  pkgdesc='TEST-ONLY VM acceptance build: never ship'",
                     "    --allow-vm-acceptance-live-handoff \\",
                 ],
             )

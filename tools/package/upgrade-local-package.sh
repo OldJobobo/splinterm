@@ -18,7 +18,7 @@ Validate and install the newest local Splinterm Arch package.
   -y, --yes    Skip the confirmation prompt
   --allow-vm-acceptance-live-handoff
                TEST-ONLY: accept a local VM acceptance package whose daemon
-               forces live handoff on (VM testbed only)
+               is a VM acceptance build (VM testbed only)
   -h, --help   Show this help
 EOF
 }

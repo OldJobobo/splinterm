@@ -206,17 +206,67 @@ class HandoffVmAcceptanceHelperTests(unittest.TestCase):
                             # before their keys count.
                             self.assertEqual(action.vm[2:], ("0xC0",))
 
-    def test_packages_are_test_only_builds_and_installs(self) -> None:
-        builds = [
-            action.vm
-            for step in HELPER_MODULE.STEPS
-            if step.id != "z2-plain-package"
-            for action in step.actions
-            if action.kind == "vm" and action.vm[:1] in (("package-build",), ("package-install",))
-        ]
-        self.assertTrue(builds)
-        for arguments in builds:
+    def test_packages_are_plain_by_default_and_test_only_on_request(self) -> None:
+        from unittest import mock
+
+        def is_package(action) -> bool:
+            return action.kind == "vm" and action.vm[:1] in (("package-build",), ("package-install",))
+
+        def package_arguments(module) -> list[tuple[str, ...]]:
+            return [
+                action.vm
+                for step in module.STEPS
+                if step.id != "z2-plain-package"
+                for action in step.actions
+                if is_package(action)
+            ]
+
+        environment = {
+            key: value for key, value in os.environ.items() if key != "SPLINTERM_HANDOFF_VM_PACKAGES"
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            plain = load("handoff_vm_acceptance_plain", HELPER)
+        with mock.patch.dict(os.environ, {"SPLINTERM_HANDOFF_VM_PACKAGES": "test-only"}):
+            test_only = load("handoff_vm_acceptance_test_only", HELPER)
+        self.assertEqual(plain.PACKAGES, "plain")
+        self.assertTrue(package_arguments(plain))
+        for arguments in package_arguments(plain):
+            self.assertNotIn("--vm-acceptance-live-handoff", arguments)
+        self.assertTrue(package_arguments(test_only))
+        for arguments in package_arguments(test_only):
             self.assertIn("--vm-acceptance-live-handoff", arguments)
+        # Every step that builds or installs A or B checks the recorded kind
+        # first, so one run never mixes plain and TEST-ONLY packages.
+        for module in (plain, test_only):
+            for step in module.STEPS:
+                if step.id == "z2-plain-package":
+                    continue
+                kinds = [action.kind for action in step.actions]
+                first_package = next(
+                    (index for index, action in enumerate(step.actions) if is_package(action)), None
+                )
+                if first_package is not None:
+                    self.assertIn("package-kind", kinds[:first_package], step.id)
+        with mock.patch.dict(os.environ, {"SPLINTERM_HANDOFF_VM_PACKAGES": "nightly"}):
+            with self.assertRaises(SystemExit):
+                load("handoff_vm_acceptance_bogus", HELPER)
+
+    def test_one_run_never_mixes_package_kinds(self) -> None:
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "vm-acceptance-packages"
+            with (
+                mock.patch.object(HELPER_MODULE, "package_kind_record", return_value=record),
+                mock.patch.object(HELPER_MODULE, "require_private_clone"),
+            ):
+                with mock.patch.object(HELPER_MODULE, "PACKAGES", "plain"):
+                    HELPER_MODULE.check_package_kind()
+                    self.assertEqual(record.read_text(encoding="utf-8").strip(), "plain")
+                    HELPER_MODULE.check_package_kind()
+                with mock.patch.object(HELPER_MODULE, "PACKAGES", "test-only"):
+                    with self.assertRaises(SystemExit):
+                        HELPER_MODULE.check_package_kind()
 
     def test_every_input_is_guarded_directly_before_and_after(self) -> None:
         def check(action, *verbs: str) -> bool:

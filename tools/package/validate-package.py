@@ -1428,7 +1428,7 @@ def main() -> int:
     print(f"Package validation passed: {package} + {mcp_package}")
     if vm_acceptance:
         print(
-            "TEST-ONLY VM acceptance package: its daemon forces live handoff on. "
+            "TEST-ONLY VM acceptance package. "
             "Install it only in the VM testbed; never publish or ship it."
         )
     return 0
