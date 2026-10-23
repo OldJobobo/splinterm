@@ -13,8 +13,13 @@ nothing by itself:
 Running needs the operator's approval of the whole sequence (AGENTS.md
 section 3), the testbed configuration (`SPLINTERM_TESTBED_CONFIG`), and a
 private clone of the candidate under ~/.cache/splinterm-builds/vm-acceptance/.
-Every package this sequence builds is a TEST-ONLY VM acceptance build
-(`--vm-acceptance-live-handoff`), which must never be published or shipped.
+
+Packages A and B are plain package builds by default: live upgrade is
+enabled, so the sequence proves the package users install. Set
+SPLINTERM_HANDOFF_VM_PACKAGES=test-only to build TEST-ONLY VM acceptance
+packages instead (`--vm-acceptance-live-handoff`, which forces window
+continuity on and must never be published or shipped). The first build step
+records the kind in the private clone, and every later step refuses another.
 """
 
 from __future__ import annotations
@@ -34,6 +39,17 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNNER = Path(os.environ.get("SPLINTERM_HANDOFF_VM_RUNNER", ROOT / "tools/testbed/omarchy-vm.sh"))
 PRIVATE_CLONES = Path.home() / ".cache/splinterm-builds/vm-acceptance"
 EVIDENCE = ".testbed-package/evidence/handoff"
+
+# Which packages A and B are: "plain" (the default, what users install) or
+# "test-only" (the VM acceptance build that forces window continuity on).
+PACKAGES = os.environ.get("SPLINTERM_HANDOFF_VM_PACKAGES", "plain")
+if PACKAGES not in ("plain", "test-only"):
+    raise SystemExit(
+        f"SPLINTERM_HANDOFF_VM_PACKAGES must be plain or test-only, not {PACKAGES!r}"
+    )
+TEST_ONLY = PACKAGES == "test-only"
+PACKAGE_FLAG: tuple[str, ...] = ("--vm-acceptance-live-handoff",) if TEST_ONLY else ()
+PACKAGE_LABEL = "a TEST-ONLY VM acceptance build" if TEST_ONLY else "a plain package build"
 
 # Every guest script starts here. `exec` and `desktop-exec` both run from the
 # testbed checkout, so the package root and the private runtime that
@@ -307,16 +323,17 @@ STEPS: tuple[Step, ...] = (
     Step(
         "p0-build-a",
         "0 preparation",
-        "Build package A: the candidate commit as a TEST-ONLY VM acceptance build",
-        "Builds and validates; validation prints the TEST-ONLY banner.",
-        (vm("package-build", "--vm-acceptance-live-handoff"),),
+        f"Build package A: the candidate commit as {PACKAGE_LABEL}",
+        "Builds and validates"
+        + ("; validation prints the TEST-ONLY banner." if TEST_ONLY else "; no TEST-ONLY banner."),
+        (Action("package-kind"), vm("package-build", *PACKAGE_FLAG)),
     ),
     Step(
         "p0-install-a",
         "0 preparation",
         "Install package A in the guest (rollback copies saved)",
         "Installed; command -v splinterm is /usr/bin/splinterm; private install check passes.",
-        (vm("package-install", "--confirm-guest-install", "--vm-acceptance-live-handoff"),),
+        (Action("package-kind"), vm("package-install", "--confirm-guest-install", *PACKAGE_FLAG)),
     ),
     Step(
         "p0-save-a",
@@ -370,8 +387,13 @@ ls -l "$pkg/package-a\""""
     Step(
         "s1-dry-run",
         "1 smoke",
-        "Dry run against package A: the feature build is live",
-        "Generation 1, local package build, rollback copy kept, nothing blocks it; the daemon log carries the TEST-ONLY warning.",
+        "Dry run against package A: live upgrade is available",
+        "Generation 1, local package build, rollback copy kept, nothing blocks it"
+        + (
+            "; the daemon log carries the TEST-ONLY warning."
+            if TEST_ONLY
+            else "; the installed daemon carries no TEST-ONLY marker."
+        ),
         (
             guest(
                 """/usr/bin/splinterm upgrade | tee "$ev/s1-dry-run.txt"
@@ -379,7 +401,12 @@ expect 'Daemon: generation 1 ' "$ev/s1-dry-run.txt"
 expect 'local package build' "$ev/s1-dry-run.txt"
 expect 'Rollback copy: kept' "$ev/s1-dry-run.txt"
 expect 'Live upgrade: nothing blocks it.' "$ev/s1-dry-run.txt"
-expect_log 'TEST-ONLY VM acceptance build' "$runtime/daemon.log\""""
+"""
+                + (
+                    """expect_log 'TEST-ONLY VM acceptance build' "$runtime/daemon.log\""""
+                    if TEST_ONLY
+                    else "! grep -aqF splinterm-vm-acceptance-live-handoff: /usr/bin/splinterd"
+                )
             ),
         ),
     ),
@@ -457,12 +484,13 @@ jq -e .handle "$ev/mcp/acquired.json\""""
     Step(
         "u3-package-b",
         "2 setup",
-        "Build and install package B (a newer TEST-ONLY build) while A's daemon serves",
+        f"Build and install package B (a newer commit, {PACKAGE_LABEL}) while A's daemon serves",
         "B is installed; the same daemon process still serves generation 1 from the replaced inode, and the dry run still finds nothing blocking.",
         (
+            Action("package-kind"),
             Action("commit-b"),
-            vm("package-build", "--vm-acceptance-live-handoff"),
-            vm("package-install", "--confirm-guest-install", "--vm-acceptance-live-handoff"),
+            vm("package-build", *PACKAGE_FLAG),
+            vm("package-install", "--confirm-guest-install", *PACKAGE_FLAG),
             guest(
                 """readlink "/proc/$(cat "$ev/daemon-pid")/exe" | tee "$ev/daemon-exe-after-b"
 expect '(deleted)' "$ev/daemon-exe-after-b\""""
@@ -594,7 +622,8 @@ jq '{acquired_before, old_handle_expired, reacquired}' "$ev/mcp/result.json\""""
             vm("package-launch-extra", "launch"),
             record_extra(),
             guest('cp "$pkg"/package-a/splinterm-*.pkg.tar.* "$pkg/source/packaging/"'),
-            vm("package-install", "--confirm-guest-install", "--vm-acceptance-live-handoff"),
+            Action("package-kind"),
+            vm("package-install", "--confirm-guest-install", *PACKAGE_FLAG),
             same_daemon(1, "kept"),
         ),
         graphical=True,
@@ -796,6 +825,8 @@ def describe(action: Action) -> str:
             "git commit --allow-empty -m 'vm acceptance: package B (local only, never pushed)'"
             f"   # in this private clone ({PRIVATE_CLONES}/...) only"
         )
+    if action.kind == "package-kind":
+        return f"check packages are {PACKAGES}   # recorded by the first build step; a different kind is refused"
     if action.kind == "checkout-candidate":
         return "git checkout --detach <candidate recorded before package B>   # private clone only"
     if action.kind == "policy":
@@ -915,6 +946,33 @@ def recorded_candidate() -> str | None:
     return candidate
 
 
+def package_kind_record() -> Path:
+    """Where the first build step records the package kind, beside the
+    candidate record."""
+    git_path = run_capture(
+        ["git", "-C", str(ROOT), "rev-parse", "--git-path", "vm-acceptance-packages"]
+    ).strip()
+    return (ROOT / git_path).resolve()
+
+
+def check_package_kind() -> None:
+    """Records PACKAGES on first use and refuses a different kind later, so
+    one run never mixes plain and TEST-ONLY packages."""
+    record = package_kind_record()
+    if not record.exists():
+        require_private_clone("the package kind is recorded")
+        record.write_text(PACKAGES + "\n", encoding="utf-8")
+        print(f"packages: {PACKAGES} (recorded)")
+        return
+    recorded = record.read_text(encoding="utf-8").strip()
+    if recorded != PACKAGES:
+        raise SystemExit(
+            f"this run builds {recorded} packages, but SPLINTERM_HANDOFF_VM_PACKAGES "
+            f"is {PACKAGES}; set it to {recorded}, or start again from a fresh private clone"
+        )
+    print(f"packages: {PACKAGES}")
+
+
 def commit_package_b() -> None:
     require_private_clone("package B is committed")
     candidate = recorded_candidate()
@@ -969,6 +1027,7 @@ def copy_evidence() -> None:
 
 SPECIAL: dict[str, Callable[[], None]] = {
     "policy": write_policy,
+    "package-kind": check_package_kind,
     "commit-b": commit_package_b,
     "checkout-candidate": checkout_candidate,
     "evidence": copy_evidence,
