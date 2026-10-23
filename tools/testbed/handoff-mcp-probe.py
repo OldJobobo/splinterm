@@ -16,7 +16,8 @@ acquires control again under the same policy.
   agent Act as one agent for the easy-agent-access VM sequence (Plan 0053
         PR 5): hold one `splinterm-mcp` session and run the numbered command
         files `cmd-1.json`, `cmd-2.json`, ... that appear in the state
-        directory, in order, writing `out-N.json` for each. Operations:
+        directory, in order, writing `out-N.json` for each. Publish each
+        command by writing a temporary file and renaming it. Operations:
         `request` (a level or scopes for a Lair; `until` is `once` or
         `answered`), `cancel`, `read` (read_terminal, to show whether access
         still holds), `acquire` and `release` (control), and `exit`.
@@ -314,6 +315,30 @@ class Agent:
         return {"op": "request", "calls": calls, **summary}
 
 
+COMMAND_SETTLE_SECONDS = 5.0
+
+
+def read_command(path: Path, settle_seconds: float) -> dict[str, Any] | None:
+    """The command object in `path`, or `None` if it never becomes one.
+
+    Publish a command by writing a temporary sibling and renaming it over
+    `cmd-N.json`. A file written in place may be seen half written, so an
+    empty or incomplete file is read again for up to `settle_seconds`
+    before it counts as bad; the session is never ended by it.
+    """
+    deadline = time.monotonic() + settle_seconds
+    while True:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            value = None
+        if isinstance(value, dict):
+            return value
+        if time.monotonic() > deadline:
+            return None
+        time.sleep(0.05)
+
+
 def run_agent(
     mcp: list[str],
     state: Path,
@@ -344,7 +369,15 @@ def run_agent(
                     raise RuntimeError(f"no {path.name} within {idle_seconds} seconds")
                 time.sleep(0.1)
                 continue
-            command = json.loads(path.read_text(encoding="utf-8"))
+            command = read_command(path, COMMAND_SETTLE_SECONDS)
+            if command is None:
+                write_json(
+                    state / f"out-{number}.json",
+                    {"op": None, "ok": False, "code": "bad_command", "detail": "not a JSON object"},
+                )
+                number += 1
+                idle_until = time.monotonic() + idle_seconds
+                continue
             if command.get("op") == "exit":
                 write_json(state / f"out-{number}.json", {"op": "exit", "ok": True})
                 return 0

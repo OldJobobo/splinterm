@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -491,3 +492,43 @@ class AccessAgentTests(unittest.TestCase):
                 PROBE_MODULE.run_agent(
                     [sys.executable, str(fake), str(root)], root / "state", "agent", 0.2, 0.01
                 )
+
+    def test_agent_waits_out_a_half_written_command_and_survives_a_bad_one(self) -> None:
+        import threading
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "fake-mcp.py"
+            fake.write_text(FAKE_ACCESS_MCP, encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            (state / "cmd-1.json").write_text("[1, 2]", encoding="utf-8")
+
+            def publish_late() -> None:
+                # Written in place while the agent already polls: first a
+                # truncated object, completed a moment later.
+                time.sleep(0.3)
+                path = state / "cmd-2.json"
+                path.write_text('{"op": "request", "lair_id": "lair-b", "le', encoding="utf-8")
+                time.sleep(0.3)
+                path.write_text(
+                    json.dumps({"op": "request", "lair_id": "lair-b", "level": "look", "until": "once"}),
+                    encoding="utf-8",
+                )
+                (state / "cmd-3.json").write_text('{"op": "exit"}', encoding="utf-8")
+
+            writer = threading.Thread(target=publish_late)
+            writer.start()
+            with mock.patch.object(PROBE_MODULE, "COMMAND_SETTLE_SECONDS", 1.0):
+                status = PROBE_MODULE.run_agent(
+                    [sys.executable, str(fake), str(root)], state, "agent", 5, 0.01
+                )
+            writer.join()
+            self.assertEqual(status, 0)
+            first = json.loads((state / "out-1.json").read_text(encoding="utf-8"))
+            self.assertEqual(first["code"], "bad_command")
+            second = json.loads((state / "out-2.json").read_text(encoding="utf-8"))
+            self.assertEqual(second["status"], "pending")
+            third = json.loads((state / "out-3.json").read_text(encoding="utf-8"))
+            self.assertEqual(third, {"op": "exit", "ok": True})
