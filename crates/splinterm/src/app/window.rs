@@ -571,6 +571,47 @@ pub(super) async fn run_owned_live_multipane_window_with_app_id(
     .await
 }
 
+/// What a Window prints when its own command ended before it opened.
+const COMMAND_ENDED_LINE: &str = "splinterm: the command ended before its Window opened.";
+
+/// Whether `connection`'s daemon still lists the Dojo `dojo_id`.
+async fn dojo_listed(connection: &mut Connection, dojo_id: splinterm_core::DojoId) -> Result<bool> {
+    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+        bail!("splinterd did not return its Lairs");
+    };
+    Ok(lairs
+        .iter()
+        .any(|lair| lair.dojos.iter().any(|dojo| dojo.id == dojo_id)))
+}
+
+/// What a Window does when its first Dojo is gone before it reads the
+/// topology. `owner_still_lists` is what the connection that created a Dojo
+/// this client owns (a launched command, such as
+/// `splinterm-xdg-terminal-exec -- true`) reports, or `None` for any other
+/// Dojo.
+///
+/// Only that still-open connection proves it is the same daemon. If it no
+/// longer lists the Dojo, the Dojo ended with its command, which simply
+/// finished: say so and exit 0, as it would a moment later with the Window
+/// open. A closed connection means the daemon went away, and a Dojo it still
+/// lists means the lookup reached a different daemon; both fail, as does
+/// any other first Dojo vanishing.
+fn first_dojo_gone(owner_still_lists: Option<Result<bool>>) -> Result<()> {
+    match owner_still_lists {
+        Some(Ok(false)) => {
+            eprintln!("{COMMAND_ENDED_LINE}");
+            Ok(())
+        }
+        Some(Ok(true)) => bail!(
+            "a different splinterd answered than the one that created this terminal, so its Window did not open"
+        ),
+        Some(Err(error)) => Err(error.context(
+            "splinterd closed the connection that created this terminal before its Window opened",
+        )),
+        None => bail!("the terminal ended before its Window opened"),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "multi-pane startup keeps renderer, topology, theme, and input authorities in one lifecycle"
@@ -591,8 +632,17 @@ async fn run_live_multipane_window_inner(
         tabs: resume.tabs,
         active: resume.active,
     });
-    let (initial_identity, remote_display_identity) =
-        initial_window_dojo_identity(&factory, dojo_model.id).await?;
+    let Some((initial_identity, remote_display_identity)) =
+        initial_window_dojo_identity(&factory, dojo_model.id).await?
+    else {
+        // The lookup used a new connection, which could have reached a
+        // restarted daemon, so ask the connection that created the Dojo.
+        let owner_still_lists = match initial_transient_owner {
+            Some(mut owner) => Some(dojo_listed(&mut owner, dojo_model.id).await),
+            None => None,
+        };
+        return first_dojo_gone(owner_still_lists);
+    };
     let startup_theme = load_startup_theme_for_watch(&config);
     let theme = startup_theme.theme;
     renderer::configure(RendererOptions {
@@ -1211,7 +1261,33 @@ pub(super) async fn run_live_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{AbortOnDropTask, resolved_window_app_id};
+    use super::{AbortOnDropTask, COMMAND_ENDED_LINE, first_dojo_gone, resolved_window_app_id};
+
+    #[test]
+    fn a_first_dojo_gone_is_a_finished_command_only_when_its_own_daemon_says_so() {
+        // The creating connection's daemon no longer lists it: finished.
+        first_dojo_gone(Some(Ok(false))).expect("an owned command that ended has finished");
+        assert!(COMMAND_ENDED_LINE.contains("ended before its Window opened"));
+        // The creating daemon still lists it: the lookup reached another
+        // (restarted) daemon.
+        let error = first_dojo_gone(Some(Ok(true))).expect_err("a replacement daemon fails");
+        assert!(error.to_string().contains("different splinterd"), "{error}");
+        // The creating connection is gone: the daemon went away.
+        let error = first_dojo_gone(Some(Err(anyhow::anyhow!("connection closed"))))
+            .expect_err("a lost daemon fails");
+        assert!(
+            error
+                .to_string()
+                .contains("closed the connection that created"),
+            "{error}"
+        );
+        // Not owned by this client.
+        let error = first_dojo_gone(None).expect_err("another Dojo vanishing fails");
+        assert_eq!(
+            error.to_string(),
+            "the terminal ended before its Window opened"
+        );
+    }
 
     #[test]
     fn xdg_window_identity_defaults_and_preserves_exact_override() {
