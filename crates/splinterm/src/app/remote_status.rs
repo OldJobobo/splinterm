@@ -470,6 +470,7 @@ fn status_window_options(
         cursor_style: config.cursor_style,
         cursor_blink: false,
         theme,
+        ui_font_size: config.ui_font_size,
         keymap: config.keymap.clone(),
         prefix_timeout_ms: config.prefix_timeout_ms,
         // The status Window may hold a password field: no IME composition.

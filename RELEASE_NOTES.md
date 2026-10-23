@@ -82,6 +82,9 @@ running daemon by themselves.
 - On Omarchy 4 with no font size in `config.ini`, the terminal follows
   Omarchy's text size (9 pt on a stock desktop) instead of Splinterm's 14 px.
   Set a size in `config.ini` to keep your own.
+- Window chrome text no longer follows the terminal font size or zoom
+  (`Ctrl++`/`Ctrl+-`): it uses Omarchy's text size, or 14 px without Omarchy.
+  Set `main.ui-font-pixelsize` to choose it.
 - `Ctrl+Shift+1`–`9` are now tab shortcuts: on US layouts with tabs,
   `Ctrl+Shift+2` and `Ctrl+Shift+6` no longer send `Ctrl+@` and `Ctrl+^`
   (`Ctrl+2` and `Ctrl+6` still do).
@@ -393,6 +396,12 @@ a hostile program running as your account.
   Window read them when they open.
 - The tab strip is now as tall as Omarchy's top bar (26 px by default) and
   scales with the text size.
+- Window chrome (tabs, the Explorer, menus, the command palette, pickers, the
+  Agent access list, and Dojo prompts) has its own text size, taken from
+  Omarchy's text size (12 px on a stock desktop) even when `config.ini` sets
+  the terminal's font size. `main.ui-font-pixelsize` overrides it; without
+  either, chrome uses 14 px. Chrome text still stops growing where it would
+  overflow its row.
 - Without Omarchy's `terminal` tag, Omarchy's `Super+C` sends an interrupt. The
   install messages and a one-time desktop notification now recommend
   `splinterm integration omarchy enable`; set

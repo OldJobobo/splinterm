@@ -123,6 +123,7 @@ use crate::background_effect::{
 };
 use crate::config::{
     CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme, omarchy_terminal_point_size,
+    resolve_ui_font_size,
 };
 use crate::diagnostics::{
     DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, global as diagnostics,
@@ -191,7 +192,10 @@ mod tabs;
 mod terminal_state;
 #[cfg(test)]
 use chrome::divider_junction;
-use chrome::{paint_pane_chrome, paint_trusted_consent_chrome, sanitize_frame_title};
+use chrome::{
+    frame_title_maximum_cells, paint_pane_chrome, paint_trusted_consent_chrome,
+    sanitize_frame_title,
+};
 pub use clipboard::encode_bracketed_paste;
 use clipboard::{
     ACTIVE_CLIPBOARD_WORKERS, CLIPBOARD_IO_TIMEOUT, ClipboardRead, OwnedFieldTarget, PasteTarget,
@@ -663,7 +667,8 @@ struct PreparedWindow {
 fn prepare_window(options: &mut WindowOptions) -> Result<PreparedWindow> {
     let managed_tabs = options.initial_dojo.is_some();
     let render_context = RenderContext::new(options.theme.background_alpha)
-        .with_font_size_override(followed_font_size(options.theme));
+        .with_font_size_override(followed_font_size(options.theme))
+        .with_chrome_font_size(chrome_font_size(options.ui_font_size, options.theme));
     let inactive_options = options.activate_multi_pane_input()?;
     if let Some(snapshot) = options.snapshot.as_mut() {
         snapshot
@@ -931,6 +936,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pending_font_update: None,
             applied_text_size_px: options.theme.shell.text_size_px,
             rejected_text_size: None,
+            ui_font_size: options.ui_font_size,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
             title: TitleSettings {
@@ -941,6 +947,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pane_divider_style: options.pane_divider_style,
             frame_title_mode: options.frame_title_mode,
             frame_titles: HashMap::new(),
+            frame_title_cell: None,
             evidence_close_shortcuts: options.evidence_close_shortcuts,
             font_zoom_steps: 0,
             zoomed_splint: None,
@@ -2004,6 +2011,27 @@ struct CachedFrameTitle {
     text: ChromeText,
 }
 
+/// `((scale_120, terminal cell height, renderer generation), (chrome cell
+/// width, chrome cell height))` for frame titles.
+type FrameTitleCell = ((u32, u32, u64), (u32, u32));
+
+/// A frame title at the chrome size, never taller than the terminal cell of
+/// the top border row it is drawn in.
+fn load_frame_title(
+    source: &ChromeSource,
+    scale_120: u32,
+    context: &RenderContext,
+    terminal_cell_height: u32,
+) -> Result<ChromeText> {
+    ChromeText::load_source_styled_within(
+        source,
+        scale_120,
+        ChromeTextStyle::Regular,
+        context,
+        terminal_cell_height,
+    )
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent Wayland lifecycle and evidence-mode flags are not one state machine"
@@ -2072,6 +2100,10 @@ struct PresentationState {
     applied_text_size_px: Option<u16>,
     /// A followed size the render context rejected, with the zoom steps then.
     rejected_text_size: Option<(Option<u16>, i16)>,
+    /// `[main] ui-font-pixelsize`, which configuration reload replaces. With
+    /// the theme's Omarchy text size it decides the chrome text size
+    /// ([`chrome_font_size`]).
+    ui_font_size: Option<FontSize>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title: TitleSettings,
@@ -2079,6 +2111,9 @@ struct PresentationState {
     pane_divider_style: PaneDividerStyle,
     frame_title_mode: FrameTitleMode,
     frame_titles: HashMap<SplintId, CachedFrameTitle>,
+    /// The chrome cell (width, height) frame titles are drawn with, keyed by
+    /// scale, terminal cell height and renderer generation.
+    frame_title_cell: Option<FrameTitleCell>,
     evidence_close_shortcuts: bool,
     font_zoom_steps: i16,
     zoomed_splint: Option<SplintId>,
@@ -3078,12 +3113,20 @@ enum BackgroundEffectCommitMode {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent effects of one theme update, each OR-ed into the frame's own flags"
+)]
 struct ThemeUpdateImpact {
     rebuild_pixels: bool,
     reconcile_effect: bool,
     /// The tab strip height changed, so the content area and the panes'
     /// grids move with it.
     relayout_tab_strip: bool,
+    /// The chrome text size changed (the Omarchy text size moved while
+    /// `[main] ui-font-pixelsize` is unset): chrome is drawn again at its
+    /// new size, and terminal frames stay as they are.
+    redraw_chrome: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3183,6 +3226,13 @@ fn followed_font_size(theme: ResolvedTheme) -> Option<FontSize> {
         .map(|px| FontSize::Points(omarchy_terminal_point_size(px)))
 }
 
+/// The chrome text size: `[main] ui-font-pixelsize`, otherwise the theme's
+/// Omarchy text size, otherwise 14 px. Neither the terminal font size nor
+/// runtime zoom takes part.
+fn chrome_font_size(ui_font_size: Option<FontSize>, theme: ResolvedTheme) -> FontSize {
+    resolve_ui_font_size(ui_font_size, theme.shell.ui_text_size_px)
+}
+
 /// Whether the followed text size still needs applying: the shell value is
 /// parseable (`held` is false), it differs from the size last applied, and it
 /// was not already rejected at the current zoom.
@@ -3203,9 +3253,12 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
     let mut next_pixels = next;
     current_pixels.background_blur = false;
     next_pixels.background_blur = false;
-    // A text size change is reconciled through the font path instead.
+    // A text size change is reconciled through the font path instead, and a
+    // chrome text size change by dropping cached chrome text.
     current_pixels.shell.text_size_px = None;
     next_pixels.shell.text_size_px = None;
+    current_pixels.shell.ui_text_size_px = None;
+    next_pixels.shell.ui_text_size_px = None;
     current_pixels.shell.text_size_held = false;
     next_pixels.shell.text_size_held = false;
     // A strip height change moves the content area, as hiding or showing the
@@ -3216,6 +3269,8 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
         rebuild_pixels: current_pixels != next_pixels,
         reconcile_effect,
         relayout_tab_strip: tab_strip_logical_height(current) != tab_strip_logical_height(next),
+        // Decided by the Window, which also knows `[main] ui-font-pixelsize`.
+        redraw_chrome: false,
     }
 }
 
@@ -4024,10 +4079,15 @@ impl App {
         }))
     }
 
+    /// Prepares each framed pane's title for a top border row of the
+    /// terminal's `cell_width` × `cell_height` cells. Titles are chrome text
+    /// at the chrome size, but never taller than the terminal cell they sit
+    /// in, and are cut to the chrome cells that fit beside the corners.
     fn prepare_frame_titles(
         &mut self,
         pane_layout: Option<&PaneLayout>,
         cell_width: u32,
+        cell_height: u32,
     ) -> Result<()> {
         if self.presentation.pane_divider_style != PaneDividerStyle::Frame
             || self.presentation.frame_title_mode != FrameTitleMode::Splint
@@ -4039,11 +4099,36 @@ impl App {
             self.presentation.frame_titles.clear();
             return Ok(());
         };
+        let scale_120 = self.surface.scale_120;
+        let cell_key = (
+            scale_120,
+            cell_height,
+            self.presentation.renderer_generation,
+        );
+        // One chrome cell at the current chrome size and border row, measured
+        // once per change. Titles cached at another cell size, such as a
+        // hidden tab's from before a zoom, are loaded again.
+        let chrome_cell = match self.presentation.frame_title_cell {
+            Some((key, cell)) if key == cell_key => cell,
+            _ => {
+                let reference = load_frame_title(
+                    &ChromeSource::from("_"),
+                    scale_120,
+                    &self.presentation.render_context,
+                    cell_height,
+                )?;
+                let cell = (reference.pixel_width(), reference.pixel_height());
+                self.presentation.frame_title_cell = Some((cell_key, cell));
+                cell
+            }
+        };
+        let chrome_cell_width = chrome_cell.0;
         let mut requested = Vec::new();
         for pane in &pane_layout.panes {
-            let allocation = Self::buffer_rect(pane.allocation, self.surface.scale_120)?;
-            let columns = allocation.width / cell_width.max(1);
-            let Some(maximum_cells) = columns.checked_sub(6).filter(|cells| *cells > 0) else {
+            let allocation = Self::buffer_rect(pane.allocation, scale_120)?;
+            let Some(maximum_cells) =
+                frame_title_maximum_cells(allocation.width, cell_width, chrome_cell_width)
+            else {
                 continue;
             };
             let Some(splint) = topology.find_splint(pane.splint_id) else {
@@ -4070,20 +4155,24 @@ impl App {
                 .is_some_and(|cached| {
                     cached.source == source
                         && cached.maximum_cells == maximum_cells
-                        && cached.scale_120 == self.surface.scale_120
+                        && cached.scale_120 == scale_120
+                        && cached.text.pixel_height() == chrome_cell.1
+                        && cached.text.pixel_width()
+                            == cached.text.cells().saturating_mul(chrome_cell_width)
                 });
             if !current {
                 self.presentation.frame_titles.insert(
                     splint_id,
                     CachedFrameTitle {
-                        text: ChromeText::load_with_context(
-                            source.text(),
-                            self.surface.scale_120,
+                        text: load_frame_title(
+                            &source,
+                            scale_120,
                             &self.presentation.render_context,
+                            cell_height,
                         )?,
                         source,
                         maximum_cells,
-                        scale_120: self.surface.scale_120,
+                        scale_120,
                         bold: false,
                     },
                 );
@@ -5693,6 +5782,8 @@ impl App {
                 if self.set_agent_status_presentation(loaded.config.explorer_agent_status) {
                     self.presentation.full_redraw = true;
                 }
+                self.presentation.ui_font_size = loaded.config.ui_font_size;
+                self.reconcile_chrome_font_size();
                 for _ in loaded.diagnostics {
                     eprintln!("splinterm configuration warning");
                 }
@@ -6969,6 +7060,50 @@ impl App {
         self.install_render_context(candidate_context)
     }
 
+    /// Applies the chrome text size the configured `[main] ui-font-pixelsize`
+    /// and the theme's Omarchy text size resolve to. Chrome text never
+    /// shares the terminal's size, so only cached chrome text is dropped:
+    /// terminal frames, cell metrics and the PTY size stay as they are.
+    /// Returns whether the size changed.
+    fn reconcile_chrome_font_size(&mut self) -> bool {
+        let size = chrome_font_size(self.presentation.ui_font_size, self.presentation.theme);
+        let changed = self
+            .presentation
+            .render_context
+            .replace_chrome_font_size(size);
+        if changed {
+            self.invalidate_chrome_text();
+        }
+        changed
+    }
+
+    /// Drops every cached chrome text and the layouts measured from it, so
+    /// the next draw shapes chrome again at the render context's sizes.
+    fn invalidate_chrome_text(&mut self) {
+        self.presentation.renderer_generation =
+            self.presentation.renderer_generation.saturating_add(1);
+        self.presentation.frame_titles.clear();
+        for tab in self.tab_state.tabs.iter_mut() {
+            if let Some(view) = tab.value.as_mut() {
+                view.frame_titles.clear();
+            }
+        }
+        self.modal.session_picker_text_cache.clear();
+        self.presentation.explorer_text_cache.clear();
+        self.presentation.search_text_cache.clear();
+        self.modal.command_palette_text_cache.clear();
+        self.modal.dojo_prompt_text_cache.clear();
+        self.modal.tab_context_menu_text_cache.clear();
+        self.handoff.text_cache.clear();
+        self.invalidate_tab_strip_text();
+        self.modal.session_picker_layout = None;
+        self.presentation.explorer_layout = None;
+        self.modal.command_palette_layout = None;
+        self.modal.dojo_prompt_layout = None;
+        self.modal.tab_context_menu_layout = None;
+        self.presentation.full_redraw = true;
+    }
+
     /// Rebuilds every pane frame and text cache for a staged render context,
     /// then installs it and lets the pane controller resize the PTY.
     fn install_render_context(&mut self, candidate_context: RenderContext) -> Result<bool> {
@@ -7040,25 +7175,7 @@ impl App {
             view.dirty_inactive_panes.clear();
         }
         clear_snapshot_caches();
-        self.presentation.renderer_generation =
-            self.presentation.renderer_generation.saturating_add(1);
-        self.presentation.frame_titles.clear();
-        self.modal.session_picker_text_cache.clear();
-        self.presentation.explorer_text_cache.clear();
-        self.presentation.search_text_cache.clear();
-        self.modal.command_palette_text_cache.clear();
-        self.modal.dojo_prompt_text_cache.clear();
-        self.modal.tab_context_menu_text_cache.clear();
-        self.tab_state.tab_label_cache.clear();
-        self.tab_state.tab_close_text = None;
-        self.tab_state.remote_host_text = None;
-        self.tab_state.remote_host_clipped = None;
-        self.tab_state.tab_new_text = None;
-        self.modal.session_picker_layout = None;
-        self.presentation.explorer_layout = None;
-        self.modal.command_palette_layout = None;
-        self.modal.dojo_prompt_layout = None;
-        self.modal.tab_context_menu_layout = None;
+        self.invalidate_chrome_text();
         self.surface.buffers.clear();
         self.surface.backing.clear();
         self.presentation.full_redraw = true;
@@ -9579,11 +9696,14 @@ impl App {
         self.surface
             .background_effect_state
             .set_background_alpha(theme.background_alpha);
-        let impact = classify_theme_update(self.presentation.theme, theme);
+        let mut impact = classify_theme_update(self.presentation.theme, theme);
         self.presentation
             .render_context
             .set_background_alpha(theme.background_alpha);
         self.presentation.theme = theme;
+        // A changed Omarchy text size redraws chrome at its new size; the
+        // terminal follows it, when it does, through the font path.
+        impact.redraw_chrome = self.reconcile_chrome_font_size();
         if impact.relayout_tab_strip {
             self.relayout_tab_strip();
         }
@@ -9801,7 +9921,7 @@ impl App {
                 rebuild_all_inactive |= impact.rebuild_pixels;
                 effect_desired_changed |= impact.reconcile_effect;
                 strip_relayout |= impact.relayout_tab_strip;
-                visual_changed |= impact.relayout_tab_strip;
+                visual_changed |= impact.relayout_tab_strip | impact.redraw_chrome;
             }
         }
         for update in pending {
@@ -10174,7 +10294,7 @@ impl App {
                         rebuild_all_inactive |= impact.rebuild_pixels;
                         effect_desired_changed |= impact.reconcile_effect;
                         strip_relayout |= impact.relayout_tab_strip;
-                        visual_changed |= impact.relayout_tab_strip;
+                        visual_changed |= impact.relayout_tab_strip | impact.redraw_chrome;
                     }
                 }
                 WindowUpdate::Font(update) => {
@@ -10819,13 +10939,13 @@ impl App {
             .explorer_layout
             .clone_from(&explorer_layout);
         let pane_layout = self.computed_pane_layout()?;
-        let pane_cell_width = self
+        let (pane_cell_width, pane_cell_height) = self
             .panes
             .pane
             .snapshot_frame
             .as_ref()
-            .map_or(1, SnapshotFrame::cell_width);
-        self.prepare_frame_titles(pane_layout.as_ref(), pane_cell_width)?;
+            .map_or((1, 1), |frame| (frame.cell_width(), frame.cell_height()));
+        self.prepare_frame_titles(pane_layout.as_ref(), pane_cell_width, pane_cell_height)?;
         let active_splint = self.panes.focused_splint();
         let active_rect = active_splint.and_then(|splint_id| {
             pane_layout
@@ -12376,6 +12496,7 @@ mod tests {
                 rebuild_pixels: false,
                 reconcile_effect: false,
                 relayout_tab_strip: true,
+                redraw_chrome: false,
             }
         );
         // A palette change alongside it still rebuilds pixels.
@@ -12664,6 +12785,7 @@ mod tests {
                 rebuild_pixels: false,
                 reconcile_effect: true,
                 relayout_tab_strip: false,
+                redraw_chrome: false,
             }
         );
         let mut schedule = BackgroundEffectReconcileSchedule::default();
@@ -12678,6 +12800,7 @@ mod tests {
                 rebuild_pixels: true,
                 reconcile_effect: true,
                 relayout_tab_strip: false,
+                redraw_chrome: false,
             }
         );
 
@@ -12689,6 +12812,7 @@ mod tests {
                 rebuild_pixels: true,
                 reconcile_effect: false,
                 relayout_tab_strip: false,
+                redraw_chrome: false,
             }
         );
         assert_eq!(
@@ -12710,6 +12834,7 @@ mod tests {
                     rebuild_pixels: true,
                     reconcile_effect: false,
                     relayout_tab_strip: false,
+                    redraw_chrome: false,
                 }
             );
         }
@@ -12827,6 +12952,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Chrome text takes `[main] ui-font-pixelsize`, otherwise Omarchy's
+    /// text size, otherwise 14 px, whatever the terminal follows; a chrome
+    /// size change alone never rebuilds pane pixels.
+    #[test]
+    fn chrome_font_size_follows_the_ui_key_then_omarchy_never_the_terminal() {
+        let current = ResolvedTheme::default();
+        assert_eq!(chrome_font_size(None, current), FontSize::Pixels(14.0));
+        let mut omarchy = current;
+        omarchy.shell.ui_text_size_px = Some(16);
+        // An explicit terminal font size clears only the terminal's size.
+        omarchy.shell.text_size_px = None;
+        assert_eq!(chrome_font_size(None, omarchy), FontSize::Pixels(16.0));
+        assert_eq!(followed_font_size(omarchy), None);
+        let key = Some(FontSize::Pixels(11.0));
+        assert_eq!(chrome_font_size(key, omarchy), FontSize::Pixels(11.0));
+        assert_eq!(chrome_font_size(key, current), FontSize::Pixels(11.0));
+        assert_eq!(
+            classify_theme_update(current, omarchy),
+            ThemeUpdateImpact::default()
+        );
+        // The context the Window starts with draws chrome at that size, and
+        // a live change replaces only the chrome size.
+        let mut context = RenderContext::new(u16::MAX)
+            .with_font_size_override(followed_font_size(omarchy))
+            .with_chrome_font_size(chrome_font_size(None, omarchy));
+        let terminal = context.effective_font_resolution(120).unwrap();
+        omarchy.shell.ui_text_size_px = Some(18);
+        assert!(context.replace_chrome_font_size(chrome_font_size(None, omarchy)));
+        assert!(!context.replace_chrome_font_size(chrome_font_size(None, omarchy)));
+        assert_eq!(context.effective_font_resolution(120).unwrap(), terminal);
     }
 
     #[test]
@@ -14234,6 +14391,170 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(region(&actual), region(&expected));
+    }
+
+    /// Review of #212: frame titles are chrome text inside a border row laid
+    /// out in terminal cells. When the chrome cell is larger than the
+    /// terminal's (zoomed out, or a UI size above the terminal size), a title
+    /// must still fit its row whole and stop clear of the top-right corner.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one case table drives layout, unclipped paint and pane chrome checks"
+    )]
+    fn frame_titles_fit_their_border_row_at_every_chrome_and_terminal_size() {
+        use super::chrome::frame_title_placement;
+
+        let nine_point =
+            || RenderContext::new(u16::MAX).with_font_size_override(Some(FontSize::Points(9.0)));
+        let cases = [
+            // Stock Omarchy, one zoom-out step: 11.3 px terminal, 12 px chrome.
+            (
+                "zoomed out",
+                nine_point().with_chrome_font_size(FontSize::Pixels(12.0)),
+                -1,
+            ),
+            // The default context zoomed out ten steps, chrome far larger.
+            (
+                "zoom -10",
+                RenderContext::new(u16::MAX).at_maximum_chrome_font_size(),
+                -10,
+            ),
+            // An explicit small terminal under a larger UI size.
+            (
+                "ui above terminal",
+                nine_point().with_chrome_font_size(FontSize::Pixels(20.0)),
+                -6,
+            ),
+            // Chrome smaller than the terminal, as before.
+            ("ui below terminal", RenderContext::new(u16::MAX), 0),
+        ];
+        for (case, context, steps) in cases {
+            for scale in [120, 240] {
+                let (cell, _) = context.zoomed_cell_geometry(steps, scale).unwrap().unwrap();
+                let (cell_width, cell_height) = (cell.width, cell.height);
+                let splint = Splint::shell(PathBuf::from("/tmp"));
+                let splint_id = splint.id;
+                let layout = PaneLayout::compute_with_chrome(
+                    &LayoutNode::Leaf(splint),
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 320,
+                        height: 120,
+                    },
+                    PaneChrome::Frame {
+                        vertical_width: 8,
+                        horizontal_height: 16,
+                    },
+                    2,
+                    2,
+                )
+                .unwrap();
+                let allocation = App::buffer_rect(layout.panes[0].allocation, scale).unwrap();
+                let chrome_cell =
+                    load_frame_title(&ChromeSource::from("_"), scale, &context, cell_height)
+                        .unwrap()
+                        .pixel_width();
+                let maximum_cells =
+                    frame_title_maximum_cells(allocation.width, cell_width, chrome_cell).unwrap();
+                let source = ChromeSource::from(sanitize_frame_title(
+                    "a long Splint title that keeps going well past the pane's frame",
+                    maximum_cells,
+                ));
+                let text = load_frame_title(&source, scale, &context, cell_height).unwrap();
+                let label = format!("{case} at {scale}");
+                assert!(text.pixel_height() <= cell_height, "{label}");
+                assert!(text.cells() <= maximum_cells, "{label}");
+                let (clear, origin) =
+                    frame_title_placement(allocation, cell_width, cell_height, &text);
+                // The cleared title area stays in the border row and clear of
+                // both top corners, with a terminal cell of padding.
+                assert_eq!(clear.y, allocation.y, "{label}");
+                assert!(clear.height <= cell_height, "{label}");
+                assert!(
+                    clear.x + clear.width <= allocation.x + allocation.width - 2 * cell_width,
+                    "{label}"
+                );
+                assert!(origin.1 + text.pixel_height() <= allocation.y + cell_height);
+
+                // Painted whole: clipping to the cleared area changes nothing.
+                let (width, height) = (allocation.width + 8, allocation.height + 8);
+                let canvas = || vec![0_u8; usize::try_from(width * height * 4).unwrap()];
+                let everything = Rect {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                };
+                let (mut clipped, mut unclipped) = (canvas(), canvas());
+                text.paint(&mut clipped, width, height, origin, clear, 0x00ff_ffff);
+                text.paint(
+                    &mut unclipped,
+                    width,
+                    height,
+                    origin,
+                    everything,
+                    0x00ff_ffff,
+                );
+                assert_eq!(clipped, unclipped, "{label}: the title was cut");
+                assert!(clipped.iter().any(|byte| *byte != 0), "{label}");
+
+                // The pane chrome draws it there and nowhere else.
+                let theme = ResolvedTheme::default();
+                let mut titles = HashMap::new();
+                titles.insert(
+                    splint_id,
+                    CachedFrameTitle {
+                        source,
+                        maximum_cells,
+                        scale_120: scale,
+                        bold: false,
+                        text,
+                    },
+                );
+                let (mut bare, mut with_title) = (canvas(), canvas());
+                for (target, titles) in [(&mut bare, &HashMap::new()), (&mut with_title, &titles)] {
+                    paint_pane_chrome(
+                        target,
+                        width,
+                        height,
+                        &layout,
+                        Some(splint_id),
+                        theme,
+                        cell_width,
+                        cell_height,
+                        scale,
+                        titles,
+                    )
+                    .unwrap();
+                }
+                for y in 0..height {
+                    for x in 0..width {
+                        let index = usize::try_from((y * width + x) * 4).unwrap();
+                        if bare[index..index + 4] != with_title[index..index + 4] {
+                            assert!(
+                                (clear.x..clear.x + clear.width).contains(&x)
+                                    && (clear.y..clear.y + clear.height).contains(&y),
+                                "{label}: title paint at ({x}, {y}) outside {clear:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frame_title_cells_are_chrome_cells_beside_terminal_corners() {
+        // Three terminal cells on each side; the rest in chrome cells.
+        assert_eq!(frame_title_maximum_cells(200, 10, 10), Some(14));
+        assert_eq!(frame_title_maximum_cells(200, 10, 14), Some(10));
+        assert_eq!(frame_title_maximum_cells(200, 10, 7), Some(20));
+        assert_eq!(frame_title_maximum_cells(60, 10, 10), None);
+        assert_eq!(frame_title_maximum_cells(65, 10, 10), None);
+        assert_eq!(frame_title_maximum_cells(70, 10, 10), Some(1));
+        assert_eq!(frame_title_maximum_cells(70, 10, 0), Some(10));
     }
 
     #[test]

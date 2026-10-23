@@ -2193,6 +2193,8 @@ mod tests {
 
     /// VM case E6: at maximum zoom "Preview saved layout" was clipped into
     /// fragments. It must fit its menu row whole or end in an ellipsis.
+    /// Chrome no longer follows zoom, so the largest UI text size now
+    /// stands in for it.
     #[test]
     fn maximum_zoom_menu_labels_fit_their_rows_or_end_in_an_ellipsis() {
         use super::super::super::text::{CHROME_MAXIMUM_LINE_HEIGHT, chrome_maximum_cell_height};
@@ -2211,7 +2213,9 @@ mod tests {
         }
         let action = tab_menu_descriptor(TabMenuActionId::PreviewLair);
         for scale in [120, 150, 180, 240] {
-            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+            let context = RenderContext::new(u16::MAX)
+                .at_maximum_zoom(scale)
+                .at_maximum_chrome_font_size();
             let mut cache = CommandPaletteTextCache::default();
             for width in [120, 160, 240, 640, 1268] {
                 let bounds = Rect {
@@ -2267,7 +2271,7 @@ mod tests {
                     }
                 }
             }
-            // A wide Window shows the whole label at maximum zoom.
+            // A wide Window shows the whole label at the largest size.
             let label_width = cache
                 .tab_menu_label_width(&context, &[action], scale, 1)
                 .unwrap();

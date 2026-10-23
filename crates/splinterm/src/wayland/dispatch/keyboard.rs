@@ -440,6 +440,13 @@ impl KeyboardHandler for App {
             }
             Some(ActionId::ConfigReload) => {
                 self.reload_keymap_configuration();
+                // A reloaded agent status or chrome text size draws now.
+                if self.presentation.full_redraw
+                    && self.surface.configured
+                    && let Err(error) = self.schedule_draw(queue_handle)
+                {
+                    self.scheduling.fail(error);
+                }
                 return;
             }
             Some(ActionId::SendPrefix) => {

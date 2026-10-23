@@ -186,6 +186,7 @@ pub(in crate::app) fn run_standalone_picker(
         cursor_style: config.cursor_style,
         cursor_blink: false,
         theme,
+        ui_font_size: config.ui_font_size,
         keymap: config.keymap.clone(),
         prefix_timeout_ms: config.prefix_timeout_ms,
         ..WindowOptions::default()

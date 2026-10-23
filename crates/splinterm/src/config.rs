@@ -60,6 +60,10 @@ pub struct AppConfig {
     /// follows the Omarchy text size (`shell.toml` `[font] base-size`).
     pub font_size_authority: FontAuthority,
     pub font_sizing_policy: FontSizingPolicy,
+    /// `[main] ui-font-pixelsize`: the chrome text size in logical px. When
+    /// unset, chrome follows Omarchy's text size, otherwise 14 px
+    /// ([`resolve_ui_font_size`]). Never the terminal font size.
+    pub ui_font_size: Option<FontSize>,
     pub padding: TerminalPadding,
     pub initial_columns: u16,
     pub initial_rows: u16,
@@ -206,6 +210,7 @@ impl Default for AppConfig {
             font_size: FontSize::Pixels(14.0),
             font_size_authority: FontAuthority::NativeOmarchy,
             font_sizing_policy: FontSizingPolicy::OutputScale,
+            ui_font_size: None,
             padding: TerminalPadding::DEFAULT,
             initial_columns: 80,
             initial_rows: 24,
@@ -459,8 +464,14 @@ pub struct OmarchyShellSettings {
     pub menu_alpha: u16,
     /// `[popups] background-alpha`, as Foot-style 16-bit coverage.
     pub popup_alpha: u16,
-    /// Effective `[font] base-size` in px, or `None` when no layer sets it.
+    /// Effective `[font] base-size` in px for the terminal, or `None` when no
+    /// layer sets it or `config.ini` sets a terminal font size.
     pub text_size_px: Option<u16>,
+    /// Effective `[font] base-size` in px for chrome text, or `None` when no
+    /// layer sets it. Kept whatever `config.ini` says, because chrome follows
+    /// Omarchy's text size independently of the terminal font size, and
+    /// `[main] ui-font-pixelsize` wins over it in the Window.
+    pub ui_text_size_px: Option<u16>,
     /// `[bar] size-horizontal`, the Omarchy top bar's height, in logical px
     /// and within [`OMARCHY_BAR_SIZE_LIMITS_PX`]. The tab strip uses it.
     pub bar_size_px: u16,
@@ -478,10 +489,38 @@ impl Default for OmarchyShellSettings {
             menu_alpha: u16::MAX,
             popup_alpha: u16::MAX,
             text_size_px: None,
+            ui_text_size_px: None,
             bar_size_px: OMARCHY_DEFAULT_BAR_SIZE_PX,
             text_size_held: false,
         }
     }
+}
+
+/// The chrome text size, in logical px, when neither
+/// `[main] ui-font-pixelsize` nor Omarchy's text size sets one: the size
+/// chrome drew at with Splinterm's default 14 px terminal font.
+pub const DEFAULT_UI_FONT_PIXELSIZE: f32 = 14.0;
+
+/// The sizes `[main] ui-font-pixelsize` accepts, in logical px, and the range
+/// an Omarchy text size is clamped to for chrome. Chrome rows cap what is
+/// drawn well below the top of this range.
+pub const UI_FONT_PIXELSIZE_LIMITS: std::ops::RangeInclusive<f32> = 6.0..=96.0;
+
+/// The chrome text size: `[main] ui-font-pixelsize` when set; otherwise
+/// Omarchy's `[font] base-size` in px, the size Omarchy's own shell draws
+/// its text at, clamped to [`UI_FONT_PIXELSIZE_LIMITS`]; otherwise
+/// [`DEFAULT_UI_FONT_PIXELSIZE`]. The terminal font size and runtime zoom
+/// never take part.
+#[must_use]
+pub fn resolve_ui_font_size(configured: Option<FontSize>, omarchy_px: Option<u16>) -> FontSize {
+    configured.unwrap_or_else(|| {
+        FontSize::Pixels(omarchy_px.map_or(DEFAULT_UI_FONT_PIXELSIZE, |px| {
+            f32::from(px).clamp(
+                *UI_FONT_PIXELSIZE_LIMITS.start(),
+                *UI_FONT_PIXELSIZE_LIMITS.end(),
+            )
+        }))
+    })
 }
 
 /// Which followed setting a shell diagnostic concerns, so a caller can drop
@@ -492,8 +531,11 @@ pub enum OmarchyShellConcern {
     Read,
     /// `[menu]` or `[popups]` `background-alpha`.
     PanelAlpha,
-    /// `[font] base-size`.
+    /// `[font] base-size`, which the terminal and chrome text both follow.
     TextSize,
+    /// `[font] base-size` maps to a point size outside what Splinterm
+    /// renders. Only the terminal uses that point size; chrome takes the px.
+    TerminalTextSize,
     /// `[bar] size-horizontal`.
     BarSize,
 }
@@ -734,7 +776,7 @@ pub fn resolve_omarchy_shell(
                 let points = omarchy_unbounded_point_size(px);
                 if !RENDERER_POINT_SIZES.contains(&u16::try_from(points).unwrap_or(u16::MAX)) {
                     load.diagnostics.push((
-                        OmarchyShellConcern::TextSize,
+                        OmarchyShellConcern::TerminalTextSize,
                         format!(
                             "{}: [font] base-size {raw:?} maps to {points} pt; using {} pt, the nearest size Splinterm renders",
                             origin.display(),
@@ -765,6 +807,7 @@ pub fn resolve_omarchy_shell(
             }
         }
     };
+    load.settings.ui_text_size_px = load.settings.text_size_px;
     load
 }
 
@@ -1073,6 +1116,15 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 config.font_size_authority = FontAuthority::Explicit;
                 false
             }
+            "main.ui-font-pixelsize" => {
+                config.ui_font_size = Some(FontSize::Pixels(parse_range(
+                    value,
+                    *UI_FONT_PIXELSIZE_LIMITS.start(),
+                    *UI_FONT_PIXELSIZE_LIMITS.end(),
+                    index,
+                )?));
+                false
+            }
             "main.font-sizing-policy" => {
                 config.font_sizing_policy = match value.to_ascii_lowercase().as_str() {
                     "output-scale" => FontSizingPolicy::OutputScale,
@@ -1323,7 +1375,9 @@ where
     let parsed = value
         .parse::<T>()
         .map_err(|_| anyhow::anyhow!("line {}: invalid number", line + 1))?;
-    if parsed < min || parsed > max {
+    // A range check rather than two comparisons: NaN fails both `<` and `>`,
+    // so `nan` would otherwise pass for a float key.
+    if !(min..=max).contains(&parsed) {
         bail!("line {}: number outside supported range", line + 1);
     }
     Ok(parsed)
@@ -3322,6 +3376,7 @@ mod tests {
                 menu_alpha: u16::MAX,
                 popup_alpha: u16::MAX,
                 text_size_px: Some(12),
+                ui_text_size_px: Some(12),
                 bar_size_px: 26,
                 text_size_held: false,
             }
@@ -3599,7 +3654,10 @@ mod tests {
             let small = bar(theme, "[font]\nbase-size = 6\n");
             assert_eq!(small.settings.bar_size_px, 20);
             assert_eq!(small.diagnostics.len(), 1, "{:?}", small.diagnostics);
-            assert_eq!(small.diagnostics[0].0, OmarchyShellConcern::TextSize);
+            assert_eq!(
+                small.diagnostics[0].0,
+                OmarchyShellConcern::TerminalTextSize
+            );
         }
         // A configured size outside the limits is reported when it is
         // clamped, against the layer that set it...
@@ -3775,5 +3833,66 @@ mod tests {
             assert_eq!(config.font_size_authority, FontAuthority::Explicit, "{key}");
             assert!(!config.follows_omarchy_text_size(), "{key}");
         }
+    }
+
+    #[test]
+    fn ui_font_pixelsize_is_its_own_key_independent_of_the_terminal_size() {
+        assert_eq!(AppConfig::default().ui_font_size, None);
+        let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
+        assert_eq!(shipped.config.ui_font_size, None);
+        let both = parse("[main]\nfont-pixelsize=20\nui-font-pixelsize=11.5\n").unwrap();
+        assert!(both.diagnostics.is_empty(), "{:?}", both.diagnostics);
+        assert_eq!(both.config.ui_font_size, Some(FontSize::Pixels(11.5)));
+        assert_eq!(both.config.font_size, FontSize::Pixels(20.0));
+        // The UI size never stops the terminal following Omarchy.
+        let ui_only = parse("[main]\nui-font-pixelsize=16\n").unwrap().config;
+        assert!(ui_only.follows_omarchy_text_size());
+        for bounds in ["6", "96"] {
+            assert!(parse(&format!("[main]\nui-font-pixelsize={bounds}\n")).is_ok());
+        }
+        for invalid in ["5.9", "97", "big", "", "nan", "NaN", "inf", "-inf"] {
+            assert!(
+                parse(&format!("[main]\nui-font-pixelsize={invalid}\n")).is_err(),
+                "{invalid:?}"
+            );
+        }
+        // The same range check guards the terminal's float size keys.
+        for key in ["font-pixelsize", "font-point-size", "font-size"] {
+            for invalid in ["nan", "inf"] {
+                assert!(
+                    parse(&format!("[main]\n{key}={invalid}\n")).is_err(),
+                    "{key}={invalid}"
+                );
+            }
+        }
+        // Only [main] owns it.
+        let elsewhere = parse("[explorer]\nui-font-pixelsize=16\n").unwrap();
+        assert_eq!(elsewhere.config.ui_font_size, None);
+        assert_eq!(elsewhere.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn ui_font_size_resolves_key_then_omarchy_then_the_default() {
+        let key = Some(FontSize::Pixels(17.0));
+        assert_eq!(resolve_ui_font_size(key, Some(12)), FontSize::Pixels(17.0));
+        assert_eq!(resolve_ui_font_size(key, None), FontSize::Pixels(17.0));
+        // Omarchy's text size is the px its own shell draws at, not the
+        // terminal's rounded point size.
+        for px in 9..=20 {
+            assert_eq!(
+                resolve_ui_font_size(None, Some(px)),
+                FontSize::Pixels(f32::from(px))
+            );
+        }
+        assert_eq!(resolve_ui_font_size(None, Some(1)), FontSize::Pixels(6.0));
+        assert_eq!(
+            resolve_ui_font_size(None, Some(500)),
+            FontSize::Pixels(96.0)
+        );
+        assert_eq!(
+            resolve_ui_font_size(None, None),
+            FontSize::Pixels(DEFAULT_UI_FONT_PIXELSIZE)
+        );
+        assert_eq!(DEFAULT_UI_FONT_PIXELSIZE.to_bits(), 14.0_f32.to_bits());
     }
 }

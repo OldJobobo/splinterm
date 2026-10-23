@@ -14,7 +14,7 @@ use crate::{
     },
     geometry::{CellGeometry, Rect, TerminalPadding, WindowGeometry, logical_extent_to_buffer},
     pane::{PaneChrome, PaneDivider, PaneLayout},
-    renderer::{background_bgra, paint_box_drawing_cell},
+    renderer::{ChromeText, background_bgra, paint_box_drawing_cell},
 };
 use splinterm_core::SplintId;
 use splinterm_protocol::{MAX_COLUMNS, MAX_ROWS, TerminalSnapshot};
@@ -563,6 +563,50 @@ pub(super) fn sanitize_frame_title(title: &str, maximum_cells: u32) -> String {
     output.trim_end().to_owned()
 }
 
+/// How many chrome cells a frame title may take in a pane `allocation_width`
+/// buffer pixels wide. The frame keeps three terminal cells on each side
+/// (corner, gap and padding), laid out in the terminal's cell geometry, and
+/// the title fills the rest in chrome cells, which have their own size.
+/// `None` when no title fits.
+pub(super) fn frame_title_maximum_cells(
+    allocation_width: u32,
+    terminal_cell_width: u32,
+    chrome_cell_width: u32,
+) -> Option<u32> {
+    allocation_width
+        .checked_sub(terminal_cell_width.saturating_mul(6))
+        .map(|room| room / chrome_cell_width.max(1))
+        .filter(|cells| *cells > 0)
+}
+
+/// Where a frame title is drawn in a pane's top border row: the cleared
+/// rect, which keeps one terminal cell of padding on each side of the text,
+/// and the text origin, three terminal cells in and centred in the row. The
+/// title text is loaded no taller than the terminal cell, so it stays inside
+/// the border row at every chrome and terminal size.
+pub(super) fn frame_title_placement(
+    allocation: Rect,
+    cell_width: u32,
+    cell_height: u32,
+    text: &ChromeText,
+) -> (Rect, (u32, u32)) {
+    let clear = Rect {
+        x: allocation.x.saturating_add(cell_width.saturating_mul(2)),
+        y: allocation.y,
+        width: text
+            .pixel_width()
+            .saturating_add(cell_width.saturating_mul(2)),
+        height: cell_height,
+    };
+    let origin = (
+        allocation.x.saturating_add(cell_width.saturating_mul(3)),
+        allocation
+            .y
+            .saturating_add(cell_height.saturating_sub(text.pixel_height()) / 2),
+    );
+    (clear, origin)
+}
+
 fn fill_chrome_background(
     canvas: &mut [u8],
     width: u32,
@@ -1055,16 +1099,8 @@ pub(super) fn paint_pane_chrome(
                     );
                 }
                 if let Some(title) = frame_titles.get(&pane.splint_id) {
-                    let clear = Rect {
-                        x: allocation.x.saturating_add(cell_width.saturating_mul(2)),
-                        y: allocation.y,
-                        width: title
-                            .text
-                            .cells()
-                            .saturating_add(2)
-                            .saturating_mul(cell_width),
-                        height: cell_height,
-                    };
+                    let (clear, origin) =
+                        frame_title_placement(allocation, cell_width, cell_height, &title.text);
                     fill_chrome_background(
                         canvas,
                         width,
@@ -1073,17 +1109,9 @@ pub(super) fn paint_pane_chrome(
                         theme.background,
                         theme.background_alpha,
                     );
-                    title.text.paint(
-                        canvas,
-                        width,
-                        height,
-                        (
-                            allocation.x.saturating_add(cell_width.saturating_mul(3)),
-                            allocation.y,
-                        ),
-                        clear,
-                        color,
-                    );
+                    title
+                        .text
+                        .paint(canvas, width, height, origin, clear, color);
                 }
             }
         }

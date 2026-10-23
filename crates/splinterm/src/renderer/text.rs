@@ -20,10 +20,12 @@ use super::{
 /// name and status lines and a saved-layout preview line are each this tall,
 /// and every other chrome row is taller.
 ///
-/// Chrome text follows the terminal font, runtime zoom included, only until
-/// its cell fills this line. Past that it stops growing, because chrome rows
-/// have fixed heights: at maximum zoom, glyphs larger than their rows were
-/// clipped into unreadable fragments.
+/// Chrome text uses the terminal font family at its own UI size (the
+/// context's chrome font size: `[main] ui-font-pixelsize`, otherwise
+/// Omarchy's text size, otherwise 14 px), never the terminal font size or
+/// runtime zoom. It follows that size only until its cell fills this line.
+/// Past that it stops growing, because chrome rows have fixed heights:
+/// glyphs larger than their rows were clipped into unreadable fragments.
 pub(crate) const CHROME_MAXIMUM_LINE_HEIGHT: u32 = 24;
 
 /// The tallest chrome text cell, in buffer pixels, at `scale_120`.
@@ -229,6 +231,7 @@ impl ChromeText {
         Self::load_styled(text, scale_120, ChromeTextStyle::Regular)
     }
 
+    #[cfg(test)]
     pub(crate) fn load_with_context(
         text: &str,
         scale_120: u32,
@@ -391,7 +394,7 @@ impl ChromeText {
             exited_code: None,
             exited_signal: None,
         };
-        let mut frame = SnapshotFrame::load_scaled_with_maximum_cell_height(
+        let mut frame = SnapshotFrame::load_chrome_with_maximum_cell_height(
             &snapshot,
             scale_120,
             context,
@@ -481,18 +484,22 @@ mod tests {
         assert!(canvas.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
     }
 
-    /// VM case E6: after about 180 zoom-in steps chrome drew terminal-sized
-    /// glyphs inside fixed chrome rows, clipping every label into fragments.
+    /// VM case E6: chrome once drew terminal-sized glyphs inside fixed
+    /// chrome rows, clipping every label into fragments. At the largest UI
+    /// size, far taller than a chrome line, chrome text still stops at it.
     #[test]
-    fn chrome_text_stops_growing_at_its_line_height_at_maximum_zoom() {
+    fn chrome_text_stops_growing_at_its_line_height_at_the_largest_ui_size() {
         for scale in [120, 150, 180, 240] {
-            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+            let context = RenderContext::new(u16::MAX).at_maximum_chrome_font_size();
             let bound = chrome_maximum_cell_height(scale);
-            // The terminal itself keeps the zoomed size, far taller than a
-            // chrome line; only chrome text is bounded.
-            let zoomed = context.effective_font_size(scale).unwrap();
+            let unbounded = context.chrome_font_size(scale).unwrap();
             let primary = &context.font_generation().unwrap().faces[0];
-            assert!(super::super::cell_metrics(primary, zoomed).unwrap().height > bound * 3);
+            assert!(
+                super::super::cell_metrics(primary, unbounded)
+                    .unwrap()
+                    .height
+                    > bound * 3
+            );
             for style in [ChromeTextStyle::Regular, ChromeTextStyle::Bold] {
                 let text = ChromeText::load_styled_with_context(
                     "Preview saved layout",
@@ -508,18 +515,106 @@ mod tests {
                 );
                 // Bounded, not collapsed: it still fills most of the line.
                 assert!(text.pixel_height() * 4 >= bound * 3, "scale {scale}");
-                assert!(text.frame.font_size < zoomed);
+                assert!(text.frame.font_size < unbounded);
             }
         }
     }
 
+    /// Runtime zoom resizes the terminal only: chrome text keeps its UI
+    /// size at every zoom, from the smallest to the largest.
     #[test]
-    fn chrome_text_below_its_line_height_keeps_the_terminal_font_size() {
-        let mut context = RenderContext::new(u16::MAX);
-        context.apply_font_zoom_steps(-10, 120).unwrap().unwrap();
-        let size = context.effective_font_size(120).unwrap();
-        let text = ChromeText::load_with_context("Lair 1", 120, &context).unwrap();
-        assert!(text.pixel_height() <= chrome_maximum_cell_height(120));
-        assert_eq!(text.frame.font_size.to_bits(), size.to_bits());
+    fn runtime_zoom_never_changes_chrome_text() {
+        for scale in [120, 150, 180, 240] {
+            let unzoomed = RenderContext::new(u16::MAX);
+            let mut zoomed_out = unzoomed.clone();
+            zoomed_out
+                .apply_font_zoom_steps(-10, scale)
+                .unwrap()
+                .unwrap();
+            let zoomed_in = unzoomed.clone().at_maximum_zoom(scale);
+            assert_ne!(
+                zoomed_in.effective_font_size(scale).unwrap().to_bits(),
+                unzoomed.effective_font_size(scale).unwrap().to_bits()
+            );
+            let expected = ChromeText::load_with_context("Lair 1", scale, &unzoomed).unwrap();
+            // 14 px fits every chrome line, so it is drawn at exactly 14 px.
+            assert_eq!(
+                expected.frame.font_size.to_bits(),
+                (14.0 * u32_to_f32(scale) / 120.0).to_bits(),
+                "scale {scale}"
+            );
+            for context in [&zoomed_out, &zoomed_in] {
+                let text = ChromeText::load_with_context("Lair 1", scale, context).unwrap();
+                assert_eq!(
+                    text.frame.font_size.to_bits(),
+                    expected.frame.font_size.to_bits(),
+                    "scale {scale}"
+                );
+                assert_eq!(text.pixel_height(), expected.pixel_height());
+                assert_eq!(text.pixel_width(), expected.pixel_width());
+            }
+        }
+    }
+
+    /// Chrome follows its own UI size, scaled by the output scale, and
+    /// neither the terminal's configured size nor a followed terminal size.
+    #[test]
+    fn chrome_text_follows_its_ui_size_not_the_terminal_font_size() {
+        use crate::geometry::FontSize;
+
+        let context = RenderContext::new(u16::MAX)
+            .with_font_size_override(Some(FontSize::Points(15.0)))
+            .with_chrome_font_size(FontSize::Pixels(12.0));
+        assert_eq!(
+            context.effective_font_size(120).unwrap().to_bits(),
+            20.0_f32.to_bits()
+        );
+        for (scale, pixels) in [(120, 12.0_f32), (180, 18.0), (240, 24.0)] {
+            let text = ChromeText::load_with_context("Lair 1", scale, &context).unwrap();
+            assert_eq!(text.frame.font_size.to_bits(), pixels.to_bits(), "{scale}");
+        }
+        let mut live = context;
+        assert!(!live.replace_chrome_font_size(FontSize::Pixels(12.0)));
+        assert!(live.replace_chrome_font_size(FontSize::Pixels(16.0)));
+        let text = ChromeText::load_with_context("Lair 1", 120, &live).unwrap();
+        assert_eq!(text.frame.font_size.to_bits(), 16.0_f32.to_bits());
+        assert_eq!(
+            live.effective_font_size(120).unwrap().to_bits(),
+            20.0_f32.to_bits()
+        );
+    }
+
+    /// Every size `omarchy-display-text-size` offers fits the tightest
+    /// chrome line at 1x and 2x: at its own size while that fits, otherwise
+    /// at the cap.
+    #[test]
+    fn omarchy_text_sizes_fit_the_chrome_line_cap() {
+        use crate::geometry::FontSize;
+
+        for px in 9_u16..=20 {
+            let context =
+                RenderContext::new(u16::MAX).with_chrome_font_size(FontSize::Pixels(f32::from(px)));
+            for scale in [120, 150, 240] {
+                let bound = chrome_maximum_cell_height(scale);
+                let wanted = context.chrome_font_size(scale).unwrap();
+                let primary = &context.font_generation().unwrap().faces[0];
+                let fits = super::super::cell_metrics(primary, wanted).unwrap().height <= bound;
+                for style in [ChromeTextStyle::Regular, ChromeTextStyle::Bold] {
+                    let text =
+                        ChromeText::load_styled_with_context("Lair 1", scale, style, &context)
+                            .unwrap();
+                    assert!(text.pixel_height() <= bound, "{px} px at {scale}");
+                    if fits {
+                        assert_eq!(
+                            text.frame.font_size.to_bits(),
+                            wanted.to_bits(),
+                            "{px} px at {scale}"
+                        );
+                    } else {
+                        assert!(text.frame.font_size < wanted, "{px} px at {scale}");
+                    }
+                }
+            }
+        }
     }
 }
