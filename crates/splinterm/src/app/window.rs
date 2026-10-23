@@ -571,6 +571,22 @@ pub(super) async fn run_owned_live_multipane_window_with_app_id(
     .await
 }
 
+/// What a Window prints when its own command ended before it opened.
+const COMMAND_ENDED_LINE: &str = "splinterm: the command ended before its Window opened.";
+
+/// What a Window does when its first Dojo is gone before it reads the
+/// topology. A Dojo this client owns (a launched command, such as
+/// `splinterm-xdg-terminal-exec -- true`) ends with its command, so the
+/// command simply finished: say so and exit 0, as it would a moment later
+/// with the Window open. Any other first Dojo vanishing is a failure.
+fn first_dojo_gone(owned_by_this_client: bool) -> Result<()> {
+    if owned_by_this_client {
+        eprintln!("{COMMAND_ENDED_LINE}");
+        return Ok(());
+    }
+    bail!("the terminal ended before its Window opened")
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "multi-pane startup keeps renderer, topology, theme, and input authorities in one lifecycle"
@@ -591,8 +607,11 @@ async fn run_live_multipane_window_inner(
         tabs: resume.tabs,
         active: resume.active,
     });
-    let (initial_identity, remote_display_identity) =
-        initial_window_dojo_identity(&factory, dojo_model.id).await?;
+    let Some((initial_identity, remote_display_identity)) =
+        initial_window_dojo_identity(&factory, dojo_model.id).await?
+    else {
+        return first_dojo_gone(initial_transient_owner.is_some());
+    };
     let startup_theme = load_startup_theme_for_watch(&config);
     let theme = startup_theme.theme;
     renderer::configure(RendererOptions {
@@ -1211,7 +1230,18 @@ pub(super) async fn run_live_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{AbortOnDropTask, resolved_window_app_id};
+    use super::{AbortOnDropTask, COMMAND_ENDED_LINE, first_dojo_gone, resolved_window_app_id};
+
+    #[test]
+    fn a_first_dojo_gone_is_a_finished_command_only_when_this_client_owns_it() {
+        first_dojo_gone(true).expect("an owned command that ended has finished");
+        assert!(COMMAND_ENDED_LINE.contains("ended before its Window opened"));
+        let error = first_dojo_gone(false).expect_err("another Dojo vanishing fails");
+        assert_eq!(
+            error.to_string(),
+            "the terminal ended before its Window opened"
+        );
+    }
 
     #[test]
     fn xdg_window_identity_defaults_and_preserves_exact_override() {

@@ -4022,13 +4022,17 @@ pub(in crate::app) fn spawn_topology_smoke(
     })))
 }
 
+/// The identity of the Window's first Dojo, or `None` when the daemon no
+/// longer has it (its terminal ended before the Window read the topology).
 pub(in crate::app) async fn initial_window_dojo_identity(
     factory: &ConnectionFactory,
     dojo_id: DojoId,
-) -> Result<(
-    WindowDojoIdentity,
-    Option<splinterm::endpoint::RemoteDisplayIdentity>,
-)> {
+) -> Result<
+    Option<(
+        WindowDojoIdentity,
+        Option<splinterm::endpoint::RemoteDisplayIdentity>,
+    )>,
+> {
     let mut connection = factory.connect().await?;
     let remote_display_identity = factory.remote_display_identity(&connection);
     let Response::Lairs {
@@ -4040,13 +4044,13 @@ pub(in crate::app) async fn initial_window_dojo_identity(
     };
     for lair in &lairs {
         if let Some(dojo) = lair.dojos.iter().find(|dojo| dojo.id == dojo_id) {
-            return Ok((
+            return Ok(Some((
                 window_dojo_identity(topology_revision, lair, dojo),
                 remote_display_identity,
-            ));
+            )));
         }
     }
-    bail!("initial Dojo is absent from daemon topology")
+    Ok(None)
 }
 
 #[cfg(test)]
