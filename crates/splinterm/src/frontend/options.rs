@@ -18,6 +18,7 @@ use crate::{
         APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme,
         TopologyReloadSettings,
     },
+    geometry::FontSize,
     keymap::ResolvedKeymap,
 };
 
@@ -492,6 +493,9 @@ pub struct WindowOptions {
     pub app_id: String,
     /// Current project-owned Omarchy role mapping.
     pub theme: ResolvedTheme,
+    /// `[main] ui-font-pixelsize`; `None` lets chrome text follow the theme's
+    /// Omarchy text size, otherwise 14 px ([`crate::config::resolve_ui_font_size`]).
+    pub ui_font_size: Option<FontSize>,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
     /// Fully validated client-local keymap for this Window.
@@ -566,6 +570,7 @@ impl Default for WindowOptions {
             title: None,
             app_id: APP_ID.to_owned(),
             theme: ResolvedTheme::default(),
+            ui_font_size: None,
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
             keymap: ResolvedKeymap::default(),

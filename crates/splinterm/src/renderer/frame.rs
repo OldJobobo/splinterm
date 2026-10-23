@@ -327,10 +327,12 @@ impl SnapshotFrame {
         Self::load_bounded(snapshot, scale_120, sources, context, None)
     }
 
-    /// Loads like [`Self::load_scaled_with_context`] but shrinks the font,
-    /// never grows it, until a cell is at most `maximum_cell_height` buffer
-    /// pixels tall. Trusted chrome uses this to stay inside its fixed rows.
-    pub(super) fn load_scaled_with_maximum_cell_height(
+    /// Loads trusted chrome text: like [`Self::load_scaled_with_context`],
+    /// but at the context's chrome font size instead of the zoomed terminal
+    /// size, and shrinking that font, never growing it, until a cell is at
+    /// most `maximum_cell_height` buffer pixels tall, so chrome stays inside
+    /// its fixed rows.
+    pub(super) fn load_chrome_with_maximum_cell_height(
         snapshot: &TerminalSnapshot,
         scale_120: u32,
         context: &RenderContext,
@@ -345,6 +347,8 @@ impl SnapshotFrame {
         )
     }
 
+    /// `chrome_cell_height` is `Some` only for trusted chrome text, which is
+    /// drawn at the context's chrome font size within that cell height.
     #[allow(
         clippy::too_many_lines,
         reason = "bounded text and image source preparation share one immutable frame transaction"
@@ -354,7 +358,7 @@ impl SnapshotFrame {
         scale_120: u32,
         sources: Option<&ImageContentLeaseSet>,
         context: &RenderContext,
-        maximum_cell_height: Option<u32>,
+        chrome_cell_height: Option<u32>,
     ) -> Result<Self> {
         if snapshot.columns > usize::from(MAX_COLUMNS) || snapshot.rows > usize::from(MAX_ROWS) {
             bail!(
@@ -369,12 +373,14 @@ impl SnapshotFrame {
             bail!("scale must be between 1x and 8x");
         }
         let scale_120 = u16::try_from(scale_120).context("scale fits u16")?;
-        let font_size = context.effective_font_size(u32::from(scale_120))?;
         let font_generation = Arc::clone(context.font_generation()?);
         let faces = &font_generation.faces;
-        let (font_size, metrics) = match maximum_cell_height {
-            Some(maximum) => bounded_cell_metrics(&faces[0], font_size, maximum)?,
-            None => (font_size, cell_metrics(&faces[0], font_size)?),
+        let (font_size, metrics) = if let Some(maximum) = chrome_cell_height {
+            let chrome_size = context.chrome_font_size(u32::from(scale_120))?;
+            bounded_cell_metrics(&faces[0], chrome_size, maximum)?
+        } else {
+            let font_size = context.effective_font_size(u32::from(scale_120))?;
+            (font_size, cell_metrics(&faces[0], font_size)?)
         };
         let cell_width = metrics.width;
         let cell_height = metrics.height;

@@ -843,7 +843,7 @@ impl App {
             .retain(|dojo_id, _| visible.contains(dojo_id));
         self.prepare_tab_action_text()?;
         // Labels are bounded by the chrome cell they are drawn with, which
-        // follows the terminal font up to the strip's text cap.
+        // follows the chrome UI text size up to the strip's text cap.
         let cell_width = self
             .tab_state
             .tab_close_text
@@ -1664,7 +1664,8 @@ mod tests {
     /// VM case E6: at maximum zoom tab labels were clipped mid-glyph with
     /// no ellipsis. They now fit the strip and end in `…` when too long, and
     /// centred text stays clear of the active-tab indicator at every strip
-    /// height `[bar] size-horizontal` allows.
+    /// height `[bar] size-horizontal` allows. Chrome no longer follows zoom,
+    /// so the largest UI text size now stands in for it.
     #[test]
     fn maximum_zoom_tab_labels_fit_the_strip_and_end_in_an_ellipsis() {
         use super::{
@@ -1677,7 +1678,9 @@ mod tests {
         let ids = [DojoId::new(), DojoId::new(), DojoId::new()];
         for strip_height in [DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, 20, 34, 48] {
             for scale in [120, 150, 180, 240] {
-                let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+                let context = RenderContext::new(u16::MAX)
+                    .at_maximum_zoom(scale)
+                    .at_maximum_chrome_font_size();
                 let cap = tab_text_maximum_cell_height(strip_height, scale).unwrap();
                 let load = |source: &ChromeSource, style| {
                     ChromeText::load_source_styled_within(source, scale, style, &context, cap)
@@ -1711,6 +1714,56 @@ mod tests {
                     let top = (label.height - text.pixel_height()) / 2;
                     let bottom = strip.height - top - text.pixel_height();
                     assert!(top >= indicator && bottom >= indicator, "{case}");
+                }
+            }
+        }
+    }
+
+    /// Every `omarchy-display-text-size` size (9–20 px) fits the strip at 1x
+    /// and 2x: the stock bar that grows with the text size, a bar with
+    /// `scale-with-font` off, and the compact 20 px strip. Text is drawn at
+    /// the UI size while it fits and stops at the strip's cap otherwise.
+    #[test]
+    fn omarchy_text_sizes_fit_the_tab_strip() {
+        use super::{
+            ChromeSource, ChromeText, ChromeTextStyle, tab_indicator_logical_height,
+            tab_text_maximum_cell_height,
+        };
+        use crate::{geometry::FontSize, renderer::RenderContext};
+
+        let ids = [DojoId::new(), DojoId::new()];
+        for px in 9_u16..=20 {
+            // The stock bar's round(26 × base-size / 12), within 20–48 px.
+            let scaled_bar = ((26 * u32::from(px) * 2 + 12) / 24).clamp(20, 48);
+            for strip_height in [scaled_bar, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, 20] {
+                for scale in [120, 240] {
+                    let context = RenderContext::new(u16::MAX)
+                        .at_maximum_zoom(scale)
+                        .with_chrome_font_size(FontSize::Pixels(f32::from(px)));
+                    let cap = tab_text_maximum_cell_height(strip_height, scale).unwrap();
+                    let layout = tab_strip_layout(640, strip_height, &ids, 0).unwrap();
+                    let strip = App::buffer_rect(layout.rect, scale).unwrap();
+                    let indicator = super::logical_extent_to_buffer(
+                        tab_indicator_logical_height(strip_height),
+                        scale,
+                    )
+                    .unwrap();
+                    let case = format!("{px} px, strip {strip_height}, scale {scale}");
+                    for (source, style) in [
+                        (ChromeSource::from("Lair 1"), ChromeTextStyle::Bold),
+                        (ChromeSource::from("×"), ChromeTextStyle::Regular),
+                        (ChromeSource::from("+"), ChromeTextStyle::Regular),
+                    ] {
+                        let text = ChromeText::load_source_styled_within(
+                            &source, scale, style, &context, cap,
+                        )
+                        .unwrap();
+                        assert!(text.pixel_height() <= cap, "{case}");
+                        let label = App::buffer_rect(layout.tabs[0].label_rect, scale).unwrap();
+                        let top = (label.height - text.pixel_height()) / 2;
+                        let bottom = strip.height - top - text.pixel_height();
+                        assert!(top >= indicator && bottom >= indicator, "{case}");
+                    }
                 }
             }
         }

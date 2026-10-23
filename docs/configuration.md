@@ -100,10 +100,11 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `main.font` | explicit fontconfig pattern; when unset, follow Omarchy's effective `monospace` family | unset |
 | `main.font-ligatures` | startup-only cross-cell shaping: `off`, `on`, or `cursor` | off |
 | `main.font-features` | startup-only comma-separated OpenType `tag=value` settings | empty; at most 64 unique tags |
-| `main.font-pixelsize` | configured pixel font size; any size key stops Splinterm following Omarchy's text size | 6–96; Omarchy's text size, otherwise 14 |
+| `main.font-pixelsize` | configured terminal pixel font size; any size key stops the terminal following Omarchy's text size (chrome keeps following it; see `main.ui-font-pixelsize`) | 6–96; Omarchy's text size, otherwise 14 |
 | `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` (no auto mode) | output-scale |
+| `main.ui-font-pixelsize` | Window chrome text size in logical px (tabs, Explorer, menus, command palette, pickers, Agent access list, Dojo prompts), independent of the terminal font size and runtime zoom and always sized by output scale; capped where chrome rows end ([Chrome text size](#chrome-text-size)); configuration reload applies it | 6–96; Omarchy's text size, otherwise 14 |
 | `main.padding-left`, `padding-right`, `padding-top`, `padding-bottom` | independent logical padding edges | 0–10000; 12 each |
 | `main.initial-columns`, `initial-rows` | requested initial grid | 2–480, 2–128; 80×24 |
 | `main.startup` | what a commandless `splinterm-xdg-terminal-exec` launch opens: `new-dojo` or `dojo-picker` | new-dojo |
@@ -142,7 +143,8 @@ the pane instead of silently treating the residual as terminal cells.
 reads `config.ini` and its keymap file again for the Window it runs in and
 applies exactly these settings: the `[key-bindings]` keymap (profile, overlay
 file, and `prefix-timeout-ms`), `clipboard.image-directory` (an in-flight save
-is cancelled), `explorer.agent-status`, `multiplexer.close-unused`,
+is cancelled), `main.ui-font-pixelsize` (chrome is drawn again at once),
+`explorer.agent-status`, `multiplexer.close-unused`,
 `multiplexer.persist-on-tab-organization`, `multiplexer.new-dojo-directory`,
 and `multiplexer.new-splint-directory`. The four multiplexer settings take
 effect at the Window's next close, tab organization, or Dojo, Lair, or Splint
@@ -925,10 +927,9 @@ as Foot does with `dpi-aware=yes`.
 A text size change rescales open terminal windows live, without a restart,
 through the same reconciliation as a font family change. Runtime zoom stays a
 half-point offset from the followed size, and `omarchy-display-text-size reset`
-returns to the theme's size. Window chrome (tabs, Explorer, menus and the command
-palette) follows the terminal font size, runtime zoom included, until its text
-reaches a 24 px line height (logical pixels), then stays at that size. Tab
-text stops earlier when the tab strip is shorter; see "Tab strip height" below.
+returns to the theme's size. Window chrome has its own text size, which also
+follows `base-size` but never the terminal font size or runtime zoom; see
+"Chrome text size" below.
 Splinterm reads `base-size` as the shell does, with JavaScript's `parseInt` and
 a 1 px floor, so `12.0` and `"12px"` both mean 12 px and any positive size is
 accepted, not only the command's 9–20. The
@@ -939,16 +940,52 @@ an open window keeps its current size, and at startup Splinterm uses 12 px
 JSON palette still follows the text size from the Omarchy `shell.toml` layers,
 choosing the theme directory with the same order and brief-gap grace as the
 native theme.
-While `config.ini` sets a font size, Splinterm does not report `base-size`
-problems, and with a JSON palette it does not report panel alpha problems.
-Bar size problems are reported in every case, because every palette follows
-the bar.
+While `config.ini` sets both a terminal font size and `main.ui-font-pixelsize`,
+Splinterm does not report `base-size` problems, and with a JSON palette it does
+not report panel alpha problems. Bar size problems are reported in every case,
+because every palette follows the bar.
 
-To opt out, set a size in `config.ini`, for example:
+To opt the terminal out, set a size in `config.ini`, for example:
 
 ```ini
 [main]
 font-pixelsize=14
+```
+
+#### Chrome text size
+
+Window chrome is the text Splinterm draws itself: the tab strip (labels, agent
+status badges, the close and new-tab glyphs and the remote tag), the Lair
+Explorer, the command palette and its lists (key binding help, the Agent access
+list, Revoke all access), menus, the Recent Dojos and remote pickers, Dojo
+prompts and confirmations, frame titles, the scrollback search bar and the
+upgrade banner. It uses the terminal's font family and icons at its own size,
+in logical pixels:
+
+1. `main.ui-font-pixelsize`, when `config.ini` sets it.
+2. Otherwise Omarchy's text size, `[font] base-size`, read from the same
+   `shell.toml` layers as above, in px as the Omarchy shell draws its own text
+   (12 px on a stock Omarchy 4 desktop), even while `config.ini` sets the
+   terminal's font size. It is clamped to 6–96 px.
+3. Otherwise 14 px, the size chrome had with Splinterm's default terminal font.
+
+Chrome is always sized by the output scale (14 px is 28 px at scale 2), whatever
+`main.font-sizing-policy` says, and runtime zoom (`Ctrl++`, `Ctrl+-`) resizes
+only the terminal. Chrome rows keep fixed heights, so chrome text grows with its
+size only until it reaches a 24 px line height (logical pixels), then stays at
+that size; a large UI size is never clipped. Tab text stops earlier when the tab
+strip is shorter; see "Tab strip height" below.
+
+A `base-size` change redraws chrome in open terminal Windows without a restart,
+as it does the terminal. **Reload configuration** applies a changed
+`main.ui-font-pixelsize`, and removing the key returns chrome to Omarchy's text
+size. Trusted dialogs (access consent, upgrade, restart) are not chrome in this
+sense: their text is a terminal grid at the terminal font size, fitted to the
+dialog's own Window.
+
+```ini
+[main]
+ui-font-pixelsize=13
 ```
 
 #### Tab strip height
@@ -997,8 +1034,8 @@ Everything in the strip scales with it. The close and new-tab controls are
 square at the strip height, the active-tab underline is 2 px for strips up to
 29 px tall (3 px from 30 px, 4 px from 42 px), and the label inset is 10 px
 at 34 px and proportional from there. Tab labels, agent status badges, the
-close and new-tab glyphs and the remote tag follow the terminal font as other
-chrome does, but their line height also stays within the strip less the
+close and new-tab glyphs and the remote tag use the chrome text size as other
+chrome does (see "Chrome text size"), but their line height also stays within the strip less the
 underline thickness above and below. At the default 26 px that is a 22 px
 line, so text stays vertically centred and clear of the underline at every
 zoom. Labels that do not fit end in `…` as before.

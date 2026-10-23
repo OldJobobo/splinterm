@@ -17,6 +17,11 @@ use crate::{
 };
 
 pub(super) const BASE_FONT_SIZE: f32 = 22.0;
+/// The chrome text size a context starts at: Splinterm's 14 px UI default,
+/// which a Window replaces with `[main] ui-font-pixelsize` or Omarchy's text
+/// size ([`crate::config::resolve_ui_font_size`]).
+const DEFAULT_CHROME_FONT_SIZE: FontSize =
+    FontSize::Pixels(crate::config::DEFAULT_UI_FONT_PIXELSIZE);
 pub(super) const PRIMARY_FONT: &str = STARTUP_FONT_FALLBACK;
 const FONT_ZOOM_STEP_POINTS: f32 = 0.5;
 
@@ -67,6 +72,9 @@ pub struct RenderContext {
     font_zoom_steps: i16,
     /// The followed Omarchy text size, replacing the configured base size.
     font_size_override: Option<FontSize>,
+    /// The size trusted chrome text is drawn at, independent of the terminal
+    /// font size and of runtime zoom. Always sized by output scale.
+    chrome_font_size: FontSize,
     background_alpha: u16,
 }
 
@@ -88,6 +96,7 @@ impl RenderContext {
                 .expect("configured physical DPI was validated"),
             font_zoom_steps: 0,
             font_size_override: None,
+            chrome_font_size: DEFAULT_CHROME_FONT_SIZE,
             background_alpha,
         }
     }
@@ -116,6 +125,14 @@ impl RenderContext {
         {
             steps = steps.saturating_add(1);
         }
+        self
+    }
+
+    /// This context with chrome text at the largest UI size
+    /// `[main] ui-font-pixelsize` accepts, far past what any chrome row fits.
+    #[cfg(test)]
+    pub(crate) fn at_maximum_chrome_font_size(mut self) -> Self {
+        self.chrome_font_size = FontSize::Pixels(*crate::config::UI_FONT_PIXELSIZE_LIMITS.end());
         self
     }
 
@@ -191,6 +208,41 @@ impl RenderContext {
         Ok(self
             .effective_font_resolution(surface_scale_120)?
             .pixel_size)
+    }
+
+    /// The chrome text pixel size at `surface_scale_120`, before any chrome
+    /// row's cap. Chrome rows are logical heights scaled by the output scale,
+    /// so chrome text is sized the same way whatever
+    /// `main.font-sizing-policy` says, and runtime zoom never applies to it.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid scale or DPI.
+    pub(super) fn chrome_font_size(&self, surface_scale_120: u32) -> Result<f32> {
+        Ok(resolve_font_size_with_output(
+            self.chrome_font_size,
+            FontSizingPolicy::OutputScale,
+            surface_scale_120,
+            &self.output_dpi,
+        )?
+        .pixel_size)
+    }
+
+    /// Starts this context's chrome text at `size`.
+    #[must_use]
+    pub fn with_chrome_font_size(mut self, size: FontSize) -> Self {
+        self.chrome_font_size = size;
+        self
+    }
+
+    /// Replaces the chrome text size live and returns whether it changed.
+    /// The caller then drops every cached chrome text; terminal frames keep
+    /// their size, so nothing else needs rebuilding.
+    pub(crate) fn replace_chrome_font_size(&mut self, size: FontSize) -> bool {
+        if self.chrome_font_size == size {
+            return false;
+        }
+        self.chrome_font_size = size;
+        true
     }
 
     /// Applies Foot's default 0.5-point runtime zoom offset.

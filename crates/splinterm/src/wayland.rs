@@ -123,6 +123,7 @@ use crate::background_effect::{
 };
 use crate::config::{
     CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme, omarchy_terminal_point_size,
+    resolve_ui_font_size,
 };
 use crate::diagnostics::{
     DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, global as diagnostics,
@@ -663,7 +664,8 @@ struct PreparedWindow {
 fn prepare_window(options: &mut WindowOptions) -> Result<PreparedWindow> {
     let managed_tabs = options.initial_dojo.is_some();
     let render_context = RenderContext::new(options.theme.background_alpha)
-        .with_font_size_override(followed_font_size(options.theme));
+        .with_font_size_override(followed_font_size(options.theme))
+        .with_chrome_font_size(chrome_font_size(options.ui_font_size, options.theme));
     let inactive_options = options.activate_multi_pane_input()?;
     if let Some(snapshot) = options.snapshot.as_mut() {
         snapshot
@@ -931,6 +933,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pending_font_update: None,
             applied_text_size_px: options.theme.shell.text_size_px,
             rejected_text_size: None,
+            ui_font_size: options.ui_font_size,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
             title: TitleSettings {
@@ -2072,6 +2075,10 @@ struct PresentationState {
     applied_text_size_px: Option<u16>,
     /// A followed size the render context rejected, with the zoom steps then.
     rejected_text_size: Option<(Option<u16>, i16)>,
+    /// `[main] ui-font-pixelsize`, which configuration reload replaces. With
+    /// the theme's Omarchy text size it decides the chrome text size
+    /// ([`chrome_font_size`]).
+    ui_font_size: Option<FontSize>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title: TitleSettings,
@@ -3078,12 +3085,20 @@ enum BackgroundEffectCommitMode {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent effects of one theme update, each OR-ed into the frame's own flags"
+)]
 struct ThemeUpdateImpact {
     rebuild_pixels: bool,
     reconcile_effect: bool,
     /// The tab strip height changed, so the content area and the panes'
     /// grids move with it.
     relayout_tab_strip: bool,
+    /// The chrome text size changed (the Omarchy text size moved while
+    /// `[main] ui-font-pixelsize` is unset): chrome is drawn again at its
+    /// new size, and terminal frames stay as they are.
+    redraw_chrome: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3183,6 +3198,13 @@ fn followed_font_size(theme: ResolvedTheme) -> Option<FontSize> {
         .map(|px| FontSize::Points(omarchy_terminal_point_size(px)))
 }
 
+/// The chrome text size: `[main] ui-font-pixelsize`, otherwise the theme's
+/// Omarchy text size, otherwise 14 px. Neither the terminal font size nor
+/// runtime zoom takes part.
+fn chrome_font_size(ui_font_size: Option<FontSize>, theme: ResolvedTheme) -> FontSize {
+    resolve_ui_font_size(ui_font_size, theme.shell.ui_text_size_px)
+}
+
 /// Whether the followed text size still needs applying: the shell value is
 /// parseable (`held` is false), it differs from the size last applied, and it
 /// was not already rejected at the current zoom.
@@ -3203,9 +3225,12 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
     let mut next_pixels = next;
     current_pixels.background_blur = false;
     next_pixels.background_blur = false;
-    // A text size change is reconciled through the font path instead.
+    // A text size change is reconciled through the font path instead, and a
+    // chrome text size change by dropping cached chrome text.
     current_pixels.shell.text_size_px = None;
     next_pixels.shell.text_size_px = None;
+    current_pixels.shell.ui_text_size_px = None;
+    next_pixels.shell.ui_text_size_px = None;
     current_pixels.shell.text_size_held = false;
     next_pixels.shell.text_size_held = false;
     // A strip height change moves the content area, as hiding or showing the
@@ -3216,6 +3241,8 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
         rebuild_pixels: current_pixels != next_pixels,
         reconcile_effect,
         relayout_tab_strip: tab_strip_logical_height(current) != tab_strip_logical_height(next),
+        // Decided by the Window, which also knows `[main] ui-font-pixelsize`.
+        redraw_chrome: false,
     }
 }
 
@@ -5693,6 +5720,8 @@ impl App {
                 if self.set_agent_status_presentation(loaded.config.explorer_agent_status) {
                     self.presentation.full_redraw = true;
                 }
+                self.presentation.ui_font_size = loaded.config.ui_font_size;
+                self.reconcile_chrome_font_size();
                 for _ in loaded.diagnostics {
                     eprintln!("splinterm configuration warning");
                 }
@@ -6969,6 +6998,50 @@ impl App {
         self.install_render_context(candidate_context)
     }
 
+    /// Applies the chrome text size the configured `[main] ui-font-pixelsize`
+    /// and the theme's Omarchy text size resolve to. Chrome text never
+    /// shares the terminal's size, so only cached chrome text is dropped:
+    /// terminal frames, cell metrics and the PTY size stay as they are.
+    /// Returns whether the size changed.
+    fn reconcile_chrome_font_size(&mut self) -> bool {
+        let size = chrome_font_size(self.presentation.ui_font_size, self.presentation.theme);
+        let changed = self
+            .presentation
+            .render_context
+            .replace_chrome_font_size(size);
+        if changed {
+            self.invalidate_chrome_text();
+        }
+        changed
+    }
+
+    /// Drops every cached chrome text and the layouts measured from it, so
+    /// the next draw shapes chrome again at the render context's sizes.
+    fn invalidate_chrome_text(&mut self) {
+        self.presentation.renderer_generation =
+            self.presentation.renderer_generation.saturating_add(1);
+        self.presentation.frame_titles.clear();
+        for tab in self.tab_state.tabs.iter_mut() {
+            if let Some(view) = tab.value.as_mut() {
+                view.frame_titles.clear();
+            }
+        }
+        self.modal.session_picker_text_cache.clear();
+        self.presentation.explorer_text_cache.clear();
+        self.presentation.search_text_cache.clear();
+        self.modal.command_palette_text_cache.clear();
+        self.modal.dojo_prompt_text_cache.clear();
+        self.modal.tab_context_menu_text_cache.clear();
+        self.handoff.text_cache.clear();
+        self.invalidate_tab_strip_text();
+        self.modal.session_picker_layout = None;
+        self.presentation.explorer_layout = None;
+        self.modal.command_palette_layout = None;
+        self.modal.dojo_prompt_layout = None;
+        self.modal.tab_context_menu_layout = None;
+        self.presentation.full_redraw = true;
+    }
+
     /// Rebuilds every pane frame and text cache for a staged render context,
     /// then installs it and lets the pane controller resize the PTY.
     fn install_render_context(&mut self, candidate_context: RenderContext) -> Result<bool> {
@@ -7040,25 +7113,7 @@ impl App {
             view.dirty_inactive_panes.clear();
         }
         clear_snapshot_caches();
-        self.presentation.renderer_generation =
-            self.presentation.renderer_generation.saturating_add(1);
-        self.presentation.frame_titles.clear();
-        self.modal.session_picker_text_cache.clear();
-        self.presentation.explorer_text_cache.clear();
-        self.presentation.search_text_cache.clear();
-        self.modal.command_palette_text_cache.clear();
-        self.modal.dojo_prompt_text_cache.clear();
-        self.modal.tab_context_menu_text_cache.clear();
-        self.tab_state.tab_label_cache.clear();
-        self.tab_state.tab_close_text = None;
-        self.tab_state.remote_host_text = None;
-        self.tab_state.remote_host_clipped = None;
-        self.tab_state.tab_new_text = None;
-        self.modal.session_picker_layout = None;
-        self.presentation.explorer_layout = None;
-        self.modal.command_palette_layout = None;
-        self.modal.dojo_prompt_layout = None;
-        self.modal.tab_context_menu_layout = None;
+        self.invalidate_chrome_text();
         self.surface.buffers.clear();
         self.surface.backing.clear();
         self.presentation.full_redraw = true;
@@ -9579,11 +9634,14 @@ impl App {
         self.surface
             .background_effect_state
             .set_background_alpha(theme.background_alpha);
-        let impact = classify_theme_update(self.presentation.theme, theme);
+        let mut impact = classify_theme_update(self.presentation.theme, theme);
         self.presentation
             .render_context
             .set_background_alpha(theme.background_alpha);
         self.presentation.theme = theme;
+        // A changed Omarchy text size redraws chrome at its new size; the
+        // terminal follows it, when it does, through the font path.
+        impact.redraw_chrome = self.reconcile_chrome_font_size();
         if impact.relayout_tab_strip {
             self.relayout_tab_strip();
         }
@@ -9801,7 +9859,7 @@ impl App {
                 rebuild_all_inactive |= impact.rebuild_pixels;
                 effect_desired_changed |= impact.reconcile_effect;
                 strip_relayout |= impact.relayout_tab_strip;
-                visual_changed |= impact.relayout_tab_strip;
+                visual_changed |= impact.relayout_tab_strip | impact.redraw_chrome;
             }
         }
         for update in pending {
@@ -10174,7 +10232,7 @@ impl App {
                         rebuild_all_inactive |= impact.rebuild_pixels;
                         effect_desired_changed |= impact.reconcile_effect;
                         strip_relayout |= impact.relayout_tab_strip;
-                        visual_changed |= impact.relayout_tab_strip;
+                        visual_changed |= impact.relayout_tab_strip | impact.redraw_chrome;
                     }
                 }
                 WindowUpdate::Font(update) => {
@@ -12376,6 +12434,7 @@ mod tests {
                 rebuild_pixels: false,
                 reconcile_effect: false,
                 relayout_tab_strip: true,
+                redraw_chrome: false,
             }
         );
         // A palette change alongside it still rebuilds pixels.
@@ -12664,6 +12723,7 @@ mod tests {
                 rebuild_pixels: false,
                 reconcile_effect: true,
                 relayout_tab_strip: false,
+                redraw_chrome: false,
             }
         );
         let mut schedule = BackgroundEffectReconcileSchedule::default();
@@ -12678,6 +12738,7 @@ mod tests {
                 rebuild_pixels: true,
                 reconcile_effect: true,
                 relayout_tab_strip: false,
+                redraw_chrome: false,
             }
         );
 
@@ -12689,6 +12750,7 @@ mod tests {
                 rebuild_pixels: true,
                 reconcile_effect: false,
                 relayout_tab_strip: false,
+                redraw_chrome: false,
             }
         );
         assert_eq!(
@@ -12710,6 +12772,7 @@ mod tests {
                     rebuild_pixels: true,
                     reconcile_effect: false,
                     relayout_tab_strip: false,
+                    redraw_chrome: false,
                 }
             );
         }
@@ -12827,6 +12890,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Chrome text takes `[main] ui-font-pixelsize`, otherwise Omarchy's
+    /// text size, otherwise 14 px, whatever the terminal follows; a chrome
+    /// size change alone never rebuilds pane pixels.
+    #[test]
+    fn chrome_font_size_follows_the_ui_key_then_omarchy_never_the_terminal() {
+        let current = ResolvedTheme::default();
+        assert_eq!(chrome_font_size(None, current), FontSize::Pixels(14.0));
+        let mut omarchy = current;
+        omarchy.shell.ui_text_size_px = Some(16);
+        // An explicit terminal font size clears only the terminal's size.
+        omarchy.shell.text_size_px = None;
+        assert_eq!(chrome_font_size(None, omarchy), FontSize::Pixels(16.0));
+        assert_eq!(followed_font_size(omarchy), None);
+        let key = Some(FontSize::Pixels(11.0));
+        assert_eq!(chrome_font_size(key, omarchy), FontSize::Pixels(11.0));
+        assert_eq!(chrome_font_size(key, current), FontSize::Pixels(11.0));
+        assert_eq!(
+            classify_theme_update(current, omarchy),
+            ThemeUpdateImpact::default()
+        );
+        // The context the Window starts with draws chrome at that size, and
+        // a live change replaces only the chrome size.
+        let mut context = RenderContext::new(u16::MAX)
+            .with_font_size_override(followed_font_size(omarchy))
+            .with_chrome_font_size(chrome_font_size(None, omarchy));
+        let terminal = context.effective_font_resolution(120).unwrap();
+        omarchy.shell.ui_text_size_px = Some(18);
+        assert!(context.replace_chrome_font_size(chrome_font_size(None, omarchy)));
+        assert!(!context.replace_chrome_font_size(chrome_font_size(None, omarchy)));
+        assert_eq!(context.effective_font_resolution(120).unwrap(), terminal);
     }
 
     #[test]

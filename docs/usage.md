@@ -307,7 +307,7 @@ The built-in application controls are:
 | Accept / deny transfer | `Ctrl+Shift+Y` / `Ctrl+Shift+N` |
 | Open forced-takeover confirmation | `Ctrl+Shift+U` |
 | Revoke active access | `Ctrl+Shift+R` |
-| Zoom in / out / reset | `Ctrl++` / `Ctrl+-` / `Ctrl+0` |
+| Zoom terminal text in / out / reset (tabs, menus and other chrome keep their size; see [Chrome text size](configuration.md#chrome-text-size)) | `Ctrl++` / `Ctrl+-` / `Ctrl+0` |
 
 Application-owned chords are consumed rather than forwarded to the PTY. In a
 legacy direct single-Splint attachment, `Ctrl+Shift+W` remains terminal input;

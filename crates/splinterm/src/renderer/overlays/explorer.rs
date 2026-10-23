@@ -1026,6 +1026,8 @@ mod tests {
 
     /// VM case E6: at maximum zoom every Explorer line still holds a whole
     /// chrome glyph, and a long label is ellipsized to the panel width.
+    /// Chrome no longer follows zoom, so the largest UI text size now
+    /// stands in for it.
     #[test]
     fn maximum_zoom_text_fits_every_explorer_line_and_ellipsizes_long_labels() {
         use super::super::super::{ChromeText, text::chrome_maximum_cell_height};
@@ -1049,7 +1051,9 @@ mod tests {
         )
         .unwrap();
         for scale in [120, 150, 180, 240] {
-            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+            let context = RenderContext::new(u16::MAX)
+                .at_maximum_zoom(scale)
+                .at_maximum_chrome_font_size();
             let text = ChromeText::load_source_styled_with_context(
                 &row_label_source(&rows[0], true),
                 scale,

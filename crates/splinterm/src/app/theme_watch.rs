@@ -26,9 +26,15 @@ type ThemeFileFingerprint = (u64, u64, u64, (i64, i64), (i64, i64));
 pub(in crate::app) struct ThemeOverrides {
     pub(in crate::app) alpha: Option<u16>,
     pub(in crate::app) blur: Option<bool>,
-    /// Whether the Omarchy text size applies: only while `config.ini` sets no
-    /// font size.
+    /// Whether the Omarchy text size applies to the terminal: only while
+    /// `config.ini` sets no font size.
     pub(in crate::app) follow_text_size: bool,
+    /// Whether chrome text follows the Omarchy text size: only while
+    /// `config.ini` sets no `[main] ui-font-pixelsize`. It decides only
+    /// whether `base-size` problems are reported. The chrome size itself
+    /// (`ui_text_size_px`) is always published, so a Window whose
+    /// configuration reload drops the key can fall back to it live.
+    pub(in crate::app) follow_ui_text_size: bool,
 }
 
 impl ThemeOverrides {
@@ -37,7 +43,21 @@ impl ThemeOverrides {
             alpha: config.background_alpha,
             blur: config.background_blur,
             follow_text_size: config.follows_omarchy_text_size(),
+            follow_ui_text_size: config.ui_font_size.is_none(),
         }
+    }
+
+    /// Whether any text follows `base-size`, so its problems are reported.
+    const fn reports_text_size(self) -> bool {
+        self.follow_text_size || self.follow_ui_text_size
+    }
+
+    /// The text size an unparseable live `base-size` keeps: the one in use,
+    /// by the terminal or, while it follows none, by chrome.
+    fn text_size_fallback(current: &ResolvedTheme) -> OmarchyTextSizeFallback {
+        OmarchyTextSizeFallback::Current(
+            current.shell.text_size_px.or(current.shell.ui_text_size_px),
+        )
     }
 
     fn apply(self, mut theme: ResolvedTheme) -> ResolvedTheme {
@@ -270,11 +290,11 @@ fn absent_startup_observation(source: &ThemeSource) -> Option<ThemeSourceFingerp
 /// follows it. A JSON palette also takes the text size but keeps Omarchy's
 /// opaque panel defaults. Diagnostics for a setting Splinterm ignores are
 /// dropped: alpha for a JSON palette, and the text size while `config.ini`
-/// sets a font size.
+/// sets both a font size and a UI font size (`report_text_size` false).
 fn with_omarchy_shell(
     mut theme: ResolvedTheme,
     layers: ShellLayers<'_>,
-    follow_text_size: bool,
+    report_text_size: bool,
     fallback: OmarchyTextSizeFallback,
     diagnostics: &mut Vec<String>,
 ) -> ResolvedTheme {
@@ -285,7 +305,7 @@ fn with_omarchy_shell(
             .filter(|(concern, _)| match concern {
                 OmarchyShellConcern::Read | OmarchyShellConcern::BarSize => true,
                 OmarchyShellConcern::PanelAlpha => layers.panels,
-                OmarchyShellConcern::TextSize => follow_text_size,
+                OmarchyShellConcern::TextSize => report_text_size,
             })
             .map(|(_, diagnostic)| diagnostic),
     );
@@ -294,6 +314,7 @@ fn with_omarchy_shell(
     } else {
         OmarchyShellSettings {
             text_size_px: load.settings.text_size_px,
+            ui_text_size_px: load.settings.ui_text_size_px,
             text_size_held: load.settings.text_size_held,
             bar_size_px: load.settings.bar_size_px,
             ..OmarchyShellSettings::default()
@@ -348,7 +369,7 @@ fn prepare_startup_theme_with_loader(
         Some(layers) => with_omarchy_shell(
             theme,
             layers,
-            overrides.follow_text_size,
+            overrides.reports_text_size(),
             OmarchyTextSizeFallback::OmarchyDefault,
             &mut shell_diagnostics,
         ),
@@ -448,8 +469,8 @@ fn resolve_live_theme_update(
         Some(layers) => with_omarchy_shell(
             palette,
             layers,
-            overrides.follow_text_size,
-            OmarchyTextSizeFallback::Current(current.shell.text_size_px),
+            overrides.reports_text_size(),
+            ThemeOverrides::text_size_fallback(&current),
             shell_diagnostics,
         ),
         None => palette,
@@ -602,6 +623,7 @@ mod tests {
         alpha: None,
         blur: None,
         follow_text_size: true,
+        follow_ui_text_size: true,
     };
 
     #[tokio::test(start_paused = true)]
@@ -902,6 +924,7 @@ mod tests {
                 alpha: alpha_override,
                 blur: blur_override,
                 follow_text_size: true,
+                follow_ui_text_size: true,
             },
             current,
             &mut Vec::new(),
@@ -1307,11 +1330,12 @@ mod tests {
             theme_path: Some(path.clone()),
             background_alpha: Some(1234),
             background_blur: Some(true),
-            // An explicit size and a JSON palette ignore every shell.toml
-            // setting except the bar size, which a stock or absent Omarchy
-            // install on this host always sets validly, so its files add no
-            // output.
+            // Explicit terminal and UI sizes and a JSON palette ignore every
+            // shell.toml setting except the bar size, which a stock or absent
+            // Omarchy install on this host always sets validly, so its files
+            // add no output.
             font_size_authority: splinterm::config::FontAuthority::Explicit,
+            ui_font_size: Some(splinterm::geometry::FontSize::Pixels(14.0)),
             ..AppConfig::default()
         };
         for _launch_path in ["single-pane", "multi-pane"] {
@@ -1526,9 +1550,12 @@ mod tests {
             alpha: None,
             blur: None,
             follow_text_size: false,
+            follow_ui_text_size: true,
         }
         .apply(resolved);
         assert_eq!(applied.shell.text_size_px, None);
+        // Chrome text still follows base-size.
+        assert_eq!(applied.shell.ui_text_size_px, Some(16));
         assert_eq!(applied.shell.bar_size_px, 35);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         std::fs::remove_dir_all(root).unwrap();
@@ -1624,8 +1651,11 @@ mod tests {
                 .config,
         );
         assert!(!explicit.follow_text_size);
+        assert!(explicit.follow_ui_text_size);
         let startup = prepare_startup_theme(&source, explicit).theme;
         assert_eq!(startup.shell.text_size_px, None);
+        // Chrome text follows base-size whatever the terminal font size.
+        assert_eq!(startup.shell.ui_text_size_px, Some(16));
         assert_eq!(
             prepare_startup_theme(&source, NO_OVERRIDES)
                 .theme
@@ -1634,7 +1664,8 @@ mod tests {
             Some(16)
         );
         // The Omarchy bar still grows with base-size, so a base-size edit
-        // publishes only the new bar height, never the text size.
+        // publishes the new bar height and chrome size, never the terminal's
+        // text size.
         assert_eq!(startup.shell.bar_size_px, 35);
         std::fs::write(&user, "[font]\nbase-size = 18\n").unwrap();
         let mut selection = OmarchyThemeSelection::default();
@@ -1644,9 +1675,11 @@ mod tests {
                 .unwrap()
                 .expect("the bar follows base-size");
         assert_eq!(next.shell.text_size_px, None);
+        assert_eq!(next.shell.ui_text_size_px, Some(18));
         assert_eq!(next.shell.bar_size_px, 39);
-        // With the bar's scale-with-font off, a base-size edit publishes
-        // nothing while config.ini owns the size.
+        // With the bar's scale-with-font off, a base-size edit still
+        // publishes the chrome size, and only that, while config.ini owns
+        // the terminal size.
         std::fs::write(
             &user,
             "[bar]\nscale-with-font = off\n[font]\nbase-size = 18\n",
@@ -1660,12 +1693,29 @@ mod tests {
         )
         .unwrap();
         let active = active_theme_source(&source, &mut selection);
-        assert!(
+        let next =
             resolve_live_theme_update(active, &mut selection, explicit, unscaled, &mut Vec::new())
                 .unwrap()
-                .is_none(),
-            "a base-size edit publishes nothing while config.ini owns the size"
+                .expect("chrome follows base-size");
+        assert_eq!(
+            next.shell,
+            OmarchyShellSettings {
+                ui_text_size_px: Some(20),
+                ..unscaled.shell
+            }
         );
+        // An unparseable edit keeps the chrome size in use.
+        std::fs::write(
+            &user,
+            "[bar]\nscale-with-font = off\n[font]\nbase-size = big\n",
+        )
+        .unwrap();
+        let active = active_theme_source(&source, &mut selection);
+        let mut reported = Vec::new();
+        let held = resolve_live_theme_update(active, &mut selection, explicit, next, &mut reported)
+            .unwrap();
+        assert!(held.is_none(), "{held:?}");
+        assert_eq!(reported.len(), 1, "chrome follows, so it is reported");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1694,6 +1744,7 @@ mod tests {
             startup.shell,
             OmarchyShellSettings {
                 text_size_px: Some(12),
+                ui_text_size_px: Some(12),
                 ..OmarchyShellSettings::default()
             }
         );
@@ -1775,8 +1826,13 @@ mod tests {
         )
         .unwrap();
         let roots = OmarchyThemeRoots::fixed(theme).with_user_shell(user);
+        let explicit_font = ThemeOverrides {
+            follow_text_size: false,
+            ..NO_OVERRIDES
+        };
         let explicit = ThemeOverrides {
             follow_text_size: false,
+            follow_ui_text_size: false,
             ..NO_OVERRIDES
         };
         let omarchy = ThemeSource::Omarchy(roots.clone());
@@ -1788,11 +1844,16 @@ mod tests {
         for (source, overrides, expected) in [
             // All three settings are followed and all are reported.
             (&omarchy, NO_OVERRIDES, 3),
-            // An explicit font size ignores the text size.
+            // An explicit terminal font size alone: chrome still follows
+            // the text size, so it is still reported.
+            (&omarchy, explicit_font, 3),
+            // Explicit terminal and UI font sizes ignore the text size.
             (&omarchy, explicit, 2),
             // A JSON palette ignores panel alpha.
             (&json_source, NO_OVERRIDES, 2),
-            // A JSON palette with an explicit size ignores both, but not the bar.
+            (&json_source, explicit_font, 2),
+            // A JSON palette with both sizes explicit ignores both, but not
+            // the bar.
             (&json_source, explicit, 1),
         ] {
             let loaded = prepare_startup_theme(source, overrides);
