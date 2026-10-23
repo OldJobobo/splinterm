@@ -130,9 +130,10 @@
 //!
 //! A transient condition (a single failed systemd call, a failed task, a
 //! runtime that could not be built) can succeed on the second attempt. A
-//! deterministic one cannot. The Plan 0061 M3.17 proofs and VM acceptance
-//! must cover these rows before live handoff is enabled
-//! (`WINDOW_CONTINUITY_READY` in the binary's `handoff_requests`).
+//! deterministic one cannot. The Plan 0061 M3.17 proofs and the VM
+//! acceptance sequence are what cover these rows. Live handoff is enabled
+//! for 0.2.0 (`WINDOW_CONTINUITY_READY` in the binary's
+//! `handoff_requests`).
 //!
 //! # Compatibility of what the rollback generation trusts
 //!

@@ -154,7 +154,7 @@ concurrent relaunch cannot silently retarget the operation.
 | `close SPLINT_ID` | Remove an exited leaf and collapse its parent branch. |
 | `close-dojo DOJO_ID` | Remove a Dojo only when all its Splints have exited. |
 | `reset` | Stop the daemon, move all session state to a backup, and restart cleanly. |
-| `upgrade [--now]` | Report whether a live daemon upgrade could run, or start one with `--now`. Live upgrade is not enabled in this release; see [Daemon upgrade](#daemon-upgrade). |
+| `upgrade [--now]` | Report whether a live daemon upgrade could run, or start one with `--now`; see [Daemon upgrade](#daemon-upgrade). |
 
 Human `kill` and `reset` prompt unless `--yes` is supplied. Human `close` and
 `close-dojo` remove only already-exited topology and do not add another
@@ -174,12 +174,17 @@ splinterm upgrade --now   # start a live upgrade
 ```
 
 A live upgrade hands every running terminal from the running `splinterd` to the
-installed build without stopping them. **It is not enabled in this release:**
-`splinterm upgrade` reports it as unavailable, and `--now` is refused with the
-same explanation. Nix installations are refused for all of Splinterm 0.2.0.
-Until live upgrade is available, restarting the daemon is the upgrade path. Run
-these commands from a terminal Splinterm does not own (a text console or another
-terminal emulator), because stopping the daemon ends every running terminal:
+installed build without stopping them. It needs an installed package build
+(Arch or AUR) on both sides: the running daemon and the newly installed one.
+Nix installations are refused for all of Splinterm 0.2.0, and so is a running
+daemon built before live upgrade was enabled: that daemon must restart once into
+a build that has it. A 0.1.x daemon cannot answer the command at all; see
+[Bootstrap boundary from 0.1.x](packaging.md#bootstrap-boundary-from-01x).
+
+Whenever `splinterm upgrade` reports live upgrade as unavailable, restarting the
+daemon is the upgrade path. Run these commands from a terminal Splinterm does
+not own (a text console or another terminal emulator), because stopping the
+daemon ends every running terminal:
 
 ```bash
 systemctl --user stop splinterd.service

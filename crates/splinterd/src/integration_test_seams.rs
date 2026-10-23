@@ -29,8 +29,8 @@
 //!   daemon (or, for the rollback-of-a-rollback case, the rollback daemon).
 //! * **An old-side drill.** The old generation's full runtime stop and exec
 //!   boundary (`stop_runtime_and_cross` in the binary) is reachable only
-//!   through a trusted-UI `Execute`, which no test build can pass: live
-//!   handoff is unsupported and the build is unpackaged. With
+//!   through a trusted-UI `Execute`, which no test build can pass: the
+//!   build is unpackaged. With
 //!   [`OLD_SIDE_DRILL_ENV`] set, a real daemon process runs `Execute` with
 //!   support and reasons forced and a test preparation that holds no forward
 //!   daemon, so the boundary is crossed but never armed, and it sends itself

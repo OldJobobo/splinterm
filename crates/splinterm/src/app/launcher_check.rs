@@ -1224,13 +1224,21 @@ mod tests {
             "Restart now (ends 4 shells)"
         );
 
+        // A running daemon from before live upgrade was enabled reports
+        // `Unsupported`, and the question says its build is the reason.
         let blocked = asked(&report(OLDER, 1, vec![HandoffBlockingReason::Unsupported]));
         assert_eq!(
             blocked.live_upgrade,
             LiveUpgrade::Blocked(vec![
-                "Live upgrade is not available in this build yet.".to_owned()
+                "The running daemon's build does not support live upgrade.".to_owned()
             ])
         );
+        let text = natural_rows_of(&dialog_lines(&blocked)).join(" ");
+        assert!(
+            text.contains("Live upgrade is not available now:"),
+            "{text}"
+        );
+        assert!(!text.contains("then run `splinterm upgrade`"), "{text}");
         assert_eq!(confirm_label(blocked.shells), "Restart now (ends 1 shell)");
     }
 

@@ -21,20 +21,20 @@
 //! 5. when exec does not happen, restore close-on-exec, release the guard,
 //!    and restore the signal mask.
 //!
-//! # Staging: the exec ships, live handoff stays unavailable
+//! # Enablement: the exec ships, and live handoff is enabled
 //!
 //! Since Plan 0061 M3.11b, step 4 is compiled into every build, production
 //! included. The forward candidate adopts and serves in every build, and a
 //! candidate that fails before its commit rolls back through
 //! [`crate::handoff_rollback`] (M3.11a). One function in the binary,
 //! `handoff_requests::live_handoff_support`, decides whether a running
-//! daemon ever reaches the boundary. It refuses every build until window
-//! continuity lands (its `WINDOW_CONTINUITY_READY` flag, Plan 0061 M3.12 to
-//! M3.16; only the test-only `vm-acceptance-live-handoff` build, which
-//! packaging refuses, treats it as ready), and it refuses a Nix-store build
-//! for all of 0.2.0 (operator
-//! decision 2026-10-18). The dry-run report and `Execute` both use it, so
-//! `Execute` is refused before the handoff gate. The binary arms this call
+//! daemon ever reaches the boundary. Window continuity (Plan 0061 M3.12 to
+//! M3.16) has landed, and live handoff is enabled for 0.2.0 (its
+//! `WINDOW_CONTINUITY_READY` flag is `true`, operator decision 2026-10-22),
+//! so the function refuses only a Nix-store build, for all of 0.2.0
+//! (operator decision 2026-10-18), and a daemon whose build provenance is
+//! unreadable. The dry-run report and `Execute` both use it, so `Execute`
+//! is refused before the handoff gate for those. The binary arms this call
 //! site ([`ExecInheritancePlan::with_forward_daemon`]) only when the
 //! function allows live handoff. This module has no switch of its own: a
 //! plan without a forward daemon returns [`ExecBoundaryError::ExecNotWired`].
@@ -654,11 +654,10 @@ fn under_guard(
     // production builds, but a running daemon reaches it only through a plan
     // the binary armed. The binary arms a plan, and accepts `Execute` at all,
     // only when `handoff_requests::live_handoff_support` allows live
-    // handoff. That function refuses Nix-store builds for 0.2.0, and every
-    // build while `WINDOW_CONTINUITY_READY` is false, except the test-only
-    // VM acceptance build that packaging refuses. Flipping that flag is
-    // the production enablement step, gated by the M3.17 proofs and VM
-    // acceptance (see the module documentation, "Staging").
+    // handoff. That function refuses Nix-store builds for 0.2.0 and an
+    // unreadable build provenance. Setting its `WINDOW_CONTINUITY_READY`
+    // flag to `true` was the production enablement step (see the module
+    // documentation, "Enablement").
     let failure = match stage(&mut hook, ExecBoundaryStage::Exec) {
         Err(failure) => failure,
         Ok(()) => exec_forward_daemon(plan),

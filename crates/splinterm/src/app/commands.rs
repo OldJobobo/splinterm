@@ -380,8 +380,9 @@ pub(in crate::app) enum Command {
     /// Inspect or start a live daemon upgrade that keeps terminals running.
     ///
     /// Without --now, show whether the running daemon could hand its terminals
-    /// to the installed build, and change nothing. Live upgrade is not enabled
-    /// in this release; until it is, restarting the daemon is the upgrade path.
+    /// to the installed build, and change nothing. Where live upgrade is not
+    /// available, as for Nix installations, restarting the daemon is the
+    /// upgrade path.
     ///
     /// Only the installed splinterm beside the running splinterd may ask.
     /// Exit status: 0 report shown or upgraded, 1 error (a restarted daemon
@@ -852,7 +853,7 @@ mod tests {
         let help = upgrade.render_long_help().to_string();
         for expected in [
             "--now",
-            "Live upgrade is not enabled",
+            "as for Nix installations",
             "restarting the daemon",
             "installed splinterm beside the running splinterd",
             "3 cancelled",
@@ -865,5 +866,6 @@ mod tests {
         ] {
             assert!(help.contains(expected), "missing {expected:?} in {help}");
         }
+        assert!(!help.contains("not enabled"), "{help}");
     }
 }

@@ -114,15 +114,12 @@
 //! client: a `splinterm` copy at the private prefix would satisfy
 //! trusted-UI matching, but
 //!
-//! * live handoff is unsupported in every build until window continuity
-//!   lands (the binary's `live_handoff_support`, Plan 0061 M3.11b), so the
-//!   report names `Unsupported` and `Execute` is refused before the gate,
-//!   whatever else holds. No seam overrides that decision, and the only
-//!   feature that does (`vm-acceptance-live-handoff`) is test-only and
-//!   refused by packaging;
 //! * plain `cargo test` builds are unpackaged (zero source commit), so the
-//!   report names `NotPackaged` too; a package's `check()` builds them with
-//!   its provenance, where the D8 refusal names `RollbackUnavailable`;
+//!   report names `NotPackaged` and `Execute` is refused before the gate,
+//!   although live handoff itself is enabled (the binary's
+//!   `live_handoff_support`, Plan 0061 M3.11b). A package's `check()` builds
+//!   them with its provenance, where the D8 refusal names
+//!   `RollbackUnavailable`. No seam overrides either refusal;
 //! * the running daemon retains rollback authority, and finds the forward
 //!   pair's package record, only beside `/usr/bin` or a `/nix/store` output
 //!   (`package_provenance_path`), never at a private prefix, and a package
@@ -3658,7 +3655,8 @@ fn killed_hung_candidate_case() {
 /// daemon. During the runtime stop the drill sends the process a SIGTERM,
 /// after serve stopped listening for one. The old side waits for one
 /// thread, captures the termination its handler took, makes it pending
-/// again under the block, and crosses the boundary, which is not armed
+/// again under the block, and crosses the boundary. Live handoff is
+/// supported, but with no forward daemon to arm the boundary is not armed
 /// (`ExecNotWired`); the resumed round then receives the termination and
 /// shuts down in order, exactly once.
 fn old_side_signal_carry_case() {
@@ -3723,9 +3721,12 @@ fn old_side_signal_carry_case() {
         carried.contains("terminate=true") && carried.contains("interrupt=false"),
         "{carried:?}\n{logs}"
     );
+    // Live handoff is enabled, so the binary's support check allows arming;
+    // the exec stays unarmed only because the drill's preparation holds no
+    // forward daemon.
     assert!(
-        logs.contains("live handoff is unsupported; the forward exec is not armed"),
-        "{logs}"
+        !logs.contains("live handoff is unsupported"),
+        "live handoff is supported for this build: {logs}"
     );
     let resumed = log_line(
         &logs,
