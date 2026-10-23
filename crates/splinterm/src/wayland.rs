@@ -138,7 +138,7 @@ use crate::frontend::{
     TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi, TrustedDialogKey,
     TrustedInput, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
     WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, close_other_tabs_command,
-    dialog_text_rows, lair_lifecycle_command, minimum_dialog_rows, tab_menu_right_press,
+    lair_lifecycle_command, tab_menu_right_press,
 };
 use crate::geometry::{
     FontSize, OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -653,9 +653,9 @@ struct PreparedWindow {
     snapshot_frame: Option<SnapshotFrame>,
     initial_width: u32,
     initial_height: u32,
-    /// The smallest logical size a trusted dialog asks the compositor for
-    /// ([`trusted_dialog_minimum_size`]).
-    minimum_size: Option<(u32, u32)>,
+    /// The one logical size a trusted dialog asks the compositor for, as
+    /// both its minimum and maximum: its natural size, the initial size.
+    fixed_size: Option<(u32, u32)>,
 }
 
 /// The part of [`run`] before the compositor: input activation, snapshot
@@ -700,15 +700,15 @@ fn prepare_window(options: &mut WindowOptions) -> Result<PreparedWindow> {
             .checked_add(tab_strip_logical_height(options.theme))
             .context("initial tab strip height overflow")?;
     }
-    let minimum_size = options
+    // Tiling compositors (Hyprland, sway) float a Window whose minimum and
+    // maximum sizes are equal, so a trusted dialog asks for exactly the
+    // size its text was laid out for. Its snapshot is that natural layout
+    // (`TrustedConsentUi::into_window_options`).
+    let fixed_size = options
         .trusted_consent
         .as_ref()
         .and(options.snapshot.as_ref())
-        .zip(snapshot_frame.as_ref())
-        .map(|(snapshot, frame)| {
-            trusted_dialog_minimum_size(snapshot, frame, (initial_width, initial_height))
-        })
-        .transpose()?;
+        .map(|_| (initial_width, initial_height));
     Ok(PreparedWindow {
         render_context,
         inactive_options,
@@ -716,28 +716,8 @@ fn prepare_window(options: &mut WindowOptions) -> Result<PreparedWindow> {
         snapshot_frame,
         initial_width,
         initial_height,
-        minimum_size,
+        fixed_size,
     })
-}
-
-/// The smallest logical size a trusted dialog showing `snapshot` asks the
-/// compositor for: its full width, and enough rows for its text above the
-/// shortest action areas (`frontend::trusted_dialog::action_area_top`),
-/// never more than its `initial` size. A compositor that honours it, such as
-/// Hyprland for a floating Window, keeps every line in view; in a smaller
-/// tiled Window the action areas still never cover text that fits.
-fn trusted_dialog_minimum_size(
-    snapshot: &TerminalSnapshot,
-    frame: &SnapshotFrame,
-    initial: (u32, u32),
-) -> Result<(u32, u32)> {
-    let rows = minimum_dialog_rows(dialog_text_rows(&snapshot.visible_rows));
-    let (width, height) = frame.initial_logical_size(
-        u16::try_from(snapshot.columns.max(1)).unwrap_or(u16::MAX),
-        u16::try_from(rows).unwrap_or(u16::MAX),
-        SCALE_DENOMINATOR,
-    )?;
-    Ok((width.min(initial.0), height.min(initial.1)))
 }
 
 /// Runs every check [`run`] makes on `options` that needs no compositor:
@@ -788,7 +768,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         snapshot_frame,
         initial_width,
         initial_height,
-        minimum_size,
+        fixed_size,
     } = prepare_window(&mut options)?;
     let connection = Connection::connect_to_env().context("connect to Wayland compositor")?;
     let (globals, event_queue) =
@@ -849,8 +829,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let trusted_consent = options.trusted_consent;
     let session_picker = options.session_picker;
     window.set_app_id(window_app_id(trusted_consent.is_some(), &options.app_id).to_owned());
-    if minimum_size.is_some() {
-        window.set_min_size(minimum_size);
+    if fixed_size.is_some() {
+        window.set_min_size(fixed_size);
+        window.set_max_size(fixed_size);
     }
     window
         .set_buffer_scale(1)
@@ -1090,6 +1071,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         },
         modal: ModalState {
             trusted_consent,
+            trusted_layout: chrome::TrustedDialogLayout::new(fixed_size),
             copy_mode: None,
             binding_help: None,
             agent_access: None,
@@ -2185,6 +2167,8 @@ struct PanesState {
 )]
 struct ModalState {
     trusted_consent: Option<TrustedConsentUi>,
+    /// The trusted dialog's fixed size and current layout.
+    trusted_layout: chrome::TrustedDialogLayout,
     copy_mode: Option<CopyModeState>,
     binding_help: Option<BindingHelpUi>,
     /// The **Agent access** list, shown in the open command palette.
@@ -7201,7 +7185,7 @@ impl App {
         match input {
             Some(TrustedInput::Answer(granted)) => self.decide_consent(granted),
             Some(TrustedInput::Redraw) => {
-                let Some(mut snapshot) = self
+                let Some(snapshot) = self
                     .modal
                     .trusted_consent
                     .as_mut()
@@ -7209,19 +7193,10 @@ impl App {
                 else {
                     return;
                 };
-                apply_theme(&mut snapshot, self.presentation.theme);
-                snapshot.revision = self
-                    .panes
-                    .pane
-                    .snapshot
-                    .as_ref()
-                    .map_or(snapshot.revision, |current| {
-                        current.revision.saturating_add(1)
-                    });
-                self.invalidate_local_content_state();
-                self.panes.pane.snapshot = Some(snapshot);
-                self.presentation.full_redraw = true;
-                if let Err(error) = self.schedule_draw(queue_handle) {
+                if let Err(error) = self
+                    .install_trusted_dialog_snapshot(snapshot)
+                    .and_then(|()| self.schedule_draw(queue_handle))
+                {
                     self.scheduling.fail(error);
                 }
             }
@@ -10759,6 +10734,9 @@ impl App {
     )]
     fn draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         self.scheduling.redraw_pending = false;
+        // A trusted dialog's text is laid out for this size before it is
+        // drawn, so drawing and hit testing share one layout.
+        self.relayout_trusted_dialog()?;
         self.reconcile_command_palette_close(queue_handle);
         let terminal_priority = std::mem::take(&mut self.scheduling.terminal_redraw_pending);
         let draw_started = Instant::now();
@@ -11302,7 +11280,13 @@ impl App {
                 );
             }
             if let Some(button_top) = trusted_action_top {
-                paint_trusted_consent_chrome(canvas, width, height, button_top);
+                paint_trusted_consent_chrome(
+                    canvas,
+                    width,
+                    height,
+                    button_top,
+                    self.presentation.theme.background,
+                );
             }
             if full_transient_canvas_content {
                 self.surface.buffers[buffer_index].stale.mark_full();
@@ -14340,42 +14324,39 @@ mod tests {
         assert!(options.controller_title);
     }
 
-    /// A trusted dialog asks for a minimum size that keeps its full width
-    /// and every text row above the shortest action areas; other Windows
+    /// A trusted dialog asks for one fixed size, the same as its minimum
+    /// and maximum, so tiling compositors float it: the natural size its
+    /// text was laid out for, which is also its initial size. Other Windows
     /// ask for none.
     #[test]
-    fn trusted_dialogs_ask_for_a_minimum_size_that_shows_their_text() {
-        let lines = (0..18).map(|line| format!("line {line}")).collect();
-        let snapshot =
-            crate::frontend::synthetic_text_snapshot(SplintId::new(), 1, "Upgrade question", lines);
-        assert_eq!((snapshot.columns, snapshot.rows), (72, 24));
+    fn trusted_dialogs_ask_for_one_fixed_size_their_text_fits() {
+        let lines = (0..18)
+            .map(|line| crate::frontend::DialogLine::new(format!("line {line}")))
+            .collect();
         let (decision, _receiver) = std::sync::mpsc::channel();
-        let mut dialog = WindowOptions {
-            snapshot: Some(snapshot.clone()),
-            trusted_consent: Some(TrustedConsentUi::restart(decision)),
-            initial_columns: 72,
-            initial_rows: 24,
-            ..WindowOptions::default()
-        };
+        let mut dialog = TrustedConsentUi::restart(decision)
+            .with_text(crate::frontend::DialogText {
+                lines,
+                minimum_rows: 18,
+            })
+            .into_window_options();
+        let snapshot = dialog.snapshot.clone().unwrap();
+        // 18 rows of text take at most 72% of 25 rows; the narrowest width.
+        assert_eq!((snapshot.columns, snapshot.rows), (64, 25));
+        assert_eq!((dialog.initial_columns, dialog.initial_rows), (64, 25));
         let prepared = prepare_window(&mut dialog).unwrap();
-        let minimum = prepared.minimum_size.unwrap();
+        let fixed = prepared.fixed_size.unwrap();
         let frame = prepared.snapshot_frame.as_ref().unwrap();
-        assert_eq!(
-            minimum,
-            frame
-                .initial_logical_size(72, u16::try_from(minimum_dialog_rows(18)).unwrap(), 120)
-                .unwrap()
-        );
-        assert_eq!(minimum.0, prepared.initial_width);
-        assert!(minimum.1 < prepared.initial_height);
+        assert_eq!(fixed, frame.initial_logical_size(64, 25, 120).unwrap());
+        assert_eq!(fixed, (prepared.initial_width, prepared.initial_height));
 
         let mut plain = WindowOptions {
             snapshot: Some(snapshot),
-            initial_columns: 72,
-            initial_rows: 24,
+            initial_columns: 64,
+            initial_rows: 25,
             ..WindowOptions::default()
         };
-        assert_eq!(prepare_window(&mut plain).unwrap().minimum_size, None);
+        assert_eq!(prepare_window(&mut plain).unwrap().fixed_size, None);
     }
 
     #[test]
@@ -14394,13 +14375,10 @@ mod tests {
     fn trusted_dialogs_map_with_their_own_titles() {
         let (decision, _receiver) = std::sync::mpsc::channel();
         let (consent_decision, _consent_receiver) = std::sync::mpsc::channel();
-        let (access, _snapshot) = TrustedConsentUi::access_consent(
+        let access = TrustedConsentUi::access_consent(
             consent_decision,
             vec![(splinterm_protocol::GrantDuration::Once, true)],
-            Box::new(|_| crate::frontend::AccessConsentView {
-                snapshot: valid_snapshot(SplintId::new()),
-                duration_rows: vec![(0, 0)],
-            }),
+            Box::new(|_| crate::frontend::DialogText::default()),
         );
         let consent = WindowOptions {
             trusted_consent: Some(access),

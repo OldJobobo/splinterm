@@ -24,20 +24,26 @@ use crate::{
 use super::{
     AuthorityStatus, SessionPickerUi, TrustedDialogKey, TrustedDialogKind, WindowCommand,
     WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    dialog_text::{self, DialogIdentity, DialogText},
     trusted_dialog::{AccessChoice, ConsentAction, Engagement},
 };
 
-/// One rendering of the access consent dialog.
-pub struct AccessConsentView {
-    pub snapshot: TerminalSnapshot,
-    /// Every snapshot row that shows a duration, with that duration's index,
-    /// so a click on any of its rows selects it.
-    pub duration_rows: Vec<(usize, usize)>,
-}
+/// The access consent dialog's text with the duration at this index
+/// selected. Lines that show a duration carry its index
+/// ([`super::DialogLine::with_duration`]), so a click on any of their rows
+/// selects it.
+pub type AccessConsentRenderer = Box<dyn Fn(usize) -> DialogText + Send>;
 
-/// Renders the access consent dialog with the duration at this index
-/// selected.
-pub type AccessConsentRenderer = Box<dyn Fn(usize) -> AccessConsentView + Send>;
+/// Where a trusted dialog's text is laid out: the columns it wraps at, the
+/// grid its snapshot fills, and the most rows of text that fit above the
+/// action areas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DialogFrame {
+    pub(crate) wrap_columns: usize,
+    pub(crate) grid_columns: usize,
+    pub(crate) grid_rows: usize,
+    pub(crate) max_text_rows: usize,
+}
 
 /// What a key press or click did to a trusted dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +62,7 @@ enum TrustedAnswer {
 struct AccessConsentDialog {
     choice: AccessChoice,
     durations: Vec<GrantDuration>,
+    /// The rows of the current layout that show a duration.
     duration_rows: Vec<(usize, usize)>,
     render: AccessConsentRenderer,
 }
@@ -73,6 +80,12 @@ pub struct TrustedConsentUi {
     /// The chord that engages the keyboard as a click inside does, or
     /// `None` when the dialog shortcut is off.
     shortcut: Option<DialogShortcut>,
+    /// The yes/no questions' text; the access consent dialog renders its
+    /// own for each selection.
+    text: Option<DialogText>,
+    identity: DialogIdentity,
+    /// Where the text was last laid out.
+    frame: Option<DialogFrame>,
 }
 
 impl TrustedConsentUi {
@@ -80,28 +93,29 @@ impl TrustedConsentUi {
     /// click inside engages it, then armed after that click, every focus
     /// gain, and every duration change, with the durations the prompt shows
     /// (`true` when offered; the first is "Just this once") and a renderer
-    /// for each selection. Returns the dialog and its first rendering.
+    /// of its text for each selection.
     #[must_use]
     pub fn access_consent(
         decision: StdSender<ConsentDecision>,
         durations: Vec<(GrantDuration, bool)>,
         render: AccessConsentRenderer,
-    ) -> (Self, TerminalSnapshot) {
-        let view = render(0);
+    ) -> Self {
         let (durations, offered) = durations.into_iter().unzip();
-        let dialog = Self {
+        Self {
             answer: TrustedAnswer::Consent(decision),
             kind: TrustedDialogKind::AccessConsent,
             engagement: Engagement::default(),
             access: Some(AccessConsentDialog {
                 choice: AccessChoice::new(offered),
                 durations,
-                duration_rows: view.duration_rows,
+                duration_rows: Vec::new(),
                 render,
             }),
             shortcut: None,
-        };
-        (dialog, view.snapshot)
+            text: None,
+            identity: DialogIdentity::default(),
+            frame: None,
+        }
     }
 
     /// The upgrade question: only `G` or the green area proceeds, after an
@@ -114,6 +128,9 @@ impl TrustedConsentUi {
             engagement: Engagement::default(),
             access: None,
             shortcut: None,
+            text: None,
+            identity: DialogIdentity::default(),
+            frame: None,
         }
     }
 
@@ -127,6 +144,9 @@ impl TrustedConsentUi {
             engagement: Engagement::default(),
             access: None,
             shortcut: None,
+            text: None,
+            identity: DialogIdentity::default(),
+            frame: None,
         }
     }
 
@@ -137,6 +157,101 @@ impl TrustedConsentUi {
     pub fn with_shortcut(mut self, shortcut: Option<DialogShortcut>) -> Self {
         self.shortcut = shortcut;
         self
+    }
+
+    /// The text a yes/no question shows. The access consent dialog renders
+    /// its own and ignores this.
+    #[must_use]
+    pub fn with_text(mut self, text: DialogText) -> Self {
+        self.text = Some(text);
+        self
+    }
+
+    /// The title and Splint identity the dialog's snapshots carry.
+    #[must_use]
+    pub fn with_identity(mut self, identity: DialogIdentity) -> Self {
+        self.identity = identity;
+        self
+    }
+
+    /// The Window that shows this dialog at its natural size
+    /// ([`dialog_text::natural_columns`], [`dialog_text::natural_rows`]):
+    /// the size it asks the compositor for as both its minimum and maximum.
+    #[must_use]
+    pub fn into_window_options(mut self) -> WindowOptions {
+        let snapshot = self.natural_frame().and_then(|frame| self.lay_out(frame));
+        let size = |value: Option<usize>| {
+            value.map_or(0, |value| u16::try_from(value).unwrap_or(u16::MAX))
+        };
+        let initial_columns = size(snapshot.as_ref().map(|snapshot| snapshot.columns));
+        let initial_rows = size(snapshot.as_ref().map(|snapshot| snapshot.rows));
+        let mut options = WindowOptions {
+            snapshot,
+            trusted_consent: Some(self),
+            ..WindowOptions::default()
+        };
+        if initial_columns > 0 && initial_rows > 0 {
+            options.initial_columns = initial_columns;
+            options.initial_rows = initial_rows;
+        }
+        options
+    }
+
+    /// Every rendering of the dialog's text: one per access consent
+    /// selection, or the yes/no question's one. Empty without text.
+    pub(crate) fn variants(&self) -> Vec<DialogText> {
+        match &self.access {
+            Some(access) => (0..access.durations.len().max(1))
+                .map(|index| (access.render)(index))
+                .collect(),
+            None => self.text.iter().cloned().collect(),
+        }
+    }
+
+    fn selected_variant(&self) -> usize {
+        self.access
+            .as_ref()
+            .map_or(0, |access| access.choice.selected())
+    }
+
+    /// The dialog's natural layout: every row, at the size it asks for.
+    pub(crate) fn natural_frame(&self) -> Option<DialogFrame> {
+        let variants = self.variants();
+        if variants.is_empty() {
+            return None;
+        }
+        let columns = dialog_text::natural_columns(&variants);
+        Some(DialogFrame {
+            wrap_columns: columns,
+            grid_columns: columns,
+            grid_rows: dialog_text::natural_rows(&variants),
+            max_text_rows: usize::MAX,
+        })
+    }
+
+    /// Lays the current selection's text out in `frame` and returns its
+    /// snapshot; later redraws keep that frame. `None` without text.
+    pub(crate) fn lay_out(&mut self, frame: DialogFrame) -> Option<TerminalSnapshot> {
+        let variants = self.variants();
+        if variants.is_empty() {
+            return None;
+        }
+        let layout = dialog_text::layout(
+            &variants,
+            self.selected_variant(),
+            frame.wrap_columns,
+            frame.max_text_rows,
+        );
+        if let Some(access) = self.access.as_mut() {
+            access.duration_rows.clone_from(&layout.duration_rows);
+        }
+        self.frame = Some(frame);
+        Some(dialog_text::dialog_snapshot(
+            layout.rows,
+            frame.grid_columns,
+            frame.grid_rows,
+            &self.identity,
+        ))
     }
 
     /// The chord that engages this dialog, if any.
@@ -229,12 +344,12 @@ impl TrustedConsentUi {
         self.consent_input(action, now)
     }
 
-    /// The access consent dialog rendered for its current selection.
+    /// The access consent dialog rendered for its current selection, laid
+    /// out where it was last.
     pub(crate) fn render(&mut self) -> Option<TerminalSnapshot> {
-        let access = self.access.as_mut()?;
-        let view = (access.render)(access.choice.selected());
-        access.duration_rows = view.duration_rows;
-        Some(view.snapshot)
+        self.access.as_ref()?;
+        let frame = self.frame.or_else(|| self.natural_frame())?;
+        self.lay_out(frame)
     }
 
     /// Sends the answer: for the access consent dialog, a grant of the
@@ -432,18 +547,39 @@ impl Default for WindowOptions {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use splinterm_core::SplintId;
-
     use super::*;
-    use crate::frontend::trusted_dialog::UPGRADE_ARMING_DELAY;
+    use crate::frontend::{DialogLine, trusted_dialog::UPGRADE_ARMING_DELAY};
 
-    fn snapshot() -> TerminalSnapshot {
-        crate::frontend::synthetic_text_snapshot(
-            SplintId::new(),
-            1,
-            "prompt",
-            vec!["prompt".into()],
-        )
+    /// Consent text whose fifth line, a duration, wraps onto two rows at
+    /// 40 columns.
+    fn consent_text(selected: usize) -> DialogText {
+        let marker = |index| if index == selected { "(•)" } else { "( )" };
+        DialogText {
+            lines: vec![
+                DialogLine::new("TRUSTED SPLINTERM ACCESS REQUEST"),
+                DialogLine::blank(),
+                DialogLine::new("Program: /usr/bin/splinterm-mcp"),
+                DialogLine::new("How long:"),
+                DialogLine::new(format!("  {} Just this once", marker(0))).with_duration(0),
+                DialogLine::new(format!(
+                    "  {} While 'Workspace' is open: until this workspace is closed",
+                    marker(1)
+                ))
+                .with_indent(6)
+                .with_duration(1),
+                DialogLine::hint("G or the green area grants."),
+            ],
+            minimum_rows: 0,
+        }
+    }
+
+    fn narrow_frame() -> DialogFrame {
+        DialogFrame {
+            wrap_columns: 40,
+            grid_columns: 40,
+            grid_rows: 12,
+            max_text_rows: 12,
+        }
     }
 
     /// The operator rule end to end: a dialog that has focus still ignores
@@ -452,16 +588,21 @@ mod tests {
     #[test]
     fn a_trusted_dialog_answers_only_after_a_click_inside() {
         let (decision, answers) = std::sync::mpsc::channel();
-        let (mut dialog, _) = TrustedConsentUi::access_consent(
+        let mut dialog = TrustedConsentUi::access_consent(
             decision,
             vec![
                 (GrantDuration::Once, true),
                 (GrantDuration::WorkspaceSession, true),
             ],
-            Box::new(|_| AccessConsentView {
-                snapshot: snapshot(),
-                duration_rows: vec![(4, 0), (5, 1), (6, 1)],
-            }),
+            Box::new(consent_text),
+        );
+        // Laid out narrower than it asked for, the "while open" duration
+        // wraps onto rows 5 and 6.
+        let snapshot = dialog.lay_out(narrow_frame()).unwrap();
+        assert_eq!(snapshot.columns, 40);
+        assert_eq!(
+            dialog.access.as_ref().unwrap().duration_rows,
+            [(4, 0), (5, 1), (6, 1)]
         );
         let appeared = Instant::now();
         dialog.note_focus(appeared);
@@ -532,12 +673,8 @@ mod tests {
         TrustedConsentUi::access_consent(
             decision,
             vec![(GrantDuration::Once, true)],
-            Box::new(|_| AccessConsentView {
-                snapshot: snapshot(),
-                duration_rows: vec![(4, 0)],
-            }),
+            Box::new(consent_text),
         )
-        .0
         .with_shortcut(Some(DialogShortcut::default()))
     }
 
@@ -611,5 +748,63 @@ mod tests {
         let (decision, _answers) = std::sync::mpsc::channel();
         assert_eq!(TrustedConsentUi::upgrade(decision).shortcut(), None);
         assert_eq!(consent_dialog().with_shortcut(None).shortcut(), None);
+    }
+
+    /// A dialog's Window asks for its natural size, and a redraw after a
+    /// selection keeps the layout it was given last, so the rows a click
+    /// selects stay where they are drawn.
+    #[test]
+    fn dialogs_open_at_their_natural_size_and_redraw_in_their_last_layout() {
+        let (decision, _answers) = std::sync::mpsc::channel();
+        let dialog = TrustedConsentUi::access_consent(
+            decision,
+            vec![
+                (GrantDuration::Once, true),
+                (GrantDuration::WorkspaceSession, true),
+            ],
+            Box::new(consent_text),
+        );
+        let natural = dialog.natural_frame().unwrap();
+        assert_eq!(natural.grid_columns, 64);
+        assert_eq!(natural.grid_rows, (7 * 100_usize).div_ceil(72));
+        let options = dialog.into_window_options();
+        let snapshot = options.snapshot.as_ref().unwrap();
+        assert_eq!(usize::from(options.initial_columns), snapshot.columns);
+        assert_eq!(usize::from(options.initial_rows), snapshot.rows);
+        assert_eq!((snapshot.columns, snapshot.rows), (64, natural.grid_rows));
+        let mut dialog = options.trusted_consent.unwrap();
+        assert_eq!(
+            dialog.access.as_ref().unwrap().duration_rows,
+            [(4, 0), (5, 1)]
+        );
+        dialog.lay_out(narrow_frame()).unwrap();
+        let now = Instant::now();
+        dialog.engage(now);
+        assert_eq!(dialog.row_input(6, now), Some(TrustedInput::Redraw));
+        let redrawn = dialog.render().unwrap();
+        assert_eq!(redrawn.columns, 40);
+        let row = |index: usize| -> String {
+            redrawn.visible_rows[index]
+                .cells
+                .iter()
+                .map(|cell| cell.content.as_str())
+                .collect()
+        };
+        assert!(row(5).starts_with("  (•) While"), "{}", row(5));
+        assert_eq!(
+            dialog.access.as_ref().unwrap().duration_rows,
+            [(4, 0), (5, 1), (6, 1)]
+        );
+        // The yes/no questions have no layout until they get text.
+        let (decision, _answers) = std::sync::mpsc::channel();
+        assert!(
+            TrustedConsentUi::upgrade(decision.clone())
+                .natural_frame()
+                .is_none()
+        );
+        let options = TrustedConsentUi::upgrade(decision)
+            .with_text(consent_text(0))
+            .into_window_options();
+        assert_eq!(options.initial_columns, 64);
     }
 }

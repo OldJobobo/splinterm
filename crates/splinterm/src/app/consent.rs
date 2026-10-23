@@ -6,15 +6,13 @@ use std::{
 use anyhow::{Context, Result, bail};
 use splinterd::dialog_shortcut::{BackgroundRegistration, DialogShortcut};
 use splinterm::{
-    AccessConsentView, TrustedConsentUi, WindowOptions,
+    DialogIdentity, DialogLine, DialogText, TrustedConsentUi, WindowOptions,
     config::{AppConfig, ResolvedTheme},
     run_window,
 };
 use splinterm_protocol::{
-    AccessLevel, ActiveScreen, CellAttributes, ColorSource, ConsentDecision, ConsentPrompt,
-    ConsentReplacement, ConsentReply, ConsentTarget, GrantDuration, MAX_CONSENT_FRAME_BYTES,
-    MAX_CONSENT_PATH_CHARS, TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot,
-    UnderlineStyle, shared_identity_line,
+    AccessLevel, ConsentDecision, ConsentPrompt, ConsentReplacement, ConsentReply, ConsentTarget,
+    GrantDuration, MAX_CONSENT_FRAME_BYTES, MAX_CONSENT_PATH_CHARS, shared_identity_line,
 };
 
 /// Reads one length-prefixed JSON frame of at most `maximum` bytes from a
@@ -88,7 +86,8 @@ pub(in crate::app) fn trusted_label(value: &str, maximum: usize) -> String {
 const DISPLAY_NAME_CHARS: usize = 60;
 
 /// The widest line the prompt draws, in characters. Longer text wraps onto
-/// indented lines, so nothing the person must read is ever cut off.
+/// indented lines, so nothing the person must read is ever cut off; a
+/// narrower Window wraps it narrower still.
 const PROMPT_LINE_CHARS: usize = 100;
 
 /// `value` as one line of display text: unsafe characters replaced, runs of
@@ -109,54 +108,13 @@ fn display_name(value: &str, maximum: usize) -> String {
     cut
 }
 
-/// Wraps `text` into lines of at most [`PROMPT_LINE_CHARS`] characters,
-/// breaking at spaces where it can and inside a word (a path) where it must.
-/// Every line after the first starts with `indent`.
-fn wrap(text: &str, indent: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let body = text.trim_start_matches(' ');
-    // A leading indent is kept as given.
-    let mut line_chars = text.len() - body.len();
-    let mut line = " ".repeat(line_chars);
-    for word in body.split(' ') {
-        let mut word: Vec<char> = word.chars().collect();
-        loop {
-            let separator = usize::from(line_chars > 0 && !line.ends_with(' '));
-            if line_chars + separator + word.len() <= PROMPT_LINE_CHARS {
-                if separator == 1 {
-                    line.push(' ');
-                }
-                line.extend(word.iter());
-                line_chars += separator + word.len();
-                break;
-            }
-            let indent_only = line.trim().is_empty();
-            if !indent_only {
-                // The word starts a new line.
-                lines.push(std::mem::take(&mut line));
-                line.push_str(indent);
-                line_chars = indent.chars().count();
-                continue;
-            }
-            // A word too long for any line is split.
-            let room = PROMPT_LINE_CHARS.saturating_sub(line_chars).max(1);
-            line.extend(word.drain(..room));
-            lines.push(std::mem::take(&mut line));
-            line.push_str(indent);
-            line_chars = indent.chars().count();
-        }
-    }
-    if !line.trim().is_empty() || lines.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-/// `lines` padded with blank lines to `count`, so every selection keeps
-/// the same rows.
-fn padded(mut lines: Vec<String>, count: usize) -> Vec<String> {
-    lines.resize(count.max(lines.len()), String::new());
-    lines
+/// One line of the prompt, wrapped at [`PROMPT_LINE_CHARS`] at most; every
+/// wrapped row after the first is indented by `indent` columns. The Window
+/// wraps it at spaces, and inside a word (a path) only where it must.
+fn prompt_line(text: impl Into<String>, indent: usize) -> DialogLine {
+    DialogLine::new(text)
+        .with_indent(indent)
+        .with_wrap_at(PROMPT_LINE_CHARS)
 }
 
 fn consent_target_line(target: &ConsentTarget) -> String {
@@ -232,24 +190,17 @@ fn replacement_line(
     )
 }
 
-/// Wraps the scope labels into lines of at most [`PROMPT_LINE_CHARS`].
-fn scope_lines(prompt: &ConsentPrompt) -> Vec<String> {
+/// The scope labels, wrapped under their heading.
+fn scope_line(prompt: &ConsentPrompt) -> DialogLine {
     let labels: Vec<_> = prompt.scopes.iter().map(|scope| scope.label()).collect();
-    wrap(&format!("Scopes: {}", labels.join(", ")), "        ")
-}
-
-/// One rendering of the access prompt's text.
-struct ConsentLayout {
-    lines: Vec<String>,
-    /// Each line that shows a duration, with that duration's index.
-    duration_rows: Vec<(usize, usize)>,
+    prompt_line(format!("Scopes: {}", labels.join(", ")), 8)
 }
 
 /// The lines one chosen duration adds below the duration list.
 struct ChosenLines {
-    shared: Vec<String>,
-    replaced: Vec<String>,
-    grant: Vec<String>,
+    shared: Option<DialogLine>,
+    replaced: Option<DialogLine>,
+    grant: DialogLine,
 }
 
 /// The lines a chosen duration adds below the list: who shares it, what it
@@ -259,22 +210,17 @@ fn chosen_lines(prompt: &ConsentPrompt, selected: usize, workspace: &str) -> Cho
     let shared = chosen
         .and_then(|offer| offer.shared_by.as_deref())
         .map(|path| {
-            wrap(
-                &shared_identity_line(&trusted_label(path, MAX_CONSENT_PATH_CHARS)),
-                "    ",
+            prompt_line(
+                shared_identity_line(&trusted_label(path, MAX_CONSENT_PATH_CHARS)),
+                4,
             )
-        })
-        .unwrap_or_default();
-    let replaced = chosen
-        .and_then(|offer| {
-            offer.replaces.as_ref().map(|replaced| {
-                wrap(
-                    &replacement_line(replaced, offer.duration, workspace),
-                    "    ",
-                )
-            })
-        })
-        .unwrap_or_default();
+        });
+    let replaced = chosen.and_then(|offer| {
+        offer
+            .replaces
+            .as_ref()
+            .map(|replaced| prompt_line(replacement_line(replaced, offer.duration, workspace), 4))
+    });
     let label = grant_label(
         access_label(prompt.level, &prompt.target),
         chosen.map_or(GrantDuration::Once, |offer| offer.duration),
@@ -283,270 +229,133 @@ fn chosen_lines(prompt: &ConsentPrompt, selected: usize, workspace: &str) -> Cho
     ChosenLines {
         shared,
         replaced,
-        grant: wrap(&format!("Grant: {label}"), "       "),
+        grant: prompt_line(format!("Grant: {label}"), 7),
     }
 }
 
-/// The prompt's text with the duration at `selected` chosen. Every
-/// selection has the same lines in the same places, so choosing a duration
-/// never moves the rows the pointer selects. No line is wider than
-/// [`PROMPT_LINE_CHARS`].
-fn consent_layout(
+/// The prompt's text with the duration at `selected` chosen. The chosen
+/// duration's lines sit in slots, so every selection has the same rows in
+/// the same places at any width, and choosing a duration never moves the
+/// rows the pointer selects.
+fn consent_text(
     prompt: &ConsentPrompt,
     selected: usize,
     shortcut: Option<DialogShortcut>,
-) -> ConsentLayout {
+) -> DialogText {
     let workspace = workspace_label(&prompt.target);
-    let mut lines = vec!["TRUSTED SPLINTERM ACCESS REQUEST".to_owned(), String::new()];
+    let mut lines = vec![
+        DialogLine::new("TRUSTED SPLINTERM ACCESS REQUEST"),
+        DialogLine::blank(),
+    ];
     if let Some(name) = &prompt.agent_name {
-        lines.extend(wrap(
-            &format!(
+        lines.push(prompt_line(
+            format!(
                 "Agent (reported by the agent, not verified): {}",
                 display_name(name, DISPLAY_NAME_CHARS)
             ),
-            "    ",
+            4,
         ));
     }
-    lines.extend(wrap(
-        &format!(
+    lines.push(prompt_line(
+        format!(
             "Program: {}",
             trusted_label(&prompt.requester, MAX_CONSENT_PATH_CHARS)
         ),
-        "         ",
+        9,
     ));
-    lines.push(format!(
-        "Process: PID {} · UID {}",
-        prompt.requester_pid, prompt.requester_uid
+    lines.push(prompt_line(
+        format!(
+            "Process: PID {} · UID {}",
+            prompt.requester_pid, prompt.requester_uid
+        ),
+        4,
     ));
-    lines.extend(wrap(&consent_target_line(&prompt.target), "    "));
-    lines.push(String::new());
-    lines.extend(wrap(
-        &match prompt.level {
+    lines.push(prompt_line(consent_target_line(&prompt.target), 4));
+    lines.push(DialogLine::blank());
+    lines.push(prompt_line(
+        match prompt.level {
             Some(level) => format!("Access: {} ({})", level.label(), level.summary()),
             None if matches!(prompt.target, ConsentTarget::Lair { .. }) => {
                 "Access: Custom, exactly these scopes and nothing more".to_owned()
             }
             None => "Access: exactly these scopes, once".to_owned(),
         },
-        "    ",
+        4,
     ));
-    lines.extend(scope_lines(prompt));
-    lines.push(String::new());
-    lines.push("How long (choose with the arrow keys or a click):".to_owned());
-    let mut duration_rows = Vec::new();
+    lines.push(scope_line(prompt));
+    lines.push(DialogLine::blank());
+    lines.push(prompt_line(
+        "How long (choose with the arrow keys or a click):",
+        4,
+    ));
     for (index, offer) in prompt.durations.iter().enumerate() {
         let marker = match (offer.withheld, index == selected) {
             (Some(_), _) => "(-)",
             (None, true) => "(•)",
             (None, false) => "( )",
         };
-        for line in wrap(
-            &format!("  {marker} {}", duration_row(offer.duration, &workspace)),
-            "      ",
-        ) {
-            duration_rows.push((lines.len(), index));
-            lines.push(line);
-        }
+        lines.push(
+            prompt_line(
+                format!("  {marker} {}", duration_row(offer.duration, &workspace)),
+                6,
+            )
+            .with_duration(index),
+        );
         if let Some(withheld) = offer.withheld {
-            lines.extend(wrap(
-                &format!("      Unavailable: {}", withheld.reason()),
-                "        ",
+            lines.push(prompt_line(
+                format!("      Unavailable: {}", withheld.reason()),
+                8,
             ));
         }
     }
-    lines.push(String::new());
-    // Reserved for every selection at its tallest, blank when they do not
-    // apply, so the layout never moves.
-    let every: Vec<_> = (0..prompt.durations.len())
-        .map(|index| chosen_lines(prompt, index, &workspace))
-        .collect();
-    let tallest = |part: fn(&ChosenLines) -> usize| every.iter().map(part).max().unwrap_or(0);
-    let shared_rows = tallest(|lines| lines.shared.len());
-    let replaced_rows = tallest(|lines| lines.replaced.len());
-    let grant_rows = tallest(|lines| lines.grant.len());
+    lines.push(DialogLine::blank());
+    // Each slot takes the rows of its tallest selection, blank when it does
+    // not apply; an empty line only marks where the slot is.
     let ChosenLines {
         shared,
         replaced,
         grant,
     } = chosen_lines(prompt, selected, &workspace);
-    lines.extend(padded(shared, shared_rows));
-    lines.extend(padded(replaced, replaced_rows));
-    lines.push(String::new());
-    lines.extend(padded(grant, grant_rows));
-    lines.extend([
-        "G or the green area (right) grants. Enter, Escape, D, or the red area (left) deny."
-            .to_owned(),
-        keyboard_hint("prompt", shortcut),
-    ]);
-    ConsentLayout {
+    lines.push(shared.unwrap_or_default().in_slot(0));
+    lines.push(replaced.unwrap_or_default().in_slot(1));
+    lines.push(DialogLine::blank());
+    lines.push(grant.in_slot(2));
+    lines.push(
+        DialogLine::hint(
+            "G or the green area (right) grants. Enter, Escape, D, or the red area (left) deny.",
+        )
+        .with_wrap_at(PROMPT_LINE_CHARS),
+    );
+    lines.push(DialogLine::hint(keyboard_hint("prompt", shortcut)).with_wrap_at(PROMPT_LINE_CHARS));
+    DialogText {
         lines,
-        duration_rows,
+        minimum_rows: 0,
     }
 }
 
-/// The share of the dialog's rows above the action areas, which cover the
-/// bottom 22% of the Window.
-const CONSENT_TEXT_ROWS_PERCENT: usize = 72;
-
-/// Renders the prompt for each selection at one fixed size: as wide as its
-/// widest selection and tall enough that the text stays above the action
-/// areas.
+/// Renders the prompt's text for each selection; the Window lays it out at
+/// one size for all of them.
 fn consent_renderer(
     prompt: ConsentPrompt,
     shortcut: Option<DialogShortcut>,
 ) -> splinterm::AccessConsentRenderer {
-    let layouts =
-        || (0..prompt.durations.len()).map(|selected| consent_layout(&prompt, selected, shortcut));
-    let width = layouts()
-        .flat_map(|layout| layout.lines.into_iter().map(|line| line.len()))
-        .max()
-        .unwrap_or(1)
-        .clamp(64, 120);
-    let rows = layouts()
-        .map(|layout| layout.lines.len())
-        .max()
-        .unwrap_or(1);
-    let minimum_rows = (rows * 100).div_ceil(CONSENT_TEXT_ROWS_PERCENT);
-    let snapshot_splint_id = match &prompt.target {
-        ConsentTarget::Splint { splint_id, .. } => *splint_id,
-        ConsentTarget::Lair { .. } => splinterm_core::SplintId::new(),
-    };
-    Box::new(move |selected| {
-        let mut layout = consent_layout(&prompt, selected, shortcut);
-        // Every selection is drawn as wide as the widest one.
-        let title = &mut layout.lines[0];
-        let padding = width.saturating_sub(title.len());
-        title.extend(std::iter::repeat_n(' ', padding));
-        AccessConsentView {
-            snapshot: consent_snapshot(
-                &prompt.target,
-                snapshot_splint_id,
-                layout.lines,
-                minimum_rows,
-            ),
-            duration_rows: layout.duration_rows,
-        }
-    })
+    Box::new(move |selected| consent_text(&prompt, selected, shortcut))
 }
 
-fn consent_input_modes() -> TerminalInputModes {
-    TerminalInputModes {
-        application_cursor: false,
-        application_keypad: false,
-        focus_reporting: false,
-        bracketed_paste: false,
-        cursor_visible: false,
-        cursor_blink: false,
-        mouse_tracking: splinterm_protocol::MouseTracking::None,
-        sgr_mouse: false,
-    }
-}
-
-/// A static, cursorless snapshot of `lines` for a trusted dialog Window, in
-/// the consent dialog's colors. The column count is the longest line's byte
-/// length clamped to 64..=120, and lines are cut there; blank rows fill up to
-/// at least `minimum_rows`.
-pub(in crate::app) fn static_dialog_snapshot(
-    lines: Vec<String>,
-    minimum_rows: usize,
-    title: &str,
-    splint_id: splinterm_core::SplintId,
-    incarnation: u64,
-) -> TerminalSnapshot {
-    let columns = lines
-        .iter()
-        .map(String::len)
-        .max()
-        .unwrap_or(1)
-        .clamp(64, 120);
-    let rows = lines.len().max(minimum_rows);
-    let blank_attributes = CellAttributes {
-        bold: false,
-        dim: false,
-        italic: false,
-        underline: UnderlineStyle::None,
-        underline_color_source: ColorSource::Default,
-        underline_color: 0,
-        strikethrough: false,
-        blink: false,
-        conceal: false,
-        reverse: false,
-        foreground_source: ColorSource::Default,
-        foreground: 0,
-        background_source: ColorSource::Default,
-        background: 0,
+/// The snapshot identity every rendering of the prompt carries.
+fn consent_identity(target: &ConsentTarget) -> DialogIdentity {
+    let (splint_id, incarnation) = match target {
+        ConsentTarget::Splint {
+            splint_id,
+            incarnation,
+        } => (*splint_id, *incarnation),
+        ConsentTarget::Lair { .. } => (splinterm_core::SplintId::new(), 0),
     };
-    let mut visible_rows: Vec<_> = lines
-        .into_iter()
-        .map(|line| TerminalRow {
-            row_id: None,
-            linebreak: false,
-            cells: line
-                .chars()
-                .take(columns)
-                .map(|character| TerminalCell {
-                    content: character.to_string(),
-                    spacer_remaining: None,
-                    attributes: blank_attributes,
-                })
-                .collect(),
-        })
-        .collect();
-    visible_rows.resize_with(rows, || TerminalRow {
-        row_id: None,
-        linebreak: false,
-        cells: Vec::new(),
-    });
-    // A Window refuses a snapshot whose visible rows lack distinct, nonzero
-    // identities (`TerminalSnapshot::validate`), before it maps.
-    for (row, id) in visible_rows.iter_mut().zip(1_u64..) {
-        row.row_id = Some(id);
-    }
-    TerminalSnapshot {
+    DialogIdentity {
+        title: "Trusted access request".to_owned(),
         splint_id,
         incarnation,
-        revision: 1,
-        columns,
-        rows,
-        cursor_column: -1,
-        cursor_row: -1,
-        cursor_deferred_wrap: false,
-        active_screen: ActiveScreen::Normal,
-        input_modes: consent_input_modes(),
-        palette: vec![0; 256],
-        default_colors: [0x00f4_f0e8, 0x0014_1820, 0x00e0_a030],
-        title: title.to_owned(),
-        visible_rows,
-        history_generation: 1,
-        oldest_available_scrollback_row_id: None,
-        newest_available_scrollback_row_id: None,
-        scrollback_rows: Vec::new(),
-        available_scrollback_rows: 0,
-        omitted_oldest_scrollback_rows: 0,
-        images: None,
-        exited_code: None,
-        exited_signal: None,
     }
-}
-
-/// The dialog's snapshot, with one Splint identity for every rendering.
-fn consent_snapshot(
-    target: &ConsentTarget,
-    snapshot_splint_id: splinterm_core::SplintId,
-    lines: Vec<String>,
-    minimum_rows: usize,
-) -> TerminalSnapshot {
-    let snapshot_incarnation = match target {
-        ConsentTarget::Splint { incarnation, .. } => *incarnation,
-        ConsentTarget::Lair { .. } => 0,
-    };
-    static_dialog_snapshot(
-        lines,
-        minimum_rows,
-        "Trusted access request",
-        snapshot_splint_id,
-        snapshot_incarnation,
-    )
 }
 
 /// The line that tells the person how to engage a trusted dialog's keyboard:
@@ -602,7 +411,7 @@ pub(in crate::app) fn configure_dialog_renderer(config: &AppConfig) -> Result<()
     super::sessions::configure_picker_renderer(config, ResolvedTheme::default())
 }
 
-/// The consent dialog's Window, sized to its first rendering, answering on
+/// The consent dialog's Window at the natural size of its text, answering on
 /// `decision`.
 fn consent_window_options(
     prompt: ConsentPrompt,
@@ -614,18 +423,11 @@ fn consent_window_options(
         .iter()
         .map(|offer| (offer.duration, offer.withheld.is_none()))
         .collect();
-    let (trusted_consent, snapshot) =
-        TrustedConsentUi::access_consent(decision, durations, consent_renderer(prompt, shortcut));
-    let trusted_consent = trusted_consent.with_shortcut(shortcut);
-    let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
-    let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
-    WindowOptions {
-        snapshot: Some(snapshot),
-        trusted_consent: Some(trusted_consent),
-        initial_columns: columns,
-        initial_rows: rows,
-        ..WindowOptions::default()
-    }
+    let identity = consent_identity(&prompt.target);
+    TrustedConsentUi::access_consent(decision, durations, consent_renderer(prompt, shortcut))
+        .with_shortcut(shortcut)
+        .with_identity(identity)
+        .into_window_options()
 }
 
 pub(in crate::app) fn run_consent_client(shortcut: Option<DialogShortcut>) -> Result<()> {
@@ -660,10 +462,26 @@ mod tests {
 
     use splinterd::dialog_shortcut::DialogShortcut;
 
+    use splinterm::frontend::dialog_text::{
+        DialogLayout, natural_columns, natural_layout, natural_rows,
+    };
+
     use super::{
-        consent_layout, consent_renderer, consent_window_options, grant_label, keyboard_hint,
+        consent_renderer, consent_window_options, grant_label, keyboard_hint,
         read_private_frame_bounded, trusted_label, write_private_frame_bounded,
     };
+
+    /// Every selection's text, as the Window lays it out.
+    fn variants(prompt: &ConsentPrompt) -> Vec<splinterm::DialogText> {
+        let render = consent_renderer(prompt.clone(), shortcut());
+        (0..prompt.durations.len()).map(render).collect()
+    }
+
+    /// The prompt with the duration at `selected` chosen, at its natural
+    /// size.
+    fn laid_out(prompt: &ConsentPrompt, selected: usize) -> DialogLayout {
+        natural_layout(&variants(prompt), selected)
+    }
 
     #[allow(
         clippy::unnecessary_wraps,
@@ -749,7 +567,7 @@ mod tests {
         let ConsentTarget::Lair { lair_id, .. } = &prompt.target else {
             unreachable!()
         };
-        let text = consent_layout(&prompt, 0, shortcut()).lines.join("\n");
+        let text = laid_out(&prompt, 0).rows.join("\n");
         assert!(text.contains("Agent (reported by the agent, not verified): Claude Code"));
         assert!(text.contains("Program: /usr/bin/splinterm-mcp"));
         let short_id: String = lair_id.to_string().chars().take(8).collect();
@@ -771,14 +589,14 @@ mod tests {
             level: Some(AccessLevel::Look),
             scopes: AccessLevel::Look.scopes().to_vec(),
         });
-        let text = consent_layout(&prompt, 2, shortcut()).lines.join("\n");
+        let text = laid_out(&prompt, 2).rows.join("\n");
         assert!(text.contains("(•) Always for 'Workspace'"));
         assert!(text.contains("Grant: Always allow Manage for 'Workspace'"));
         assert!(text.contains("Any program that runs /usr/bin/splinterm-mcp shares this access."));
         assert!(
             text.contains("This replaces the earlier answer: Always allow Look for 'Workspace'.")
         );
-        let session = consent_layout(&prompt, 1, shortcut()).lines.join("\n");
+        let session = laid_out(&prompt, 1).rows.join("\n");
         assert!(session.contains("Grant: Allow Manage while 'Workspace' is open"));
         assert!(!session.contains("replaces"));
     }
@@ -800,8 +618,8 @@ mod tests {
             ),
         ];
         assert_eq!(prompt.validate(), Ok(()));
-        let layout = consent_layout(&prompt, 0, shortcut());
-        let text = layout.lines.join("\n");
+        let layout = laid_out(&prompt, 0);
+        let text = layout.rows.join("\n");
         assert!(text.contains("Access: Custom, exactly these scopes and nothing more"));
         assert!(text.contains("observe visible terminal, take over terminal control"));
         assert!(text.contains("(-) While 'Workspace' is open"));
@@ -822,9 +640,9 @@ mod tests {
                 .find(|(_, shown)| *shown == index)
                 .unwrap();
             assert!(
-                layout.lines[*row].contains(duration),
+                layout.rows[*row].contains(duration),
                 "{}",
-                layout.lines[*row]
+                layout.rows[*row]
             );
         }
     }
@@ -897,14 +715,13 @@ mod tests {
         // configuration: Fontconfig's `monospace`.
         super::configure_dialog_renderer(&splinterm::config::AppConfig::default()).unwrap();
         for prompt in [manage_prompt(), splint_prompt(), longest_prompt()] {
-            let render = consent_renderer(prompt.clone(), shortcut());
-            for selected in 0..prompt.durations.len() {
-                let snapshot = render(selected).snapshot;
-                assert_eq!(snapshot.validate().map_err(|error| error.message), Ok(()));
-            }
             for shortcut in [shortcut(), None] {
                 let (decision, _receiver) = std::sync::mpsc::channel();
                 let options = consent_window_options(prompt.clone(), decision, shortcut);
+                let snapshot = options.snapshot.as_ref().unwrap();
+                assert_eq!(snapshot.validate().map_err(|error| error.message), Ok(()));
+                assert_eq!(usize::from(options.initial_columns), snapshot.columns);
+                assert_eq!(usize::from(options.initial_rows), snapshot.rows);
                 splinterm::check_window_options(options).unwrap();
             }
         }
@@ -917,21 +734,20 @@ mod tests {
         let path = format!("/{}", "p".repeat(MAX_CONSENT_PATH_CHARS - 1));
         let shared = format!("/{}", "s".repeat(MAX_CONSENT_PATH_CHARS - 1));
         let prompt = longest_prompt();
-        let render = consent_renderer(prompt.clone(), shortcut());
+        let columns = natural_columns(&variants(&prompt));
         for selected in 0..prompt.durations.len() {
-            let view = render(selected);
-            let layout = consent_layout(&prompt, selected, shortcut());
-            for line in &layout.lines {
+            let layout = laid_out(&prompt, selected);
+            for line in &layout.rows {
                 assert!(
                     line.chars().count() <= super::PROMPT_LINE_CHARS
-                        && line.chars().count() <= view.snapshot.columns,
+                        && line.chars().count() <= columns,
                     "{} chars: {line}",
                     line.chars().count()
                 );
             }
             // Joined back, the lines hold every character of each path.
             let joined: String = layout
-                .lines
+                .rows
                 .iter()
                 .map(|line| line.trim())
                 .collect::<Vec<_>>()
@@ -940,32 +756,66 @@ mod tests {
             if selected > 0 {
                 assert!(joined.contains(&shared));
             }
-            let text = layout.lines.join("\n");
+            let text = layout.rows.join("\n");
             assert!(text.contains("Agent (reported by the agent, not verified): Agent name"));
             assert!(text.contains(&format!("{}…", "a".repeat(10))));
             assert!(text.contains(&format!("'{}…'", "n".repeat(59))));
             assert!(text.contains(
                 "Click inside this prompt or press Ctrl+Alt+G first to answer with the keyboard."
             ));
-            // The rendered snapshot keeps every row of the text.
-            assert!(layout.lines.len() <= view.snapshot.rows);
+            // The natural size keeps every row of the text.
+            assert!(!layout.clipped);
+            assert!(layout.rows.len() <= natural_rows(&variants(&prompt)));
         }
     }
 
     #[test]
     fn every_selection_renders_at_one_size_with_the_same_rows() {
-        let prompt = manage_prompt();
-        let render = consent_renderer(prompt.clone(), shortcut());
-        let views: Vec<_> = (0..prompt.durations.len()).map(&render).collect();
-        for view in &views {
-            assert_eq!(view.snapshot.columns, views[0].snapshot.columns);
-            assert_eq!(view.snapshot.rows, views[0].snapshot.rows);
-            assert_eq!(view.snapshot.splint_id, views[0].snapshot.splint_id);
-            assert_eq!(view.duration_rows, views[0].duration_rows);
+        let mut prompt = manage_prompt();
+        prompt.durations[2].replaces = Some(ConsentReplacement {
+            level: Some(AccessLevel::Look),
+            scopes: AccessLevel::Look.scopes().to_vec(),
+        });
+        let variants = variants(&prompt);
+        // At the natural width and narrower ones alike, every selection
+        // has the same rows, with the durations on the same ones.
+        for columns in [natural_columns(&variants), 72, 50, 30] {
+            let layouts: Vec<_> = (0..prompt.durations.len())
+                .map(|selected| {
+                    splinterm::frontend::dialog_text::layout(
+                        &variants,
+                        selected,
+                        columns,
+                        usize::MAX,
+                    )
+                })
+                .collect();
+            for layout in &layouts {
+                assert_eq!(layout.rows.len(), layouts[0].rows.len(), "{columns}");
+                assert_eq!(layout.duration_rows, layouts[0].duration_rows, "{columns}");
+                assert!(layout.rows.iter().all(|row| row.chars().count() <= columns));
+            }
         }
         // The text stays above the action areas in the bottom 22%.
-        let last_text_row = consent_layout(&prompt, 2, shortcut()).lines.len();
-        assert!(last_text_row * 100 <= views[0].snapshot.rows * 72);
+        let last_text_row = laid_out(&prompt, 2).rows.len();
+        assert!(last_text_row * 100 <= natural_rows(&variants) * 72);
+        // A Splint prompt's snapshots carry that Splint's identity.
+        let splint = splint_prompt();
+        let (decision, _receiver) = std::sync::mpsc::channel();
+        let options = consent_window_options(splint.clone(), decision, shortcut());
+        let snapshot = options.snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.title, "Trusted access request");
+        let ConsentTarget::Splint {
+            splint_id,
+            incarnation,
+        } = splint.target
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (snapshot.splint_id, snapshot.incarnation),
+            (splint_id, incarnation)
+        );
     }
 
     #[test]
@@ -975,7 +825,7 @@ mod tests {
             lair_id: splinterm_core::LairId::new(),
             lair_name: format!("{}\u{202e}", "w".repeat(60)),
         };
-        let text = consent_layout(&prompt, 2, shortcut()).lines.join("\n");
+        let text = laid_out(&prompt, 2).rows.join("\n");
         assert!(text.contains(&format!("Always allow Manage for '{}…'", "w".repeat(59))));
         assert!(!text.contains('\u{202e}'));
     }

@@ -33,7 +33,9 @@ The lifecycle manages three independently verified components:
 
 Trusted dialogs ignore every key until you click inside them or press the
 dialog shortcut, Ctrl+Alt+G, while they have focus, with or without this
-module; the module also keeps them from taking focus at all. A module that
+module; the module also keeps them from taking focus at all. The module has no
+rule to float them: each dialog asks Hyprland for one fixed size, which
+Hyprland floats on its own ([Trusted dialogs](usage.md#trusted-dialogs)). A module that
 an earlier release wrote has only the terminal tag. Status then reports
 `Dialog focus missing`, and running `splinterm integration omarchy enable`
 again upgrades it in place. With a terminal tag rule of your own instead of the

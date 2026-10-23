@@ -426,6 +426,16 @@ access prompt for an agent ([Automation](automation.md#the-prompt)), the
 restart question ([Packaging](packaging.md)). Each appears without taking
 keyboard focus, so typing meant for another Window never reaches it.
 
+Each dialog asks for one fixed size: the size at which all of its text fits
+above the red and green action areas. Its minimum and maximum size are the
+same, so tiling compositors such as Hyprland and sway float it instead of
+tiling it; no window rule is needed. If a compositor gives the dialog another
+size anyway, its text wraps again to fit, at spaces, never inside a word unless
+the word is wider than the dialog. If the text still does not fit, the font
+gets smaller, down to 70% of your configured size. Only below that does the
+dialog leave out lines: it shows "…" where text is missing and keeps the lines
+that say how to answer.
+
 A dialog's keyboard stays inert until you engage it, even if your desktop
 gives it focus:
 

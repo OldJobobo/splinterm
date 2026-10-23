@@ -135,6 +135,48 @@ pub(crate) fn premultiplied_theme_rgba(color: u32, alpha: u16) -> [u8; 4] {
 }
 
 impl RenderContext {
+    /// The cell geometry and effective pixel size this context would draw
+    /// with at `steps` of runtime zoom and `surface_scale_120`, or `None`
+    /// when the renderer refuses that zoom. Changes nothing: a trusted
+    /// dialog measures candidate fonts with it before it picks one.
+    ///
+    /// # Errors
+    /// Returns an error for invalid scale, DPI, or font state.
+    pub(crate) fn zoomed_cell_geometry(
+        &self,
+        steps: i16,
+        surface_scale_120: u32,
+    ) -> Result<Option<(crate::geometry::CellGeometry, f32)>> {
+        let mut candidate = self.clone();
+        if candidate
+            .apply_font_zoom_steps(steps, surface_scale_120)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let size = candidate.effective_font_size(surface_scale_120)?;
+        let generation = candidate.font_generation()?;
+        let face = generation
+            .faces
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("font generation has no primary face"))?;
+        let metrics = fonts::cell_metrics(face, size)?;
+        let cell = crate::geometry::CellGeometry::from_metrics(
+            metrics.width,
+            metrics.height,
+            metrics.ascent,
+            metrics.descent,
+            u32::try_from(metrics.baseline)
+                .map_err(|_| anyhow::anyhow!("cell baseline is negative"))?,
+        )?;
+        Ok(Some((cell, size)))
+    }
+
+    /// The padding this context places around the terminal grid.
+    pub(crate) fn terminal_padding(&self) -> crate::geometry::TerminalPadding {
+        self.padding()
+    }
+
     pub(crate) fn set_font_zoom_steps(
         &mut self,
         steps: i16,

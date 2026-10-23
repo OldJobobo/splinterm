@@ -41,15 +41,15 @@ use splinterd::{
     dialog_shortcut::{DialogShortcut, DialogShortcutLease, Hyprctl, SystemHyprctl},
 };
 use splinterm::automation::HandoffDecisionPrompt;
-use splinterm::{TrustedConsentUi, WindowOptions};
+use splinterm::{DialogIdentity, DialogLine, DialogText, TrustedConsentUi, WindowOptions};
 use splinterm_protocol::{
     HandoffUnresponsiveWindow, MAX_HANDOFF_DOJO_NAME_BYTES, MAX_HANDOFF_WINDOW_DOJOS,
-    MAX_HANDOFF_WINDOWS, TerminalSnapshot,
+    MAX_HANDOFF_WINDOWS,
 };
 
 use super::consent::{
-    keyboard_hint, read_private_frame_bounded, run_trusted_dialog_window, static_dialog_snapshot,
-    trusted_label, write_private_frame_bounded,
+    keyboard_hint, read_private_frame_bounded, run_trusted_dialog_window, trusted_label,
+    write_private_frame_bounded,
 };
 
 /// The hidden subcommand the dialog child runs.
@@ -88,7 +88,13 @@ pub(in crate::app) const MAX_DIALOG_COLUMNS: usize = 120;
 
 /// The share of the dialog's rows above the consent chrome's action areas,
 /// which cover the bottom 22% of the Window.
-const TEXT_ROWS_PERCENT: usize = 72;
+const TEXT_ROWS_PERCENT: usize = splinterm::frontend::dialog_text::TEXT_ROWS_PERCENT;
+
+/// The fewest grid rows an upgrade or restart question asks for.
+pub(in crate::app) const MIN_DIALOG_ROWS: usize = 18;
+
+/// The width the footer's explanation wraps at, as it always has.
+const FOOTER_WRAP_COLUMNS: usize = 70;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct UpgradeDialogPrompt {
@@ -183,59 +189,58 @@ fn window_line(window: &HandoffUnresponsiveWindow) -> String {
 }
 
 /// The dialog text: the Windows, what proceeding does, and how to answer.
-fn dialog_lines(prompt: &UpgradeDialogPrompt, shortcut: Option<DialogShortcut>) -> Vec<String> {
+/// The explanation and the actions are always shown in full below the list,
+/// with the deadline before the actions and the keyboard hint last.
+fn dialog_lines(prompt: &UpgradeDialogPrompt, shortcut: Option<DialogShortcut>) -> Vec<DialogLine> {
     let count = prompt.windows.len();
     let mut lines = vec![
-        "TRUSTED SPLINTERM UPGRADE QUESTION".to_owned(),
-        String::new(),
-        format!(
+        DialogLine::new("TRUSTED SPLINTERM UPGRADE QUESTION"),
+        DialogLine::blank(),
+        DialogLine::new(format!(
             "splinterd is upgrading. {count} Window{} cannot take part:",
             if count == 1 { "" } else { "s" }
-        ),
+        )),
     ];
+    let listed = |window| DialogLine::new(window_line(window)).with_indent(4);
     // Every Window gets a line while they fit; past that, the last line
     // counts the rest, so the number that would close is always visible.
     if count <= MAX_LISTED_WINDOWS {
-        lines.extend(prompt.windows.iter().map(window_line));
+        lines.extend(prompt.windows.iter().map(listed));
     } else {
         let shown = MAX_LISTED_WINDOWS - 1;
-        lines.extend(prompt.windows[..shown].iter().map(window_line));
+        lines.extend(prompt.windows[..shown].iter().map(listed));
         let rest = &prompt.windows[shown..];
         let dojos: usize = rest.iter().map(|window| window.dojos.len()).sum();
-        lines.push(format!(
+        lines.push(DialogLine::new(format!(
             "  +{} more Windows ({dojos} Dojo{})",
             rest.len(),
             if dojos == 1 { "" } else { "s" }
-        ));
+        )));
     }
-    lines.extend(DIALOG_FOOTER.map(str::to_owned));
-    lines.push(keyboard_hint("dialog", shortcut));
-    lines.insert(
-        lines.len() - 4,
-        format!(
+    lines.extend([
+        DialogLine::blank(),
+        DialogLine::new(
+            "Proceeding closes these Windows. Their terminals keep running in the upgraded daemon; reopen them from the Recent Dojos picker.",
+        )
+        .with_wrap_at(FOOTER_WRAP_COLUMNS),
+        DialogLine::new("Input is paused in every Window until you answer."),
+        DialogLine::new(format!(
             "Closing this dialog, or no answer within {} seconds, cancels.",
             prompt.respond_within_seconds
-        ),
-    );
+        )),
+        DialogLine::blank(),
+        DialogLine::hint("[D / Esc / Enter  Cancel]     [G  Proceed]"),
+        DialogLine::hint("Click the red left area to cancel or the green right area to proceed."),
+        DialogLine::hint(keyboard_hint("dialog", shortcut)),
+    ]);
     lines
 }
 
-/// The explanation and the actions, always shown in full below the list and
-/// followed by the keyboard hint. The deadline line is inserted before the
-/// last three and the hint.
-const DIALOG_FOOTER: [&str; 7] = [
-    "",
-    "Proceeding closes these Windows. Their terminals keep running in the",
-    "upgraded daemon; reopen them from the Recent Dojos picker.",
-    "Input is paused in every Window until you answer.",
-    "",
-    "[D / Esc / Enter  Cancel]     [G  Proceed]",
-    "Click the red left area to cancel or the green right area to proceed.",
-];
-
-/// Lines above and below the Window list: the three header lines, the
-/// footer, its deadline line, and the keyboard hint.
-const FIXED_DIALOG_LINES: usize = 3 + DIALOG_FOOTER.len() + 2;
+/// Rows above and below the Window list at the dialog's natural width: the
+/// three header rows, then the blank row, the two rows of the explanation,
+/// the pause and deadline rows, the blank row, the two action hints, and
+/// the keyboard hint.
+const FIXED_DIALOG_ROWS: usize = 3 + 9;
 
 /// The tallest dialog, in terminal rows. The static snapshot cannot scroll,
 /// so the dialog is sized to its content within this bound.
@@ -243,45 +248,35 @@ const MAX_DIALOG_ROWS: usize = 40;
 
 /// The most Window lines that fit above the action areas of the tallest
 /// dialog; a longer list is summarized in its last line.
-const MAX_LISTED_WINDOWS: usize = MAX_DIALOG_ROWS * TEXT_ROWS_PERCENT / 100 - FIXED_DIALOG_LINES;
+const MAX_LISTED_WINDOWS: usize = MAX_DIALOG_ROWS * TEXT_ROWS_PERCENT / 100 - FIXED_DIALOG_ROWS;
 
-/// The dialog's rows: enough that its text ends above the action areas,
-/// which cover the bottom 22% of the Window.
-pub(in crate::app) fn dialog_rows(lines: usize) -> usize {
-    (lines * 100).div_ceil(TEXT_ROWS_PERCENT).max(18)
+/// The snapshot identity of the upgrade and restart questions.
+pub(in crate::app) fn question_identity() -> DialogIdentity {
+    DialogIdentity {
+        title: "Upgrade question".to_owned(),
+        splint_id: splinterm_core::SplintId::new(),
+        incarnation: 0,
+    }
 }
 
-fn dialog_snapshot(
-    prompt: &UpgradeDialogPrompt,
-    shortcut: Option<DialogShortcut>,
-) -> TerminalSnapshot {
-    let lines = dialog_lines(prompt, shortcut);
-    let rows = dialog_rows(lines.len());
-    static_dialog_snapshot(
-        lines,
-        rows,
-        "Upgrade question",
-        splinterm_core::SplintId::new(),
-        0,
-    )
+fn dialog_text(prompt: &UpgradeDialogPrompt, shortcut: Option<DialogShortcut>) -> DialogText {
+    DialogText {
+        lines: dialog_lines(prompt, shortcut),
+        minimum_rows: MIN_DIALOG_ROWS,
+    }
 }
 
-/// Window options that show the whole snapshot: the grid is sized to it.
+/// The Window at the natural size of the question's text.
 fn dialog_window_options(
     prompt: &UpgradeDialogPrompt,
     decision: std_mpsc::Sender<bool>,
     shortcut: Option<DialogShortcut>,
 ) -> WindowOptions {
-    let snapshot = dialog_snapshot(prompt, shortcut);
-    let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
-    let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
-    WindowOptions {
-        snapshot: Some(snapshot),
-        trusted_consent: Some(TrustedConsentUi::upgrade(decision).with_shortcut(shortcut)),
-        initial_columns: columns,
-        initial_rows: rows,
-        ..WindowOptions::default()
-    }
+    TrustedConsentUi::upgrade(decision)
+        .with_shortcut(shortcut)
+        .with_text(dialog_text(prompt, shortcut))
+        .with_identity(question_identity())
+        .into_window_options()
 }
 
 /// The hidden `upgrade-dialog` child: reads one prompt on stdin, shows it,
@@ -642,8 +637,26 @@ fn timed_out(error: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
 
+    use splinterm::frontend::dialog_text::{natural_layout, natural_rows};
     use splinterm_core::{DojoId, LairId};
     use splinterm_protocol::{HandoffWindowDojo, HandoffWindowIssue};
+
+    /// The dialog's rows of text at its natural size.
+    fn dialog_rows_of(
+        prompt: &UpgradeDialogPrompt,
+        shortcut: Option<DialogShortcut>,
+    ) -> Vec<String> {
+        natural_layout(&[dialog_text(prompt, shortcut)], 0).rows
+    }
+
+    /// The footer's rows at the natural size, as they always read.
+    const DIALOG_FOOTER: [&str; 5] = [
+        "Proceeding closes these Windows. Their terminals keep running in the",
+        "upgraded daemon; reopen them from the Recent Dojos picker.",
+        "Input is paused in every Window until you answer.",
+        "[D / Esc / Enter  Cancel]     [G  Proceed]",
+        "Click the red left area to cancel or the green right area to proceed.",
+    ];
 
     fn window(pid: u32, dojos: usize, name_bytes: usize) -> HandoffUnresponsiveWindow {
         HandoffUnresponsiveWindow {
@@ -739,13 +752,13 @@ mod tests {
     #[test]
     fn the_dialog_names_its_shortcut_and_engages_by_it() {
         let dialog = prompt(vec![window(5, 0, 0)]);
-        let lines = dialog_lines(&dialog, shortcut());
+        let lines = dialog_rows_of(&dialog, shortcut());
         assert_eq!(
             lines.last().map(String::as_str),
             Some("Click inside this dialog or press Ctrl+Alt+G first to answer with the keyboard.")
         );
         assert_eq!(
-            dialog_lines(&dialog, None).last().map(String::as_str),
+            dialog_rows_of(&dialog, None).last().map(String::as_str),
             Some("Click inside this dialog first to answer with the keyboard.")
         );
         let (decision, _receiver) = std_mpsc::channel();
@@ -793,7 +806,7 @@ mod tests {
     fn the_largest_prompt_fits_the_bounded_dialog_with_a_count_and_the_actions() {
         let windows = (1..=64).map(|pid| window(pid, 32, 128)).collect::<Vec<_>>();
         let dialog = prompt(windows);
-        let lines = dialog_lines(&dialog, shortcut());
+        let lines = dialog_rows_of(&dialog, shortcut());
         let listed = lines
             .iter()
             .filter(|line| line.starts_with("  • PID "))
@@ -810,7 +823,7 @@ mod tests {
             "{}",
             lines[2]
         );
-        for footer in DIALOG_FOOTER.iter().filter(|line| !line.is_empty()) {
+        for footer in DIALOG_FOOTER {
             assert!(
                 lines.iter().any(|line| line == footer),
                 "missing {footer:?}"
@@ -971,7 +984,8 @@ mod tests {
         let windows = (1..=u32::try_from(MAX_LISTED_WINDOWS).unwrap())
             .map(|pid| window(pid, 32, 128))
             .collect::<Vec<_>>();
-        let lines = dialog_lines(&prompt(windows), shortcut());
+        let dialog = prompt(windows);
+        let lines = dialog_rows_of(&dialog, shortcut());
         assert_eq!(
             lines
                 .iter()
@@ -980,8 +994,9 @@ mod tests {
             MAX_LISTED_WINDOWS
         );
         assert!(!lines.iter().any(|line| line.contains("more Windows")));
-        assert!(dialog_rows(lines.len()) <= MAX_DIALOG_ROWS);
-        let single = dialog_lines(&prompt(vec![window(5, 0, 0)]), shortcut());
+        assert!(natural_rows(&[dialog_text(&dialog, shortcut())]) <= MAX_DIALOG_ROWS);
+        assert_eq!(lines.len(), FIXED_DIALOG_ROWS + MAX_LISTED_WINDOWS);
+        let single = dialog_rows_of(&prompt(vec![window(5, 0, 0)]), shortcut());
         assert!(
             single[2].contains("1 Window cannot take part"),
             "{}",
@@ -991,7 +1006,7 @@ mod tests {
 
     #[test]
     fn the_dialog_says_what_proceeding_does_and_how_to_answer() {
-        let text = dialog_lines(&prompt(vec![window(5, 0, 0)]), shortcut()).join("\n");
+        let text = dialog_rows_of(&prompt(vec![window(5, 0, 0)]), shortcut()).join("\n");
         assert!(text.contains("PID 5 — did not answer in time — Dojos: none named"));
         assert!(text.contains("Proceeding closes these Windows"));
         assert!(text.contains("terminals keep running"));

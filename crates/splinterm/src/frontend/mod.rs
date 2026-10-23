@@ -4,6 +4,7 @@ mod action_menu;
 mod agent_access;
 mod agent_status;
 mod binding_help;
+pub mod dialog_text;
 mod lair_explorer;
 mod message;
 mod navigation_accessibility;
@@ -44,6 +45,7 @@ pub(crate) fn agent_access_test_entry(
 }
 pub(crate) use agent_status::{AgentAggregate, AgentGlyphs, badged_tab_label};
 pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
+pub use dialog_text::{DialogIdentity, DialogLine, DialogLineRole, DialogText};
 #[cfg(test)]
 pub(crate) use lair_explorer::LairExplorerRowKind;
 pub(crate) use lair_explorer::{
@@ -55,10 +57,10 @@ pub use message::{
 pub(crate) use navigation_accessibility::{
     NavigationAccessAction, NavigationAccessContext, NavigationAccessibility,
 };
+pub(crate) use options::DialogFrame;
 pub(crate) use options::TrustedInput;
 pub use options::{
-    AccessConsentRenderer, AccessConsentView, TerminalGridLimits, TrustedConsentUi, WindowOptions,
-    WindowPaneOptions,
+    AccessConsentRenderer, TerminalGridLimits, TrustedConsentUi, WindowOptions, WindowPaneOptions,
 };
 pub(crate) use picker::{PickerHitTarget, synthetic_text_snapshot};
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};
@@ -69,6 +71,6 @@ pub use topology::{
     SessionPickerTarget, WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate,
 };
 pub(crate) use trusted_dialog::{
-    MINIMUM_ACTION_ROWS, TrustedDialogKey, TrustedDialogKind, action_area_top, dialog_text_rows,
-    minimum_dialog_rows,
+    MINIMUM_ACTION_ROWS, TrustedDialogKey, TrustedDialogKind, action_area_top, dialog_font_step,
+    dialog_text_rows,
 };
