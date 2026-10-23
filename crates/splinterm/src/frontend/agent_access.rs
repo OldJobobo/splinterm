@@ -2031,8 +2031,18 @@ pub(crate) mod tests {
     #[test]
     fn characters_that_draw_nothing_are_escaped_but_emoji_selectors_stay() {
         for hidden in [
-            '\u{00ad}', '\u{034f}', '\u{115f}', '\u{17b4}', '\u{180e}', '\u{3164}',
-            '\u{ffa0}', '\u{fff9}', '\u{1bca0}', '\u{1d173}', '\u{e0001}', '\u{e0041}',
+            '\u{00ad}',
+            '\u{034f}',
+            '\u{115f}',
+            '\u{17b4}',
+            '\u{180e}',
+            '\u{3164}',
+            '\u{ffa0}',
+            '\u{fff9}',
+            '\u{1bca0}',
+            '\u{1d173}',
+            '\u{e0001}',
+            '\u{e0041}',
         ] {
             assert!(unsafe_display_character(hidden), "{hidden:?}");
         }
@@ -2041,11 +2051,14 @@ pub(crate) mod tests {
             "/usr/bin/claude\\u{e0041}\\u{e0042}"
         );
         assert!(!unsafe_display_character('\u{fe0f}'));
-        assert_eq!(shown("deploy \u{2764}\u{fe0f}", 64), "deploy \u{2764}\u{fe0f}");
+        assert_eq!(
+            shown("deploy \u{2764}\u{fe0f}", 64),
+            "deploy \u{2764}\u{fe0f}"
+        );
     }
 
-    /// The consent prompt escapes as `shown_name` does (and its own `'`), so a hostile name
-    /// reads the same in the prompt and in the list: no whitespace is
+    /// The consent prompt escapes as `shown_name` does (plus its own `'`), so
+    /// a hostile name reads the same in the prompt and in the list: no whitespace is
     /// collapsed, and tabs and newlines are escaped like any control.
     #[test]
     fn a_hostile_agent_name_is_listed_in_the_prompts_escaped_form() {
