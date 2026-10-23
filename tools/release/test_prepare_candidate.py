@@ -240,6 +240,65 @@ class PrepareCandidateTests(unittest.TestCase):
                     path, "ministry-of-taste/splinterm", "a" * 40
                 )
 
+    def test_assemble_runs_end_to_end_and_passes_the_version_to_the_notes(self) -> None:
+        # Drives assemble() itself, with only the steps that need makepkg,
+        # git objects for a real candidate, or CI stubbed, so a broken call
+        # inside it fails here instead of in the release workflow.
+        commit = "c" * 40
+        seen: dict[str, str] = {}
+
+        def notes(candidate: str, version: str, output: Path) -> None:
+            seen["commit"], seen["version"] = candidate, version
+            output.write_text(f"# Splinterm {version}\n", encoding="utf-8")
+
+        def archive(candidate: str, version: str, output: Path) -> None:
+            output.write_bytes(b"archive")
+
+        def srcinfo(recipe: Path) -> Path:
+            path = recipe / ".SRCINFO"
+            path.write_text("pkgbase = splinterm\n", encoding="utf-8")
+            return path
+
+        with tempfile.TemporaryDirectory(prefix="splinterm-assemble-") as value:
+            root = Path(value)
+            main_package = root / "main.pkg.tar.zst"
+            mcp_package = root / "mcp.pkg.tar.zst"
+            main_package.write_bytes(b"main")
+            mcp_package.write_bytes(b"mcp")
+            arguments = MODULE.parser().parse_args(
+                [
+                    "create",
+                    "--repository", "ministry-of-taste/splinterm",
+                    "--commit", commit,
+                    "--version", "0.2.0",
+                    "--previous-version-tag", "v0.1.1",
+                    "--ci-attestation", str(root / "ci.json"),
+                    "--splinterm", str(main_package),
+                    "--splinterm-mcp", str(mcp_package),
+                    "--output", str(root / "out"),
+                    "--workflow-run", "https://github.com/ministry-of-taste/splinterm/actions/runs/1",
+                ]
+            )
+            with (
+                mock.patch.object(
+                    MODULE, "validate_candidate", return_value=(commit, "0.2.0", "v0.1.1")
+                ),
+                mock.patch.object(MODULE, "validate_ci_attestation", return_value={"run_id": 1}),
+                mock.patch.object(MODULE, "create_source_archive", side_effect=archive),
+                mock.patch.object(MODULE, "validate_binary_release_urls", side_effect=lambda text, version: text),
+                mock.patch.object(MODULE, "write_srcinfo", side_effect=srcinfo),
+                mock.patch.object(MODULE, "create_notes", side_effect=notes),
+            ):
+                manifest = MODULE.assemble(arguments)
+            self.assertEqual(seen, {"commit": commit, "version": "0.2.0"})
+            self.assertEqual(manifest["version"], "0.2.0")
+            self.assertEqual(manifest["tag"], "v0.2.0")
+            self.assertFalse(manifest["publishable"])
+            self.assertIn(
+                "release-notes-draft", {asset["kind"] for asset in manifest["assets"]}
+            )
+            self.assertTrue((root / "out" / "SHA256SUMS").is_file())
+
     def test_manifest_example_is_json_serializable(self) -> None:
         manifest = {
             "schema": MODULE.SCHEMA,
