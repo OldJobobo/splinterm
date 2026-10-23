@@ -13,6 +13,13 @@ acquires control again under the same policy.
         the `proceed` file (created after the upgrade), then use the old
         handle (expected: `controller_unavailable`), acquire again, send one
         line with the new handle, release it, and write `result.json`.
+  agent Act as one agent for the easy-agent-access VM sequence (Plan 0053
+        PR 5): hold one `splinterm-mcp` session and run the numbered command
+        files `cmd-1.json`, `cmd-2.json`, ... that appear in the state
+        directory, in order, writing `out-N.json` for each. Operations:
+        `request` (a level or scopes for a Lair; `until` is `once` or
+        `answered`), `cancel`, `read` (read_terminal, to show whether access
+        still holds), `acquire` and `release` (control), and `exit`.
 
 It changes nothing outside the given state directory and the probe Splint.
 """
@@ -219,6 +226,139 @@ def run_probe(
     return result
 
 
+def outcome(response: dict[str, Any]) -> dict[str, object]:
+    """A short summary of one tool response: its error code or data status."""
+    content = structured(response)
+    error = content.get("error")
+    if failed(response) or content.get("ok") is False:
+        code = error.get("code") if isinstance(error, dict) else None
+        return {"ok": False, "code": code if isinstance(code, str) else "unknown"}
+    data = content.get("data")
+    summary: dict[str, object] = {"ok": True}
+    if isinstance(data, dict):
+        for key in ("status", "pending_request_id", "source", "grant_id", "expires_at"):
+            if key in data:
+                summary[key] = data[key]
+    return summary
+
+
+class Agent:
+    """One agent: an MCP session plus the controller handle it holds."""
+
+    def __init__(self, session: Session, poll_seconds: float) -> None:
+        self.session = session
+        self.poll_seconds = poll_seconds
+        self.handle: str | None = None
+
+    def run(self, command: dict[str, Any]) -> dict[str, object]:
+        operation = command.get("op")
+        if operation == "request":
+            return self.request(command)
+        if operation == "cancel":
+            response = self.session.call(
+                "splinterm.request_lair_access",
+                {
+                    "lair_id": command["lair_id"],
+                    "cancel_request_id": command["cancel_request_id"],
+                },
+            )
+            return {"op": "cancel", **outcome(response)}
+        if operation == "read":
+            response = self.session.call(
+                "splinterm.read_terminal", {"splint_id": command["splint_id"]}
+            )
+            return {"op": "read", **outcome(response)}
+        if operation == "acquire":
+            arguments: dict[str, object] = {
+                "splint_id": command["splint_id"],
+                "incarnation": command["incarnation"],
+                "modes": command.get("modes", ["input", "resize"]),
+            }
+            if command.get("takeover"):
+                arguments["takeover"] = True
+            response = self.session.call("splinterm.acquire_control", arguments)
+            self.handle = handle_of(response)
+            return {"op": "acquire", "handle": self.handle is not None, **outcome(response)}
+        if operation == "release":
+            if self.handle is None:
+                return {"op": "release", "ok": False, "code": "no_handle"}
+            response = self.session.call(
+                "splinterm.release_control", {"controller_handle": self.handle}
+            )
+            self.handle = None
+            return {"op": "release", **outcome(response)}
+        raise ValueError(f"unknown operation {operation!r}")
+
+    def request(self, command: dict[str, Any]) -> dict[str, object]:
+        arguments: dict[str, object] = {"lair_id": command["lair_id"]}
+        if "level" in command:
+            arguments["level"] = command["level"]
+        else:
+            arguments["scopes"] = command["scopes"]
+        until = command.get("until", "answered")
+        if until not in ("once", "answered"):
+            raise ValueError(f"unknown until {until!r}")
+        deadline = time.monotonic() + float(command.get("deadline_seconds", 150))
+        calls = 0
+        while True:
+            calls += 1
+            summary = outcome(self.session.call("splinterm.request_lair_access", arguments))
+            # Calling again with the same Lair and access joins the pending
+            # request and collects the answer; it never opens a second prompt.
+            if until == "once" or summary.get("status") != "pending":
+                break
+            if time.monotonic() > deadline:
+                summary["deadline_passed"] = True
+                break
+            time.sleep(self.poll_seconds)
+        return {"op": "request", "calls": calls, **summary}
+
+
+def run_agent(
+    mcp: list[str],
+    state: Path,
+    client_name: str,
+    idle_seconds: float,
+    poll_seconds: float,
+) -> int:
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "agent.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    session = Session(mcp)
+    try:
+        session.request(
+            "initialize",
+            {
+                "protocolVersion": MCP_PROTOCOL,
+                "capabilities": {},
+                "clientInfo": {"name": client_name, "version": "1"},
+            },
+        )
+        session.notify("notifications/initialized")
+        agent = Agent(session, poll_seconds)
+        number = 1
+        idle_until = time.monotonic() + idle_seconds
+        while True:
+            path = state / f"cmd-{number}.json"
+            if not path.exists():
+                if time.monotonic() > idle_until:
+                    raise RuntimeError(f"no {path.name} within {idle_seconds} seconds")
+                time.sleep(0.1)
+                continue
+            command = json.loads(path.read_text(encoding="utf-8"))
+            if command.get("op") == "exit":
+                write_json(state / f"out-{number}.json", {"op": "exit", "ok": True})
+                return 0
+            try:
+                result = agent.run(command)
+            except (KeyError, ValueError) as error:
+                result = {"op": command.get("op"), "ok": False, "code": "bad_command", "detail": str(error)}
+            write_json(state / f"out-{number}.json", result)
+            number += 1
+            idle_until = time.monotonic() + idle_seconds
+    finally:
+        session.close()
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = result.add_subparsers(dest="command", required=True)
@@ -230,6 +370,16 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--state-dir", required=True, type=Path)
     run.add_argument("--mcp", default="/usr/bin/splinterm-mcp")
     run.add_argument("--wait-seconds", type=float, default=1800)
+    agent = commands.add_parser("agent")
+    agent.add_argument("--state-dir", required=True, type=Path)
+    agent.add_argument("--mcp", default="/usr/bin/splinterm-mcp")
+    agent.add_argument(
+        "--client-name",
+        default="splinterm-vm-agent",
+        help="the MCP client name the prompt and list show as a label (may hold control characters)",
+    )
+    agent.add_argument("--idle-seconds", type=float, default=1800)
+    agent.add_argument("--poll-seconds", type=float, default=1.0)
     return result
 
 
@@ -238,6 +388,14 @@ def main() -> int:
     if arguments.command == "ids":
         print(json.dumps(probe_ids(arguments.topology, arguments.lair), sort_keys=True))
         return 0
+    if arguments.command == "agent":
+        return run_agent(
+            [arguments.mcp],
+            arguments.state_dir,
+            arguments.client_name,
+            arguments.idle_seconds,
+            arguments.poll_seconds,
+        )
     ids = json.loads(arguments.ids.read_text(encoding="utf-8"))
     result = run_probe([arguments.mcp], ids, arguments.state_dir, arguments.wait_seconds)
     passed = all(result[key] for key in ("acquired_before", "old_handle_expired", "reacquired"))
