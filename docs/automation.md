@@ -414,9 +414,10 @@ identifies an agent by host name, basename, or a copied digest.
 
 The prompt is deliberate by default:
 
-- It appears without taking keyboard focus, so typing meant for another
-  Window never reaches it. Click it when you get to it, or press Ctrl+Alt+G:
-  its keyboard stays inert until you do, even if your desktop gives it focus,
+- With the Omarchy integration enabled it appears without taking keyboard
+  focus, so typing meant for another Window never reaches it. Click it when you
+  get to it, or press Ctrl+Alt+G: its keyboard stays inert until you do, even
+  if your desktop gives it focus,
   and Ctrl+Alt+G itself never answers. Under Omarchy, the Hyprland module that
   `splinterm integration omarchy enable` installs maps it without focus, and
   Ctrl+Alt+G then reaches it from any Window while it waits; see
@@ -524,8 +525,8 @@ control now), on the workspace, or **…part** when only some of its Dojos or
 Splints are covered. **Agent asking for access** marks a workspace with a
 request waiting for your answer, and while any request waits the Window title
 ends with **AGENT ACCESS REQUEST WAITING** and **Agent access** in the palette
-shows how many wait. The prompt itself still never takes focus; click it or
-press the dialog shortcut when you get to it.
+shows how many wait. The prompt's keys stay inert until you click it or press
+the dialog shortcut.
 
 The human command speaks as the installed trusted client, so it works only
 with the packaged `splinterm` next to the running daemon. The installed

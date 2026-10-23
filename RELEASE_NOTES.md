@@ -434,8 +434,6 @@ a hostile program running as your account.
 
 ## Known limitations
 
-- Upgrading from 0.1.x to 0.2.0 cannot be live, because the running 0.1.x daemon
-  has no live-upgrade support.
 - Live upgrade is unavailable:
   - while a transient Lair is open: a Lair that ends with its Window. Ordinary
     launches create one only with `multiplexer.persistent-by-default=no`; a
