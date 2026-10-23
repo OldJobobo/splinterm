@@ -423,8 +423,10 @@ authority.
 Three small trusted dialogs ask questions that only a person may answer: the
 access prompt for an agent ([Automation](automation.md#the-prompt)), the
 `splinterm upgrade --now` question ([CLI](cli.md)), and the desktop launcher's
-restart question ([Packaging](packaging.md)). Each appears without taking
-keyboard focus, so typing meant for another Window never reaches it.
+restart question ([Packaging](packaging.md)). Typing meant for another Window
+never answers one: its keys stay inert until you engage it, as described below.
+Under Omarchy with `splinterm integration omarchy enable`, each also appears
+without taking keyboard focus ([Integrations](integrations.md)).
 
 Each dialog asks for one fixed size: the size at which all of its text fits
 above the red and green action areas, but never larger than the screen space
@@ -575,14 +577,25 @@ unavailable, restarting the daemon remains the upgrade path. See
 During a live upgrade every Window shows "Preparing upgrade…" and then
 "Upgrading — input paused". Typed keys, pastes, and session-changing actions
 are dropped, not queued; scrolling, search, help, and tab switching still work.
-When the daemon starts the installed build, each Window shows "Reconnecting…",
-reattaches every pane from the serving daemon within about 30 seconds, and
-resumes input. If it cannot, it keeps its last screen, stays paused, and says
-"Lost connection to splinterd — reopen from the launcher"; its terminals may
-still be running and reopen from the Recent Dojos picker. A local Window whose
-client was replaced by the package upgrade gives up at once: a fresh client must match
-the installed `splinterm` (or the client snapshot a live-upgraded daemon
-pinned), which a Window reopened from the launcher runs.
+
+A local Window that takes part relaunches as the new client when the installed
+build takes over. It restores its tabs, the active tab, and the focused pane,
+and resumes input. If it had typing control before, it usually gets it back,
+and you can keep typing without a click. If not, the pane is view-only until
+you choose Request Control. If the new build fails and the daemon rolls back,
+the Window shows "Rolled back"; if the attempt is cancelled, it shows "Upgrade
+cancelled" and resumes. A local Window that cannot take part is listed before
+the upgrade starts, and proceeding closes it; its terminals keep running and
+reopen from the Recent Dojos picker.
+
+A remote Window connected to the upgraded daemon shows "Reconnecting…" and
+reattaches every pane within about 30 seconds (see [Remote](remote.md)). If it
+cannot, it keeps its last screen, stays paused, and says "Lost connection to
+splinterd — reopen from the launcher"; its terminals may still be running. A
+local Window that has to reconnect this way, but whose client the package
+upgrade replaced, gives up at once: a fresh client must match the installed
+`splinterm` (or the client snapshot a live-upgraded daemon pinned), which a
+Window reopened from the launcher runs.
 
 ## Remote human use
 

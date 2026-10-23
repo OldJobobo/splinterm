@@ -1,8 +1,11 @@
 # Splinterm 0.2.0
 
 Splinterm 0.2.0 is the first feature release after 0.1.1 for the documented
-x86_64 Omarchy/Arch Linux target. Its defining change is live daemon upgrade:
-a newly installed build can take over running terminals without stopping them.
+x86_64 Omarchy/Arch Linux target. Its main new feature is live upgrade: from
+0.2.0 on, a newly installed build can take over your running terminals without
+stopping them. The upgrade from 0.1.x itself still restarts the daemon once,
+which ends running shells.
+
 It also adds easy agent access (give an agent one workspace in a single answer,
 then see and revoke it), explicitly reported agent status, a startup picker,
 remote launch from inside the app, and Omarchy 4 theme integration with support
@@ -14,7 +17,80 @@ is one terminal pane and its process. `splinterd` is the daemon that keeps them
 running; a Window is only a view.
 
 0.2.0 changes the private daemon protocol. A 0.2.0 client cannot talk to a 0.1.x
-daemon, and the reverse, so read "Upgrading from 0.1.x" before installing.
+daemon, and the reverse. Read "Upgrading from 0.1.x" below before installing.
+
+## Upgrading from 0.1.x
+
+Moving from 0.1.x to 0.2.0 cannot be live. The running 0.1.x daemon has to
+restart once, which ends every running shell and the programs in them. Saved
+Lairs and Dojos are kept: their saved format has not changed since 0.1.1.
+
+1. Save your work.
+2. Install 0.2.0 from a terminal Splinterm does not own, such as Foot or a text
+   console. `./install.sh` and `tools/package/upgrade-local-package.sh` stop the
+   daemon before installing, which would also end a terminal inside Splinterm,
+   so they refuse to run there. They ask before they stop it and start it again
+   afterwards.
+3. If you installed with `pacman -U` or an AUR helper, the 0.1.x daemon is still
+   running. Restart it from Foot or a text console:
+
+   ```bash
+   systemctl --user stop splinterd.service
+   systemctl --user daemon-reload
+   systemctl --user start splinterd.service
+   ```
+
+   Or open Splinterm from the desktop launcher. It cannot read the 0.1.x daemon,
+   so it asks first and shows a best-effort count of its shells; choose
+   **Restart now**.
+4. Open Splinterm. Restore saved Lairs and Dojos from the Explorer or the
+   command palette; restoring starts new shells.
+5. If you use the Omarchy integration, run `splinterm integration omarchy
+   enable` again. A module written by 0.1.x has no rule for trusted dialogs.
+6. Upgrade `splinterm-mcp` and every remote host to 0.2.0. Different versions
+   do not work together.
+
+If Splinterm then fails at startup with a keymap error, your keymap overlay
+binds a chord that is now a default; see "Behaviour changes".
+
+To go back to 0.1.x, stop `splinterd.service` yourself first, or use one of the
+installers above. The 0.1 launcher restarts an incompatible daemon without
+asking, which ends every running shell.
+
+From 0.2.0 on, installing with `pacman -U` or an AUR helper leaves the running
+daemon alone. Run `splinterm upgrade` to see whether it can move to the new
+build, then `splinterm upgrade --now` to move your terminals without stopping
+them. `./install.sh` and `tools/package/upgrade-local-package.sh` still stop the
+daemon, which ends running shells. Package scripts never restart or upgrade a
+running daemon by themselves.
+
+## Behaviour changes
+
+- Private protocol 44 (0.1.1 used 36). Old and new clients, daemons, and relays
+  do not interoperate. Upgrade both ends of a remote connection, and keep
+  `splinterm-mcp` at the same version.
+- The agent access prompt no longer grants on Enter: Enter denies, and only `G`
+  or the grant area grants. Its keys do nothing until you click inside it (see
+  "Trusted dialogs").
+- **Revoke all access** (`Ctrl+Shift+R`) asks with exact counts before it acts,
+  except in a Window opened on a single Splint (`splinterm launch --splint-id
+  ID`), which has no command palette.
+- The desktop launcher no longer restarts a daemon that may still run shells
+  without asking.
+- New Dojos and Lairs start in your home directory, not the focused Splint's
+  directory.
+- On Omarchy 4 with no font size in `config.ini`, the terminal follows
+  Omarchy's text size (9 pt on a stock desktop) instead of Splinterm's 14 px.
+  Set a size in `config.ini` to keep your own.
+- `Ctrl+Shift+1`–`9` are now tab shortcuts: on US layouts with tabs,
+  `Ctrl+Shift+2` and `Ctrl+Shift+6` no longer send `Ctrl+@` and `Ctrl+^`
+  (`Ctrl+2` and `Ctrl+6` still do).
+- A keymap overlay that binds a chord that is now a default fails at startup
+  until it adds the `[[unbind]]` the error names. The new defaults are
+  `Ctrl+Shift+1`–`9` and, in the `omarchy-tmux` profile, `Prefix Shift+S`,
+  `Prefix Shift+F`, `Prefix Shift+V`, and `Prefix Shift+O`.
+- The tab strip is shorter on a stock Omarchy desktop.
+- The repository moved to `ministry-of-taste/splinterm`; old URLs redirect.
 
 ## Live daemon upgrade
 
@@ -26,38 +102,37 @@ daemon, and the reverse, so read "Upgrading from 0.1.x" before installing.
   running programs keep going; the daemon keeps its process ID.
 - Open Windows come with it. Each Window shows "Preparing upgrade…", then
   "Upgrading — input paused". Local Windows that take part relaunch as the new
-  client and restore their tabs, active tab, and focused pane. When the resume
-  claim succeeds, they also get their previous control back, so typing resumes
-  without a click; otherwise the pane stays view-only and offers Request
+  client and restore their tabs, active tab, and focused pane. If the Window
+  had typing control before, it usually gets it back, and you can keep typing
+  without a click. If not, the pane is view-only until you choose Request
   Control. Keys typed while paused are dropped, not queued.
-- Remote Windows connected to the upgraded daemon reconnect and authenticate
-  again. They get no local resume ticket.
+- Remote Windows connected to the upgraded daemon show "Reconnecting…" and
+  reconnect over the same SSH session.
 - If some Windows cannot take part, the command lists them and asks whether to
   cancel or proceed without them. In a terminal it asks `[c]ancel / [p]roceed`.
   Without one, or from inside a Splinterm terminal, a small trusted "Splinterm —
-  Upgrade" dialog asks instead; only `G` or its green area proceeds. Like every
-  trusted dialog, it appears without taking keyboard focus (see "Trusted
-  dialogs" below). Closing it or not answering cancels; with no answer in time
+  Upgrade" dialog asks instead (see "Trusted dialogs"); only `G` or its green
+  area proceeds. Closing it or not answering cancels; with no answer in time
   the command prints "No answer about the Windows within N seconds;
   cancelling." Proceeding closes those Windows; their terminals keep running
   and reopen from Recent Dojos.
 - If the new build fails before it takes over, the daemon rolls back to the
   previous build in the same process and keeps every terminal. Windows show
   "Rolled back".
-- One live upgrade per daemon: a daemon started by a live upgrade or a rollback
-  keeps no rollback copy, so restart it before the next live upgrade.
-- Only the installed `splinterm` next to the running `splinterd` may start an
-  upgrade. The command has no machine output.
+- After a live upgrade or a rollback, the next upgrade needs a daemon restart.
+  A daemon started by a live upgrade or a rollback keeps no rollback copy.
+- Only the installed `splinterm` next to the running `splinterd` may run
+  `splinterm upgrade`. The command has no machine output.
 - Exit statuses: 0 report shown or upgrade completed; 1 error; 2 usage error;
   3 cancelled, nothing changed; 4 live upgrade unavailable now, nothing changed;
   5 another upgrade in progress; 6 did not complete, previous build still
   serving with terminals kept; 7 result unconfirmed (for example because the
   installed `splinterm` was replaced while the upgrade ran), run
   `splinterm upgrade` to check.
-- Other commands are never retried after a mutation is interrupted. A command
-  refused during an upgrade says it did not run; one cut off by the upgrade says
-  it may or may not have taken effect. Plain reads (`ping`, `list`, `topology`,
-  `inspect`, `focus`) are retried once.
+- During an upgrade, commands that change something are not retried. A command
+  the daemon refused says it did not run. A command cut off by the upgrade says
+  it may have run; check before running it again. Read-only commands (`ping`,
+  `list`, `topology`, `inspect`, `focus`) are retried once.
 - Nix installations refuse live upgrade in 0.2.0; `splinterm upgrade` says so,
   and restarting the daemon remains the Nix upgrade path.
 
@@ -137,12 +212,12 @@ a hostile program running as your account.
   access." Splinterm checks the identity again on every connection, so a
   package upgrade keeps an **Always** grant; restart an agent that was running
   before the upgrade.
-- The prompt appears without taking keyboard focus, and its keys stay inert
-  until you click inside it or press the dialog shortcut. Enter, Escape, and `D`
-  deny; only `G` or a click on the grant area grants. Earlier releases granted
-  on Enter. You choose the duration with the mouse or the arrow keys; **Just
-  this once** is preselected, and the grant action names your exact choice, for
-  example **Always allow Manage for 'Workspace'**. Closing the prompt denies.
+- The prompt is a trusted dialog (see "Trusted dialogs"). Enter, Escape, and
+  `D` deny; only `G` or a click on the grant area grants. Earlier releases
+  granted on Enter. You choose the duration with the mouse or the arrow keys;
+  **Just this once** is preselected, and the grant action names your exact
+  choice, for example **Always allow Manage for 'Workspace'**. Closing the
+  prompt denies.
 - The prompt shows the agent's reported name (as a label only), its exact
   executable path, the workspace name with its short ID, the level, and the
   exact scopes. Names and paths appear as data: a control or bidirectional
@@ -150,16 +225,16 @@ a hostile program running as your account.
   **Agent access** list, and `splinterm access list`.
 - A request a grant already covers is answered at once, without a prompt.
   Prompts appear one at a time. An unanswered request stays pending for up to
-  two minutes, and the agent collects your answer by asking again; MCP's
-  `request_lair_access` returns `status: "pending"` meanwhile instead of
-  failing.
+  two minutes, and the agent collects your answer by asking again; the MCP tool
+  `splinterm.request_lair_access` returns `status: "pending"` meanwhile instead
+  of failing.
 - While a request waits, the Explorer marks its workspace **Agent asking for
   access**, the Window title ends with **AGENT ACCESS REQUEST WAITING**, and
-  **Agent access** in the palette shows how many wait. The prompt itself still
-  never takes focus.
+  **Agent access** in the palette shows how many wait.
 - The Explorer marks, in words, which workspaces, Dojos, and Splints an agent
-  can reach: **Agent can reach** (no covered agent connected), **Agent
-  connected**, or **…part** when only some of a workspace is covered.
+  can reach: **Agent can reach** (no covered agent connected) or **Agent
+  connected**. When only some of a workspace is covered, its row says **Agent
+  can reach part** or **Agent connected to part**.
 - `splinterm access list` shows every grant of every duration, pending
   requests, and policy rules that match a connected agent (read-only there),
   with the agent's identity, the access, when it was created, last used or
@@ -193,10 +268,10 @@ a hostile program running as your account.
 ## Trusted dialogs
 
 - The agent access prompt, the `splinterm upgrade --now` question, and the
-  launcher's restart question appear without taking keyboard focus, so typing
-  meant for another Window never reaches them. Their keys stay inert until you
-  click inside one or press the dialog shortcut, even if your desktop gives it
-  focus.
+  launcher's restart question ignore every key until you click inside one or
+  press the dialog shortcut, even if your desktop gives them focus. Typing meant
+  for another Window never answers them. With the Omarchy integration enabled,
+  they also appear without taking keyboard focus (see below).
 - The dialog shortcut, `Ctrl+Alt+G` by default, engages a dialog as a click
   would and never answers it. Keys and the answer click then count only about
   600 ms later. A key held since before that never counts, and key repeats
@@ -205,9 +280,10 @@ a hostile program running as your account.
   dialogs without focus, and `Ctrl+Alt+G` then reaches a waiting dialog from any
   Window. Splinterm enables that Hyprland binding only while a dialog waits,
   writes nothing to your Hyprland files, and binds nothing when your own
-  configuration already uses the chord. A module written by an earlier release
-  shows as `Dialog focus missing` in `splinterm integration omarchy status`;
-  run `enable` again to upgrade it.
+  configuration already uses the chord. For a module written by an earlier
+  release, the **Dialog focus** row of `splinterm integration omarchy status`
+  says `missing`; run `splinterm integration omarchy enable` again to upgrade
+  it.
 - Trusted dialogs use your configured font and ask the desktop for one fixed
   size, so tiling desktops such as Hyprland float them instead of tiling them.
   Given a smaller size anyway, a dialog rewraps its text and then shrinks it.
@@ -284,7 +360,7 @@ a hostile program running as your account.
   `multiplexer.new-dojo-directory` and `multiplexer.new-splint-directory`
   (`inherit`, `home`, or a path).
 - **Reload configuration** now also applies these settings, plus
-  `persist-on-tab-organization` and `explorer.agent-status`.
+  `multiplexer.persist-on-tab-organization` and `explorer.agent-status`.
 - `Ctrl+Shift+1` to `Ctrl+Shift+9` select the first nine tabs by default, also
   on layouts where Shift+digit produces a symbol.
 - Inactive tab labels are muted, with automatic contrast adjustment for native
@@ -325,17 +401,20 @@ a hostile program running as your account.
 
 - `splinterm-mcp` also accepts MCP protocol `2025-06-18`, so Codex can connect.
 - New tool `splinterm.report_agent_status`; the catalog now has 34 tools.
-- `request_lair_access` asks for one of the easy agent access levels and can
-  return a pending result while you have not answered yet; see "Easy agent
-  access".
+- `splinterm.request_lair_access` asks for one of the easy agent access levels
+  and can return a pending result while you have not answered yet; see "Easy
+  agent access".
 
 ## Security and robustness
 
 - The agent access prompt could exit before it appeared, because its screen
   failed an internal consistency check; it and the other trusted dialogs now
   open. A dialog that still fails reports why to the command that asked.
-- A failed `accept()` no longer stops the daemon and every terminal with it; the
-  daemon pauses briefly and keeps serving.
+- An error while accepting a new connection no longer stops the daemon and
+  every terminal. The daemon waits briefly and keeps running.
+- Text from an input method never reaches the terminal behind a trusted prompt
+  or a picker covering the Window. When terminal search is open, the text goes
+  there instead.
 - A crashed policy reload installs deny-all and keeps the daemon running.
 - Closing, killing, or terminating a stubborn process no longer blocks every
   other topology change for up to a minute.
@@ -353,36 +432,20 @@ a hostile program running as your account.
   policy and consent bound a cooperating agent, but they are not a sandbox
   against a hostile program running as your account.
 
-## Behaviour changes
-
-- Private protocol 44 (0.1.1 used 36). Old and new clients, daemons, and relays
-  do not interoperate. Upgrade both ends of a remote connection, and keep
-  `splinterm-mcp` at the same version.
-- The agent access prompt no longer grants on Enter: Enter denies, and only `G`
-  or the grant area grants. It no longer takes keyboard focus when it appears.
-- **Revoke all access** (`Ctrl+Shift+R`) asks with exact counts before it acts,
-  except in a single-pane Window, which has no palette.
-- The desktop launcher no longer restarts a daemon that may still run shells
-  without asking.
-- New Dojos and Lairs start in your home directory, not the focused Splint's
-  directory.
-- On Omarchy 4 with no font size in `config.ini`, the terminal follows
-  Omarchy's text size (9 pt on a stock desktop) instead of Splinterm's 14 px.
-  Set a size in `config.ini` to keep your own.
-- `Ctrl+Shift+1`–`9` are now tab shortcuts: on US layouts with tabs,
-  `Ctrl+Shift+2` and `Ctrl+Shift+6` no longer send `Ctrl+@` and `Ctrl+^`
-  (`Ctrl+2` and `Ctrl+6` still do). A keymap overlay that binds these chords
-  fails at startup until it adds the `[[unbind]]` the error names.
-- The tab strip is shorter on a stock Omarchy desktop.
-- The repository moved to `ministry-of-taste/splinterm`; old URLs redirect.
-
 ## Known limitations
 
 - Upgrading from 0.1.x to 0.2.0 cannot be live, because the running 0.1.x daemon
   has no live-upgrade support.
-- Live upgrade is unavailable while any transient Lair is open, for daemons not
-  started from an installed package build, on Nix, and on systems that forbid
-  executable memory files (`vm.memfd_noexec=2`), where no rollback copy is kept.
+- Live upgrade is unavailable:
+  - while a transient Lair is open: a Lair that ends with its Window. Ordinary
+    launches create one only with `multiplexer.persistent-by-default=no`; a
+    command opened with `splinterm-xdg-terminal-exec -- COMMAND` always does;
+  - for a daemon not started from an installed package build;
+  - on Nix;
+  - after a live upgrade or a rollback, until the daemon restarts (one live
+    upgrade per daemon start);
+  - on systems that forbid executable memory files (`vm.memfd_noexec=2`), where
+    no rollback copy is kept.
 - Agent status lives only in daemon memory. It is dropped when a Splint's
   process exits or relaunches, and after a daemon restart or live upgrade, until
   the agent reports again. A stale report is dropped 15 minutes after it turns
@@ -393,9 +456,10 @@ a hostile program running as your account.
   inactivity expiry; the access list shows when each grant was last used.
 - `splinterm mcp setup vscode` is not yet verified against a real VS Code
   install.
-- In a single-pane Window, which has no palette, the Revoke all shortcut ends
-  only the grants that Window shows and every pending request; use
-  `splinterm access revoke --all` there.
+- In a Window opened on a single Splint (`splinterm launch --splint-id ID`),
+  which has no command palette, the Revoke all shortcut ends only the grants
+  that Window shows and every pending request; use `splinterm access revoke
+  --all` there.
 - Dojo tab badges have no accessible description yet; the Explorer carries the
   same status. Splinterm does not read the desktop's reduce-animation setting.
 - Splinterm's SSH prompt needs Linux pidfds (kernel 5.3 or later). Remote
@@ -403,21 +467,6 @@ a hostile program running as your account.
 - Persistence still follows the daemon lifetime: a crash, logout without
   lingering, or reboot ends running processes, and saved layouts do not
   checkpoint applications.
-
-## Upgrading from 0.1.x
-
-Save your work and upgrade from a terminal Splinterm does not own, such as Foot
-or a text console. The running 0.1.x daemon must be restarted, which ends its
-terminals. The installers ask before they stop it. If it is still running when
-you next launch Splinterm, the desktop launcher cannot read it and asks in the
-restart dialog, with a best-effort count of its shells; choose **Restart now**.
-Then reopen every Splinterm Window so it runs the new client, and upgrade
-`splinterm-mcp` and any remote hosts to 0.2.0 too.
-
-From 0.2.0 on, run `splinterm upgrade` after installing a new package. Where the
-running daemon reports live upgrade available, `splinterm upgrade --now` keeps
-terminals running. Package scripts never restart or upgrade a running daemon by
-themselves.
 
 See `docs/cli.md`, `docs/packaging.md`, `docs/configuration.md`,
 `docs/remote.md`, `docs/automation.md`, `docs/mcp.md`, and `docs/usage.md` for
