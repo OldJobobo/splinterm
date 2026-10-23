@@ -218,8 +218,8 @@ picker (`splinterm dojos`). Input stays paused in every Window until the answer.
   (whose input the upgrade pauses), a small trusted dialog titled
   "Splinterm — Upgrade", in the style of the access consent dialog, asks
   instead. `D`, `Escape`, `Enter`, or the red left area cancels; only `G` or the
-  green right area proceeds. The dialog appears without taking keyboard focus,
-  and its keys stay inert until you click inside it or press Ctrl+Alt+G (see
+  green right area proceeds. Its keys stay inert until you click inside it or
+  press Ctrl+Alt+G, and under Omarchy it can appear without focus (see
   [Trusted dialogs](usage.md#trusted-dialogs)); keys and the proceed click
   count only about 600 ms after that, so typing meant for another Window cannot
   answer it. Once armed, a key acts when it goes down: a key held down since
@@ -397,8 +397,8 @@ caller must explicitly resubscribe.
 | `authorization status SPLINT_ID` | Inspect effective authority for one Splint. |
 | `authorization revoke GRANT_ID` | Revoke a just-this-once grant for one Splint. |
 | `access list` | List every agent grant of every duration, pending requests, and matching policy rules. |
-| `access revoke ID` | Revoke one grant: a runtime grant ID or a remembered `ra_` entry ID. |
-| `access revoke --all [--dry-run]` | Revoke every agent grant and pending request after showing the exact counts; policy rules are untouched. |
+| `access revoke ID [--yes]` | Revoke one grant: a runtime grant ID or a remembered `ra_` entry ID. |
+| `access revoke --all [--dry-run] [--yes]` | Revoke every agent grant and pending request after showing the exact counts; policy rules are untouched. |
 | `mcp setup claude-code\|codex\|vscode [--dry-run] [--replace]` | Add the installed `splinterm-mcp` adapter to an agent host's configuration as the `splinterm` server; grants no access and writes no policy. The VS Code form is not yet verified against a real install. |
 | `mcp remove claude-code\|codex\|vscode [--dry-run] [--force]` | Remove that entry (`--force` for one setup did not write); revokes no grant. |
 | `policy validate PATH` | Validate a policy through the daemon's secure loader without publishing it. |
