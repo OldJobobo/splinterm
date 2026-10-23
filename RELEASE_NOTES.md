@@ -70,8 +70,8 @@ running daemon by themselves.
   do not interoperate. Upgrade both ends of a remote connection, and keep
   `splinterm-mcp` at the same version.
 - The agent access prompt no longer grants on Enter: Enter denies, and only `G`
-  or the grant area grants. Its keys do nothing until you click inside it (see
-  "Trusted dialogs").
+  or the grant area grants. Its keys do nothing until you click inside it or
+  press the dialog shortcut (see "Trusted dialogs").
 - **Revoke all access** (`Ctrl+Shift+R`) asks with exact counts before it acts,
   except in a Window opened on a single Splint (`splinterm launch --splint-id
   ID`), which has no command palette.
