@@ -49,17 +49,18 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use splinterd::dialog_shortcut::DialogShortcut;
 use splinterm::automation::{Connection, protocol_error, socket_path};
-use splinterm::{TrustedConsentUi, WindowOptions};
+use splinterm::frontend::dialog_text::text_rows;
+use splinterm::{DialogLine, DialogText, TrustedConsentUi, WindowOptions};
 use splinterm_protocol::{ErrorCode, HandoffReport};
 use tokio::net::UnixStream;
 
 use super::{
-    consent::{keyboard_hint, static_dialog_snapshot, trusted_label},
+    consent::{keyboard_hint, trusted_label},
     local_service::user_systemctl_output,
     upgrade::reason_line,
     upgrade_dialog::{
-        CAPABILITY_BYTES, DialogAnswer, DialogPrompt, MAX_DIALOG_COLUMNS, ask_dialog_child,
-        dialog_capability, dialog_rows, run_dialog_client,
+        CAPABILITY_BYTES, DialogAnswer, DialogPrompt, MAX_DIALOG_COLUMNS, MIN_DIALOG_ROWS,
+        ask_dialog_child, dialog_capability, question_identity, run_dialog_client,
     },
 };
 
@@ -91,8 +92,16 @@ const WRAP_COLUMNS: usize = 76;
 /// Most lines one blocking reason section may take in the question.
 const MAX_REASON_LINES: usize = 10;
 
-/// Most lines a restart dialog shows.
+/// Most lines a restart dialog shows, and most rows they take at the
+/// widest dialog.
 const MAX_RESTART_DIALOG_LINES: usize = 48;
+
+/// The longest restart dialog line, in characters: the longest blocking
+/// reason with its bullet.
+const MAX_DIALOG_LINE_CHARS: usize = 1100;
+
+/// The deepest hanging indent a restart dialog line asks for.
+const MAX_DIALOG_INDENT: usize = 16;
 
 /// Splint workload scopes, named `splinterm-splint<id>-i<incarnation>.scope`
 /// by every release since 0.1.
@@ -431,36 +440,99 @@ pub(in crate::app) fn confirm_label(count: ShellCount) -> String {
     }
 }
 
-/// Greedy word wrap at `width` bytes; every line after the first starts
-/// with `indent`. A word longer than the width gets a line of its own.
-fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() && line.len() + 1 + word.len() > width {
-            lines.push(std::mem::take(&mut line));
+/// A paragraph of the question, wrapped at [`WRAP_COLUMNS`] at most.
+fn prose(text: impl Into<String>) -> DialogLine {
+    DialogLine::new(text).with_wrap_at(WRAP_COLUMNS)
+}
+
+/// `line` as the terminal note prints it: wrapped at its own width with its
+/// hanging indent, and never inside a word, so a long path or unit name
+/// stays whole (on a row of its own) for copying.
+fn terminal_rows(line: &DialogLine) -> Vec<String> {
+    let Some(width) = line.wrap_at else {
+        return vec![line.text.clone()];
+    };
+    let leading = line.text.len() - line.text.trim_start_matches(' ').len();
+    let mut rows = Vec::new();
+    let mut row = " ".repeat(leading);
+    let mut has_word = false;
+    for word in line.text.split_whitespace() {
+        if has_word && row.chars().count() + 1 + word.chars().count() > width {
+            rows.push(std::mem::take(&mut row));
+            row = " ".repeat(line.indent);
+            has_word = false;
         }
-        if line.is_empty() {
-            if !lines.is_empty() {
-                line.push_str(indent);
-            }
-        } else {
-            line.push(' ');
+        if has_word {
+            row.push(' ');
         }
-        line.push_str(word);
+        row.push_str(word);
+        has_word = true;
     }
-    if !line.is_empty() {
-        lines.push(line);
+    if has_word || rows.is_empty() {
+        if !has_word {
+            row.clear();
+        }
+        rows.push(row);
     }
-    lines
+    rows
+}
+
+/// One blocking reason as its bulleted paragraph.
+fn reason_paragraph(text: &str) -> DialogLine {
+    DialogLine::new(format!("  • {text}"))
+        .with_indent(6)
+        .with_wrap_at(WRAP_COLUMNS)
+}
+
+/// The blocking reasons, at most [`MAX_REASON_LINES`] rows as the question
+/// is first shown. A longer list keeps the rows that fit, cut at a word,
+/// and ends by pointing to the full report.
+fn reason_lines(reasons: &[String]) -> Vec<DialogLine> {
+    let paragraphs: Vec<_> = reasons
+        .iter()
+        .map(|reason| {
+            reason_paragraph(
+                &trusted_label(reason, 1024)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        })
+        .collect();
+    let rows = |line: &DialogLine| terminal_rows(line).len();
+    if paragraphs.iter().map(rows).sum::<usize>() <= MAX_REASON_LINES {
+        return paragraphs;
+    }
+    let mut room = MAX_REASON_LINES - 1;
+    let mut kept = Vec::new();
+    for paragraph in paragraphs {
+        if room == 0 {
+            break;
+        }
+        let wrapped = terminal_rows(&paragraph);
+        if wrapped.len() <= room {
+            room -= wrapped.len();
+            kept.push(paragraph);
+            continue;
+        }
+        let words: Vec<_> = wrapped[..room].iter().map(|row| row.trim()).collect();
+        kept.push(reason_paragraph(
+            words.join(" ").trim_start_matches("• ").trim_start(),
+        ));
+        room = 0;
+    }
+    kept.push(reason_paragraph(
+        "… run `splinterm upgrade` for the full report.",
+    ));
+    kept
 }
 
 /// The question's explanation, shared by the dialog and the terminal note:
-/// everything above the action hints.
-pub(in crate::app) fn question_text(question: &RestartQuestion) -> Vec<String> {
+/// everything above the action hints, as paragraphs.
+pub(in crate::app) fn question_lines(question: &RestartQuestion) -> Vec<DialogLine> {
     let mut lines = vec![
-        "TRUSTED SPLINTERM UPGRADE QUESTION".to_owned(),
-        String::new(),
+        DialogLine::new("TRUSTED SPLINTERM UPGRADE QUESTION"),
+        DialogLine::blank(),
     ];
     let installed = trusted_label(&question.installed_version, 64);
     match &question.running {
@@ -468,20 +540,23 @@ pub(in crate::app) fn question_text(question: &RestartQuestion) -> Vec<String> {
             version,
             generation,
         } => {
-            lines.push("The running Splinterm daemon is not the installed build.".to_owned());
-            lines.push(format!(
-                "  Running:   Splinterm {}, generation {generation}",
-                trusted_label(version, 64)
+            lines.push(DialogLine::new(
+                "The running Splinterm daemon is not the installed build.",
             ));
-            lines.push(format!("  Installed: Splinterm {installed}"));
-            lines.extend(wrap(
-                &format!(
-                    "It still has {}, so it is not restarted without asking.",
-                    shells_phrase(question.shells)
-                ),
-                WRAP_COLUMNS,
-                "",
-            ));
+            lines.push(
+                DialogLine::new(format!(
+                    "  Running:   Splinterm {}, generation {generation}",
+                    trusted_label(version, 64)
+                ))
+                .with_indent(13),
+            );
+            lines.push(
+                DialogLine::new(format!("  Installed: Splinterm {installed}")).with_indent(13),
+            );
+            lines.push(prose(format!(
+                "It still has {}, so it is not restarted without asking.",
+                shells_phrase(question.shells)
+            )));
         }
         RunningDaemon::Unreadable(reason) => {
             let explanation = match reason {
@@ -499,80 +574,70 @@ pub(in crate::app) fn question_text(question: &RestartQuestion) -> Vec<String> {
                     "The running Splinterm daemon did not give a usable answer, so it cannot be asked for its shells. If a live upgrade is in progress, choose Not now and try again shortly. Installed: Splinterm {installed}."
                 ),
             };
-            lines.extend(wrap(&explanation, WRAP_COLUMNS, ""));
+            lines.push(prose(explanation));
             if let ShellCount::About(count) = question.shells {
-                lines.extend(wrap(
-                    &format!(
-                        "About {count} shell{} appear to be running: a best-effort count of its running workload units.",
-                        if count == 1 { "" } else { "s" }
-                    ),
-                    WRAP_COLUMNS,
-                    "",
-                ));
+                lines.push(prose(format!(
+                    "About {count} shell{} appear to be running: a best-effort count of its running workload units.",
+                    if count == 1 { "" } else { "s" }
+                )));
             }
         }
     }
-    lines.push(String::new());
+    lines.push(DialogLine::blank());
     let ends = match question.shells {
         // A best-effort count can be short: say what a restart really ends.
         ShellCount::About(_) => "every shell it runs".to_owned(),
         count => shells_phrase(count),
     };
-    lines.extend(wrap(
-        &format!(
-            "Restarting it starts the installed build and ends {ends} and the programs in them. Open Splinterm Windows must be reopened afterwards."
-        ),
-        WRAP_COLUMNS,
-        "",
-    ));
+    lines.push(prose(format!(
+        "Restarting it starts the installed build and ends {ends} and the programs in them. Open Splinterm Windows must be reopened afterwards."
+    )));
     match &question.live_upgrade {
         LiveUpgrade::Possible => {
-            lines.push(String::new());
-            lines.extend(wrap(
+            lines.push(DialogLine::blank());
+            lines.push(prose(
                 "Live upgrade can keep them running instead: choose Not now, then run `splinterm upgrade` in a terminal.",
-                WRAP_COLUMNS,
-                "",
             ));
         }
         LiveUpgrade::Blocked(reasons) => {
-            lines.push(String::new());
-            lines.push("Live upgrade is not available now:".to_owned());
-            let mut section = Vec::new();
-            for reason in reasons {
-                section.extend(wrap(
-                    &format!("• {}", trusted_label(reason, 1024)),
-                    WRAP_COLUMNS - 2,
-                    "    ",
-                ));
-            }
-            if section.len() > MAX_REASON_LINES {
-                section.truncate(MAX_REASON_LINES - 1);
-                section.push("• … run `splinterm upgrade` for the full report.".to_owned());
-            }
-            lines.extend(section.into_iter().map(|line| format!("  {line}")));
+            lines.push(DialogLine::blank());
+            lines.push(DialogLine::new("Live upgrade is not available now:"));
+            lines.extend(reason_lines(reasons));
         }
         LiveUpgrade::Unknown => {}
     }
-    lines.push(String::new());
-    lines.push("Not now opens nothing and changes nothing.".to_owned());
+    lines.push(DialogLine::blank());
+    lines.push(DialogLine::new(
+        "Not now opens nothing and changes nothing.",
+    ));
     lines
+}
+
+/// The question's explanation as the terminal note prints it, wrapped as
+/// the dialog first shows it.
+pub(in crate::app) fn question_text(question: &RestartQuestion) -> Vec<String> {
+    question_lines(question)
+        .iter()
+        .flat_map(terminal_rows)
+        .collect()
 }
 
 /// The whole dialog: the question, the deadline, and the actions. The dialog
 /// child adds the keyboard hint, which names its dialog shortcut.
-pub(in crate::app) fn dialog_lines(question: &RestartQuestion) -> Vec<String> {
-    let mut lines = question_text(question);
-    lines.push(format!(
+pub(in crate::app) fn dialog_lines(question: &RestartQuestion) -> Vec<DialogLine> {
+    let mut lines = question_lines(question);
+    lines.push(DialogLine::new(format!(
         "Closing this dialog, or no answer within {} seconds, means Not now.",
         RESPOND_WITHIN.as_secs()
-    ));
-    lines.push(String::new());
-    lines.push(format!(
+    )));
+    lines.push(DialogLine::blank());
+    lines.push(DialogLine::hint(format!(
         "[D / Esc / Enter  Not now]     [R  {}]",
         confirm_label(question.shells)
+    )));
+    lines.push(DialogLine::hint(
+        "Click the red left area for Not now or the green right area to restart.",
     ));
-    lines
-        .push("Click the red left area for Not now or the green right area to restart.".to_owned());
     lines
 }
 
@@ -642,7 +707,8 @@ pub(in crate::app) fn parse_main_pid(output: &str) -> Option<u32> {
 struct RestartDialogPrompt {
     capability: Vec<u8>,
     parent_pid: u32,
-    lines: Vec<String>,
+    /// The question's paragraphs, which the dialog wraps to its width.
+    lines: Vec<DialogLine>,
 }
 
 impl DialogPrompt for RestartDialogPrompt {
@@ -659,10 +725,18 @@ impl DialogPrompt for RestartDialogPrompt {
             && self.parent_pid > 0
             && !self.lines.is_empty()
             && self.lines.len() <= MAX_RESTART_DIALOG_LINES
-            && self
-                .lines
-                .iter()
-                .all(|line| line.len() <= MAX_DIALOG_COLUMNS);
+            && self.lines.iter().all(|line| {
+                line.text.chars().count() <= MAX_DIALOG_LINE_CHARS
+                    && line.indent <= MAX_DIALOG_INDENT
+                    && line.wrap_at.is_none_or(|width| width <= MAX_DIALOG_COLUMNS)
+            })
+            && text_rows(
+                &[DialogText {
+                    lines: self.lines.clone(),
+                    minimum_rows: 0,
+                }],
+                MAX_DIALOG_COLUMNS,
+            ) <= MAX_RESTART_DIALOG_LINES;
         if !valid {
             anyhow::bail!("invalid restart dialog prompt");
         }
@@ -677,26 +751,20 @@ impl DialogPrompt for RestartDialogPrompt {
         let mut lines = self
             .lines
             .iter()
-            .map(|line| trusted_label(line, MAX_DIALOG_COLUMNS))
+            .map(|line| DialogLine {
+                text: trusted_label(&line.text, MAX_DIALOG_LINE_CHARS),
+                ..line.clone()
+            })
             .collect::<Vec<_>>();
-        lines.push(keyboard_hint("dialog", shortcut));
-        let rows = dialog_rows(lines.len());
-        let snapshot = static_dialog_snapshot(
-            lines,
-            rows,
-            "Upgrade question",
-            splinterm_core::SplintId::new(),
-            0,
-        );
-        let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
-        let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
-        WindowOptions {
-            snapshot: Some(snapshot),
-            trusted_consent: Some(TrustedConsentUi::restart(decision).with_shortcut(shortcut)),
-            initial_columns: columns,
-            initial_rows: rows,
-            ..WindowOptions::default()
-        }
+        lines.push(DialogLine::hint(keyboard_hint("dialog", shortcut)));
+        TrustedConsentUi::restart(decision)
+            .with_shortcut(shortcut)
+            .with_text(DialogText {
+                lines,
+                minimum_rows: MIN_DIALOG_ROWS,
+            })
+            .with_identity(question_identity())
+            .into_window_options()
     }
 }
 
@@ -1176,7 +1244,7 @@ mod tests {
             confirm_label(question.shells),
             "Restart now (ends about 3 shells)"
         );
-        let text = dialog_lines(&question).join(" ");
+        let text = line_texts(&dialog_lines(&question)).join(" ");
         assert!(text.contains("such as 0.1.x"), "{text}");
         assert!(text.contains("best-effort count"), "{text}");
         assert!(text.contains("ends every shell it runs"), "{text}");
@@ -1187,7 +1255,7 @@ mod tests {
             confirm_label(uncounted.shells),
             "Restart now (ends all running shells)"
         );
-        let text = dialog_lines(&uncounted).join(" ");
+        let text = line_texts(&dialog_lines(&uncounted)).join(" ");
         assert!(text.contains("ends all running shells"), "{text}");
         assert!(!text.contains("best-effort"), "{text}");
     }
@@ -1351,7 +1419,7 @@ mod tests {
     #[test]
     fn the_dialog_names_the_builds_the_count_the_keys_and_the_default() {
         let question = asked(&report(OLDER, 4, Vec::new()));
-        let lines = dialog_lines(&question);
+        let lines = natural_rows_of(&dialog_lines(&question));
         let text = lines.join(" ");
         for expected in [
             "TRUSTED SPLINTERM UPGRADE QUESTION",
@@ -1404,12 +1472,25 @@ mod tests {
             daemon_pid: PID,
         };
         let lines = dialog_lines(&question);
-        assert!(lines.len() <= MAX_RESTART_DIALOG_LINES, "{}", lines.len());
-        assert!(lines.iter().all(|line| line.len() <= MAX_DIALOG_COLUMNS));
+        let rows = natural_rows_of(&lines);
+        assert!(rows.len() <= MAX_RESTART_DIALOG_LINES, "{}", rows.len());
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("for the full report"))
+            rows.iter()
+                .all(|line| line.chars().count() <= MAX_DIALOG_COLUMNS)
+        );
+        assert!(rows.iter().any(|line| line.contains("for the full report")));
+        // The reasons take at most their bound of rows, the pointer to the
+        // full report among them, and the last one kept is cut at a word.
+        let reason_rows = rows
+            .iter()
+            .skip_while(|row| !row.starts_with("Live upgrade is not available"))
+            .skip(1)
+            .take_while(|row| row.starts_with("  "))
+            .count();
+        assert_eq!(reason_rows, MAX_REASON_LINES, "{rows:#?}");
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains("wor ") && !row.ends_with("wor"))
         );
         assert_eq!(not_now_lines(&question).len(), 1);
 
@@ -1498,7 +1579,7 @@ mod tests {
         let good = RestartDialogPrompt {
             capability: vec![1; CAPABILITY_BYTES],
             parent_pid: 42,
-            lines: vec!["question".to_owned()],
+            lines: vec![DialogLine::new("question")],
         };
         good.validate().unwrap();
         for bad in [
@@ -1515,11 +1596,24 @@ mod tests {
                 ..good.clone()
             },
             RestartDialogPrompt {
-                lines: vec!["x".repeat(MAX_DIALOG_COLUMNS + 1)],
+                lines: vec![DialogLine::new("x".repeat(MAX_DIALOG_LINE_CHARS + 1))],
                 ..good.clone()
             },
             RestartDialogPrompt {
-                lines: vec![String::new(); MAX_RESTART_DIALOG_LINES + 1],
+                lines: vec![DialogLine::blank(); MAX_RESTART_DIALOG_LINES + 1],
+                ..good.clone()
+            },
+            RestartDialogPrompt {
+                lines: vec![DialogLine::new("question").with_indent(MAX_DIALOG_INDENT + 1)],
+                ..good.clone()
+            },
+            RestartDialogPrompt {
+                lines: vec![DialogLine::new("question").with_wrap_at(MAX_DIALOG_COLUMNS + 1)],
+                ..good.clone()
+            },
+            // Few lines, but too many rows once wrapped.
+            RestartDialogPrompt {
+                lines: vec![DialogLine::new("word ".repeat(220)); 6],
                 ..good.clone()
             },
         ] {
@@ -1566,19 +1660,58 @@ splinterm-splint-notes.service loaded active running Something else
         assert_eq!(parse_main_pid("[not set]"), None);
     }
 
+    /// The terminal note prints the question as the dialog first shows
+    /// it: prose wrapped at its width, other lines whole.
     #[test]
-    fn wrapping_respects_the_width_and_indents_continuations() {
-        let lines = wrap("one two three four five six seven eight nine ten", 14, "  ");
-        assert_eq!(
-            lines,
-            [
-                "one two three",
-                "  four five",
-                "  six seven",
-                "  eight nine",
-                "  ten"
-            ]
+    fn the_terminal_note_wraps_the_prose_at_its_width() {
+        let question = asked(&unreadable(Unreadable::OtherProtocol, Some(3)));
+        let text = question_text(&question);
+        assert!(
+            text.iter().all(|line| line.chars().count() <= WRAP_COLUMNS),
+            "{text:#?}"
         );
-        assert!(wrap("", 10, "").is_empty());
+        assert!(text.len() > question_lines(&question).len());
+        assert_eq!(
+            text.join(" ").split_whitespace().collect::<Vec<_>>(),
+            line_texts(&question_lines(&question))
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The terminal note never splits a word, however long: a long path
+    /// gets a row of its own, whole, for copying.
+    #[test]
+    fn the_terminal_note_never_splits_a_long_word() {
+        let path = format!("/{}", "p".repeat(100));
+        let rows = terminal_rows(&prose(format!("Run {path} to see it.")));
+        assert_eq!(rows, ["Run".to_owned(), path, "to see it.".to_owned()]);
+        let bullet = terminal_rows(&reason_paragraph(&"word ".repeat(30)));
+        assert!(bullet[0].starts_with("  • word"));
+        assert!(bullet[1..].iter().all(|row| row.starts_with("      word")));
+        assert!(bullet.iter().all(|row| row.chars().count() <= WRAP_COLUMNS));
+        assert_eq!(terminal_rows(&DialogLine::blank()), [""]);
+        assert_eq!(
+            terminal_rows(&DialogLine::new("  Running:   Splinterm 0.2.6")),
+            ["  Running:   Splinterm 0.2.6"]
+        );
+    }
+
+    /// The text of each line, as given.
+    fn line_texts(lines: &[DialogLine]) -> Vec<String> {
+        lines.iter().map(|line| line.text.clone()).collect()
+    }
+
+    /// The rows the dialog first shows `lines` in.
+    fn natural_rows_of(lines: &[DialogLine]) -> Vec<String> {
+        splinterm::frontend::dialog_text::natural_layout(
+            &[DialogText {
+                lines: lines.to_vec(),
+                minimum_rows: 0,
+            }],
+            0,
+        )
+        .rows
     }
 }

@@ -8,6 +8,7 @@ use super::super::{
     WindowTopologyCommand, note_output_enter, note_output_leave, terminal_resize_allowed,
     viewport_destination, wl_output, wl_surface,
 };
+use crate::wayland::chrome::bounded_fixed_size;
 
 impl CompositorHandler for App {
     fn scale_factor_changed(
@@ -162,14 +163,22 @@ impl WindowHandler for App {
     ) {
         let old_width = self.surface.logical_width;
         let old_height = self.surface.logical_height;
+        // A trusted dialog that chooses its own size stays within the
+        // compositor's suggested bounds, as its fixed size does.
+        let (own_width, own_height) = if self.modal.trusted_consent.is_some() {
+            self.modal.trusted_layout.bounds = configure.suggested_bounds;
+            bounded_fixed_size((old_width, old_height), configure.suggested_bounds)
+        } else {
+            (old_width, old_height)
+        };
         let width = configure
             .new_size
             .0
-            .map_or(old_width, std::num::NonZeroU32::get);
+            .map_or(own_width, std::num::NonZeroU32::get);
         let height = configure
             .new_size
             .1
-            .map_or(old_height, std::num::NonZeroU32::get);
+            .map_or(own_height, std::num::NonZeroU32::get);
         emit_perf_trace(
             "splinterm",
             "window_event",

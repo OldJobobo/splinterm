@@ -99,8 +99,9 @@ impl Engagement {
         }
     }
 
-    /// Starts the arming delay again, for an engaged dialog.
-    const fn rearm(&mut self, now: Instant) {
+    /// Starts the arming delay again, for an engaged dialog. An unengaged
+    /// one stays unengaged.
+    pub(crate) const fn rearm(&mut self, now: Instant) {
         if self.engaged {
             self.armed_from = Some(now);
         }
@@ -134,10 +135,10 @@ pub(crate) const MINIMUM_ACTION_ROWS: u32 = 2;
 /// They take the bottom [`ACTION_AREA_PERCENT`] of the Window while the text
 /// ends above that. When a small Window (a tiled one, say) leaves the text
 /// no room, they shrink to begin where the text ends, down to
-/// `minimum_height`, so the actions never cover text that fits. Only text
-/// taller than the Window less `minimum_height` is clipped at the actions;
-/// the Window asks the compositor for a minimum size that avoids that
-/// ([`minimum_dialog_rows`]).
+/// `minimum_height`, so the actions never cover text that fits. The Window
+/// lays its text out again so that it fits (`super::dialog_text::layout`);
+/// only text that cannot fit even at [`DIALOG_FONT_FLOOR_PERCENT`] would
+/// reach the actions, and the layout drops rows instead.
 pub(crate) fn action_area_top(height: u32, text_bottom: u32, minimum_height: u32) -> u32 {
     let preferred = height.saturating_mul(100 - ACTION_AREA_PERCENT) / 100;
     let lowest = height.saturating_sub(minimum_height);
@@ -152,10 +153,51 @@ pub(crate) fn dialog_text_rows(rows: &[splinterm_protocol::TerminalRow]) -> usiz
         .map_or(0, |last| last + 1)
 }
 
-/// The fewest grid rows that show `text_rows` rows of dialog text above the
-/// shortest action areas, with one row to spare for the border.
-pub(crate) const fn minimum_dialog_rows(text_rows: usize) -> usize {
-    text_rows + MINIMUM_ACTION_ROWS as usize + 1
+/// The smallest a trusted dialog's font gets, in percent of the configured
+/// size, while it steps down to fit a Window smaller than it asked for.
+///
+/// 70% of a typical 10 to 12 point terminal font is still 7 to 8.5 points,
+/// about 10 pixels at 96 DPI: small but readable for a few lines of plain
+/// text. Smaller than that, a question about trust is no longer easy to
+/// read, so the dialog stops shrinking and drops rows instead (hint rows
+/// last).
+pub(crate) const DIALOG_FONT_FLOOR_PERCENT: u16 = 70;
+
+/// The runtime zoom a trusted dialog draws its text with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DialogFontStep {
+    /// Runtime zoom steps from the configured size: 0 or fewer.
+    pub(crate) zoom_steps: i16,
+    /// Whether every row of text fits above the shortest action areas.
+    pub(crate) fits: bool,
+}
+
+/// Picks the font a dialog draws with, from `candidates` in order from the
+/// configured size down: each is its zoom steps, its effective pixel size,
+/// and whether the text fits at it. The first that fits wins. A candidate
+/// smaller than [`DIALOG_FONT_FLOOR_PERCENT`] of `base_pixels` is never
+/// used, so when none fits, the smallest one at or above the floor is used
+/// and the text is clipped. The configured size is always allowed.
+/// `candidates` is read lazily and no further than needed.
+pub(crate) fn dialog_font_step(
+    base_pixels: f32,
+    candidates: impl IntoIterator<Item = (i16, f32, bool)>,
+) -> DialogFontStep {
+    let floor = base_pixels * f32::from(DIALOG_FONT_FLOOR_PERCENT) / 100.0;
+    let mut chosen = DialogFontStep {
+        zoom_steps: 0,
+        fits: false,
+    };
+    for (index, (zoom_steps, pixels, fits)) in candidates.into_iter().enumerate() {
+        if index > 0 && pixels < floor {
+            break;
+        }
+        chosen = DialogFontStep { zoom_steps, fits };
+        if fits {
+            break;
+        }
+    }
+    chosen
 }
 
 /// What the access consent dialog does with one key press or click.
@@ -211,6 +253,11 @@ impl AccessChoice {
     /// The Window gained keyboard focus (see [`Engagement::note_focus`]).
     pub(crate) const fn note_focus(&mut self, now: Instant) {
         self.engagement.note_focus(now);
+    }
+
+    /// Starts the arming delay again (see [`Engagement::rearm`]).
+    pub(crate) const fn rearm(&mut self, now: Instant) {
+        self.engagement.rearm(now);
     }
 
     /// Selects an offered duration and starts the delay again. A withheld,
@@ -280,6 +327,22 @@ impl AccessChoice {
 }
 
 impl TrustedDialogKind {
+    /// What the dialog shows in place of its answer hints while part of its
+    /// text is hidden: it cannot say yes until the Window is larger.
+    pub(crate) const fn clipped_notice(self) -> &'static str {
+        match self {
+            Self::AccessConsent => {
+                "Part of this request is hidden, so it cannot be granted. Make this window larger to grant. Enter, Escape, D, or the red area deny."
+            }
+            Self::Upgrade => {
+                "Part of this question is hidden, so it cannot proceed. Make this window larger to proceed. Enter, Escape, D, or the red area cancel."
+            }
+            Self::Restart => {
+                "Part of this question is hidden, so it cannot restart. Make this window larger to restart. Enter, Escape, D, or the red area answer Not now."
+            }
+        }
+    }
+
     /// The title the Window maps with.
     pub(crate) const fn window_title(self) -> &'static str {
         match self {
@@ -732,6 +795,41 @@ mod tests {
         assert_eq!(dialog_text_rows(&[row(""), row("   ")]), 0);
         let rows = [row("TITLE"), row(""), row("text"), row("  "), row("")];
         assert_eq!(dialog_text_rows(&rows), 3);
-        assert_eq!(minimum_dialog_rows(3), 3 + 2 + 1);
+    }
+
+    /// A dialog keeps its configured font when its text fits, steps down
+    /// only as far as it must, and never below the floor: then it stays at
+    /// the smallest allowed step and its text is clipped.
+    #[test]
+    fn the_font_steps_down_only_as_far_as_needed_and_never_past_the_floor() {
+        // 20 px configured; each step takes 2/3 px, so 70% (14 px) is
+        // reached at step -9.
+        let steps = |fits_from: Option<i16>| {
+            (0..40_i16).map(move |step| {
+                let zoom = -step;
+                let pixels = 20.0 - f32::from(step) * (2.0 / 3.0);
+                (zoom, pixels, fits_from.is_some_and(|from| zoom <= from))
+            })
+        };
+        let step = |zoom_steps, fits| DialogFontStep { zoom_steps, fits };
+        assert_eq!(dialog_font_step(20.0, steps(Some(0))), step(0, true));
+        assert_eq!(dialog_font_step(20.0, steps(Some(-3))), step(-3, true));
+        assert_eq!(dialog_font_step(20.0, steps(Some(-9))), step(-9, true));
+        // Fitting only below the floor does not count.
+        assert_eq!(dialog_font_step(20.0, steps(Some(-10))), step(-9, false));
+        assert_eq!(dialog_font_step(20.0, steps(None)), step(-9, false));
+        // The renderer refusing smaller sizes ends the search early, and
+        // the configured size is always allowed.
+        assert_eq!(dialog_font_step(20.0, steps(None).take(2)), step(-1, false));
+        assert_eq!(dialog_font_step(20.0, std::iter::empty()), step(0, false));
+        assert_eq!(
+            dialog_font_step(10.0, [(0, 10.0, false), (-1, 8.0, false), (-2, 6.0, true)]),
+            step(-1, false)
+        );
+        // Candidates past the one that fits are never measured.
+        let mut measured = 0;
+        let lazy = steps(Some(-2)).inspect(|_| measured += 1);
+        assert_eq!(dialog_font_step(20.0, lazy).zoom_steps, -2);
+        assert_eq!(measured, 3);
     }
 }
