@@ -19,13 +19,15 @@
 //! (M3.12) and the continuation, resume, and ticket work (M3.13 to M3.16),
 //! has landed, so [`WINDOW_CONTINUITY_READY`] is `true`.
 //! [`live_handoff_support`] is the one decision that lets a running daemon
-//! use them. It still reports `Unsupported` for:
+//! use them. It still refuses:
 //!
 //! * a Nix-store build, for all of Splinterm 0.2.0 (operator decision
 //!   2026-10-18): live upgrade ships for Arch and AUR packages only, and a
-//!   Nix-provenance daemon upgrades by restarting;
+//!   Nix-provenance daemon upgrades by restarting. Reports name it
+//!   `Unsupported`;
 //! * a daemon whose compiled build identity is unreadable, so that its
-//!   provenance is unknown. A correctly built daemon never is.
+//!   provenance is unknown, at the exec boundary; its dry run fails as an
+//!   internal error. A correctly built daemon never is.
 //!
 //! Support is not the whole answer. The dry-run report also names, and
 //! `Execute` is refused before the gate for, open transient Lairs (D1), a
@@ -74,7 +76,9 @@ pub(crate) const FRESH_DAEMON_GENERATION: u64 = 1;
 /// Window continuity is the client banner and reconnect (Plan 0061 M3.12)
 /// and the Window continuation, resume, and ticket work (M3.13 to M3.16).
 /// Setting this to `true` was the production enablement step for live
-/// handoff. Clearing it would refuse live handoff in every build again, as
+/// handoff. The operator enabled it ahead of the plain-package VM acceptance
+/// run, which `docs/handoff-vm-acceptance.md` tracks under "Acceptance
+/// status". Clearing it would refuse live handoff in every build again, as
 /// [`LiveHandoffUnsupported::WindowContinuityPending`]. No environment
 /// variable or test seam overrides it, and the test-only
 /// `vm-acceptance-live-handoff` build feature ([`VM_ACCEPTANCE_BUILD`]) can

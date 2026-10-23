@@ -274,7 +274,8 @@ pub(in crate::app) fn reason_line(
             "Live upgrade is not supported for Nix installations in Splinterm 0.2.0.".to_owned()
         }
         // Any other build that refuses: a daemon from before live upgrade
-        // was enabled, or one whose build provenance is unknown.
+        // was enabled. (An unknown build provenance never reaches the
+        // client as `Unsupported`: its dry run fails as an internal error.)
         HandoffBlockingReason::Unsupported => {
             "The running daemon's build does not support live upgrade.".to_owned()
         }

@@ -30,8 +30,15 @@ which locates the private package session that `package-launch` owns
 Live upgrade is enabled in every shipped build since the enablement change
 (below): `WINDOW_CONTINUITY_READY` is `true` (operator decision 2026-10-22), so
 a plain local package (`package-build`, then `package-install
---confirm-guest-install`) performs a real live upgrade, and the sequence can
-run on plain packages A and B.
+--confirm-guest-install`) is expected to perform a real live upgrade, and the
+sequence can run on plain packages A and B.
+
+**Acceptance status.** The operator enabled live upgrade on 2026-10-22 ahead
+of a plain-package run. Recorded so far, on TEST-ONLY packages: the full
+sequence on 023f7769 passed every product step except r3's exit code (7, not
+6), which #202 fixed by saying why a replaced client cannot confirm. The
+plain-package run on the enabled build is still to come; it is recorded in
+Plan 0052 once it passes, and until then this enablement is not accepted.
 
 Before enablement, the operator approved (2026-10-19) a **test-only build that
 forces readiness**, and it stays available:
@@ -247,8 +254,10 @@ Abort at once, run `z1-cleanup` and then `z2-plain-package`, and report if any o
   without window continuity, which no build of this source is, so that the
   decision's readiness input is still a real, unit-tested refusal.
 - The tests that asserted the shipped decision now assert the enabled one, and
-  still cover every refusal that remains (Nix, unknown provenance, not
-  packaged, D8, transient Lairs). They no longer need ignoring in
+  still cover every refusal that remains (Nix, not packaged, D8, transient
+  Lairs, no rollback pair). An unreadable build provenance is refused at the
+  exec boundary, and a dry run then fails as an internal error, not as
+  `Unsupported`. They no longer need ignoring in
   `cargo test --features splinterd/vm-acceptance-live-handoff`, since that
   build now makes the same decision:
   - in `handoff_requests.rs`:
