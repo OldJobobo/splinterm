@@ -86,6 +86,9 @@ point_into() {
   hyprctl dispatch "hl.dsp.cursor.move({ x = $x, y = $y })" >/dev/null
 }
 expect() { grep -Fq -- "$1" "$2" || { printf 'missing %q in %s\n' "$1" "$2" >&2; exit 1; }; }
+# The private daemon logs with ANSI colour, which splits key=value fields, so
+# match daemon.log with the colour codes removed.
+expect_log() { sed 's/\x1b\[[0-9;]*m//g' "$2" | grep -Fq -- "$1" || { printf 'missing %q in %s\n' "$1" "$2" >&2; exit 1; }; }
 """
 
 # Linux input key codes for `omarchy-vm.sh input key` (ydotool).
@@ -374,7 +377,7 @@ expect 'Daemon: generation 1 ' "$ev/s1-dry-run.txt"
 expect 'local package build' "$ev/s1-dry-run.txt"
 expect 'Rollback copy: kept' "$ev/s1-dry-run.txt"
 expect 'Live upgrade: nothing blocks it.' "$ev/s1-dry-run.txt"
-expect 'TEST-ONLY VM acceptance build' "$runtime/daemon.log\""""
+expect_log 'TEST-ONLY VM acceptance build' "$runtime/daemon.log\""""
             ),
         ),
     ),
@@ -503,8 +506,8 @@ readlink "/proc/$pid/exe" | tee "$ev/daemon-exe-adopted"
 expect '/memfd:splinterd-daemon' "$ev/daemon-exe-adopted"
 readlink "/proc/$(cat "$ev/w1-pid")/exe" | tee "$ev/w1-exe-adopted"
 expect '/memfd:splinterd-client' "$ev/w1-exe-adopted"
-expect 'daemon_generation=2' "$runtime/daemon.log"
-expect "daemon handoff: restored a relaunched Window's controller" "$runtime/daemon.log"
+expect_log 'daemon_generation=2' "$runtime/daemon.log"
+expect_log "daemon handoff: restored a relaunched Window's controller" "$runtime/daemon.log"
 /usr/bin/splinterm topology | tee "$ev/c3-topology.txt\""""
             ),
             same_daemon(2, "not kept"),
@@ -533,6 +536,7 @@ cat "$ev/c4-list.txt"; expect '[unauthorized]' "$ev/c4-list.txt"
 set +e; "/proc/$p/exe" upgrade >"$ev/c4-upgrade.txt" 2>&1; status=$?; set -e
 cat "$ev/c4-upgrade.txt"; [[ $status == 1 ]]
 expect 'accepts upgrade requests only from the installed splinterm' "$ev/c4-upgrade.txt"
+expect 'started before a package upgrade replaced it' "$ev/c4-upgrade.txt"
 /usr/bin/splinterm list
 kill -CONT "$p\""""
             ),
@@ -597,7 +601,7 @@ jq '{acquired_before, old_handle_expired, reacquired}' "$ev/mcp/result.json\""""
         "r3-rollback",
         "4 rollback round",
         "A real rollback: the installed client changes inode while the D10 prompt is open",
-        "While the prompt is open, /usr/bin/splinterm is replaced by a byte-identical copy (cp -p, then rename: a new inode, pacman -Qk still clean). Proceeding (G) makes the forward candidate refuse the changed install pair at adoption and roll back: exit 6 'rolled back', the same daemon PID now executing the sealed rollback snapshot at generation 1 with no rollback copy, W1 relaunched as the installed /usr/bin/splinterm, reconnected, showing 'Rolled back', and typing again.",
+        "While the prompt is open, /usr/bin/splinterm is replaced by a byte-identical copy (cp -p, then rename: a new inode, pacman -Qk still clean). Proceeding (G) makes the forward candidate refuse the changed install pair at adoption and roll back: exit 7, saying the daemon no longer accepts this splinterm because it was replaced while the upgrade ran (the CLI runs the old inode); a fresh `splinterm upgrade` shows the same daemon PID now executing the sealed rollback snapshot at generation 1 with no rollback copy, W1 relaunched as the installed /usr/bin/splinterm, reconnected (its 3 s 'Rolled back' notice may be gone by the capture), and typing again.",
         (
             guest('kill -STOP "$(cat "$ev/w2-pid")"'),
             start_upgrade("r3"),
@@ -618,15 +622,22 @@ pacman -Qk splinterm"""
                 settle=1,
                 then="closed",
             ),
-            wait_for_exit("r3", 6),
+            # The CLI still runs the replaced inode, which the rolled-back
+            # daemon refuses, so it cannot confirm (operator decision
+            # 2026-10-22); same_daemon's fresh `splinterm upgrade` confirms.
+            wait_for_exit("r3", 7),
+            guest(
+                """expect 'no longer accepts this splinterm' "$ev/r3-upgrade.log"
+expect 'replaced while the upgrade runs' "$ev/r3-upgrade.log\""""
+            ),
             pause(5),
             guest(
                 """pid=$(cat "$ev/daemon-pid")
 readlink "/proc/$pid/exe" | tee "$ev/r3-daemon-exe"
 expect '/memfd:splinterd-daemon' "$ev/r3-daemon-exe"
-expect 'phase="adoption"' "$runtime/daemon.log"
-expect 'the install prefix does not hold the forward pair the manifest recorded' "$runtime/daemon.log"
-expect 'rolling back to the previous generation with the unchanged descriptors' "$runtime/daemon.log"
+expect_log 'phase="adoption"' "$runtime/daemon.log"
+expect_log 'the install prefix does not hold the forward pair the manifest recorded' "$runtime/daemon.log"
+expect_log 'rolling back to the previous generation with the unchanged descriptors' "$runtime/daemon.log"
 [[ $(readlink "/proc/$(cat "$ev/w1-pid")/exe") == /usr/bin/splinterm ]]"""
             ),
             same_daemon(1, "not kept"),
@@ -659,7 +670,7 @@ capture r3-rolled-back"""
         "f1-exit-codes",
         "5 final checks",
         "Collect the CLI exit codes",
-        "c1 and c2 exited 3 (cancelled), c3 0 (upgraded), r3 6 (rolled back); c5 and r4 exited 4 (unavailable) and the stale client 1. Code 7 (unconfirmed) is not reachable deterministically (see the plan).",
+        "c1 and c2 exited 3 (cancelled), c3 0 (upgraded), r3 7 (unconfirmed: its replaced client is refused); c5 and r4 exited 4 (unavailable) and the stale client 1.",
         (guest('for case in c1 c2 c3 r3; do printf "%s=%s\\n" "$case" "$(cat "$ev/$case-upgrade.exit")"; done'),),
     ),
     Step(

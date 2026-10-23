@@ -107,7 +107,18 @@ pub(in crate::app) async fn run(now: bool) -> Result<()> {
 }
 
 async fn run_upgrade(now: bool) -> Result<UpgradeExit> {
-    let mut connection = Connection::connect().await?;
+    // The daemon checks this client at `Hello`, so a stale or untrusted
+    // binary is refused here, before any request.
+    let mut connection = match Connection::connect().await {
+        Ok(connection) => connection,
+        Err(error) if is_unauthorized(&error) => {
+            for line in untrusted_client_lines() {
+                eprintln!("{line}");
+            }
+            return Ok(UpgradeExit::Error);
+        }
+        Err(error) => return Err(error),
+    };
     let report = match connection.daemon_handoff_report().await {
         Ok(report) => report,
         Err(error) if is_unauthorized(&error) => {
@@ -197,7 +208,7 @@ fn is_unauthorized(error: &anyhow::Error) -> bool {
 fn untrusted_client_lines() -> Vec<String> {
     vec![
         "splinterd accepts upgrade requests only from the installed splinterm beside the running splinterd (on packaged systems /usr/bin/splinterm), matched by device and inode.".to_owned(),
-        "Run that installed client, not a development build or a copy earlier on PATH; check with `command -v splinterm`.".to_owned(),
+        "Run that installed client, not a development build, a copy earlier on PATH, or one started before a package upgrade replaced it; check with `command -v splinterm`.".to_owned(),
     ]
 }
 
@@ -472,6 +483,13 @@ async fn confirm_handoff(previous: &HandoffReport, process: Option<DaemonProcess
         });
         match attempt.await {
             Ok(Ok(current)) => break Some(current),
+            // A daemon that refuses this client keeps refusing it, so
+            // waiting out the window would only hide why.
+            Ok(Err(error)) if is_unauthorized(&error) => {
+                let (exit, line) = refused_confirmation_line();
+                eprintln!("{line}");
+                return exit;
+            }
             _ if started.elapsed() < CONFIRMATION_WINDOW => {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -489,6 +507,22 @@ async fn confirm_handoff(previous: &HandoffReport, process: Option<DaemonProcess
         eprintln!("{line}");
     }
     exit
+}
+
+/// What is known when the daemon serving after the close refuses this client.
+///
+/// This client was trusted when it asked for the upgrade, so a refusal now
+/// means the serving daemon no longer accepts its binary. Replacing the
+/// installed `splinterm` while the upgrade runs does that, since the running
+/// process keeps the old file, and it also makes the daemon roll back. A
+/// stale binary never regains trust (AGENTS.md 4.4), so nothing is
+/// confirmed; a fresh `splinterm upgrade` runs the installed file and can
+/// report.
+pub(in crate::app) fn refused_confirmation_line() -> (UpgradeExit, String) {
+    (
+        UpgradeExit::Unconfirmed,
+        "splinterd is serving again but no longer accepts this splinterm, so the upgrade is not confirmed. That happens when the installed splinterm is replaced while the upgrade runs, which also makes the daemon roll back. Run `splinterm upgrade` to see which build serves now.".to_owned(),
+    )
 }
 
 /// What the daemon serving after the connection closed shows.
@@ -1076,6 +1110,12 @@ mod tests {
         let (exit, line) = confirmation_line(&before, Some(daemon), None);
         assert_eq!(exit, UpgradeExit::Unconfirmed);
         assert!(line.contains("not confirmed"), "{line}");
+        assert!(line.contains("splinterm upgrade"), "{line}");
+        // A daemon that refuses this client: unconfirmed, with the reason.
+        let (exit, line) = refused_confirmation_line();
+        assert_eq!(exit, UpgradeExit::Unconfirmed);
+        assert!(line.contains("no longer accepts this splinterm"), "{line}");
+        assert!(line.contains("replaced while the upgrade runs"), "{line}");
         assert!(line.contains("splinterm upgrade"), "{line}");
     }
 

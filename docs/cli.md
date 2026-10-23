@@ -253,7 +253,7 @@ command has no machine output and rejects `--output`, `--schema-major`,
 | 4 | Live upgrade is unavailable now. Nothing changed. |
 | 5 | Another upgrade is already in progress. |
 | 6 | The upgrade did not complete: the same daemon process serves the same generation with the previous build, after a rollback or because it never left. Terminals were kept. |
-| 7 | The connection closed as a committed upgrade's does, but the result is unconfirmed: no daemon answered within 15 seconds, or the daemon process could not be identified (for example from another PID namespace). Run `splinterm upgrade` to check. |
+| 7 | The connection closed as a committed upgrade's does, but the result is unconfirmed: no daemon answered within 15 seconds, the daemon process could not be identified (for example from another PID namespace), or the daemon no longer accepts this `splinterm` because the installed file was replaced while the upgrade ran (that also makes the daemon roll back). Run `splinterm upgrade` to check. |
 
 ### Desktop launch with another daemon build
 
