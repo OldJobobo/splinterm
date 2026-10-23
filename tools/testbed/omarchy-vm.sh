@@ -365,7 +365,7 @@ REMOTE
     build_arguments=()
     if [[ $# == 1 && $1 == --vm-acceptance-live-handoff ]]; then
       build_arguments=(--vm-acceptance-live-handoff)
-      printf 'TEST-ONLY: the guest daemon will force live handoff on (VM acceptance only).\n'
+      printf 'TEST-ONLY: the guest daemon is a VM acceptance build (VM acceptance only).\n'
     else
       (($# == 0)) || fail 'package-build takes no arguments except --vm-acceptance-live-handoff'
     fi
@@ -395,10 +395,10 @@ if [[ -e /usr/bin/splinterm || -L /usr/bin/splinterm ]]; then
   pacman -Qo /usr/bin/splinterm /usr/bin/splinterd
   stat -Lc 'identity: %d:%i %n' /usr/bin/splinterm /usr/bin/splinterd
   desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.desktop
-  # Plan 0061 M3.17: a VM acceptance build forces live handoff on.
+  # Plan 0061 M3.17: a TEST-ONLY VM acceptance build carries a marker.
   if pacman -Qi splinterm | grep -Fq 'TEST-ONLY' \
     || grep -aqF 'splinterm-vm-acceptance-live-handoff:' /usr/bin/splinterd; then
-    printf 'WARNING: the installed package is a TEST-ONLY VM acceptance build (live handoff forced on); reinstall a plain build\n'
+    printf 'WARNING: the installed package is a TEST-ONLY VM acceptance build; reinstall a plain build\n'
   fi
 fi
 REMOTE
@@ -447,7 +447,7 @@ cd "$source_root"
 vm_acceptance_arguments=()
 if [[ $SPLINTERM_TESTBED_VM_ACCEPTANCE == true ]]; then
   vm_acceptance_arguments=(--allow-vm-acceptance-live-handoff)
-  printf 'TEST-ONLY: installing a VM acceptance package that forces live handoff on.\n'
+  printf 'TEST-ONLY: installing a VM acceptance package.\n'
 fi
 ./tools/package/upgrade-local-package.sh --yes "${vm_acceptance_arguments[@]}"
 command -v splinterm | grep -Fx /usr/bin/splinterm

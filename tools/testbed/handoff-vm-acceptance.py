@@ -41,7 +41,7 @@ PRIVATE_CLONES = Path.home() / ".cache/splinterm-builds/vm-acceptance"
 EVIDENCE = ".testbed-package/evidence/handoff"
 
 # Which packages A and B are: "plain" (the default, what users install) or
-# "test-only" (the VM acceptance build that forces window continuity on).
+# "test-only" (the TEST-ONLY VM acceptance build, which carries a marker).
 PACKAGES = os.environ.get("SPLINTERM_HANDOFF_VM_PACKAGES", "plain")
 if PACKAGES not in ("plain", "test-only"):
     raise SystemExit(

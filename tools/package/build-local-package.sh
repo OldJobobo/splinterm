@@ -18,7 +18,7 @@ Build and validate local Splinterm Arch packages.
   --skip-system-dependency-check  CI only: let makepkg skip host package checks
   --vm-acceptance-live-handoff    TEST-ONLY: build the daemon with the
                                   vm-acceptance-live-handoff feature, which
-                                  forces live handoff on, for VM acceptance
+                                  marks it as a VM acceptance build, for VM acceptance
                                   only (local-committed-head provenance; never
                                   publish or ship the result)
   -h, --help   Show this help
@@ -56,7 +56,7 @@ derive_vm_acceptance_buildscript() {
     }
     $0 == provenance { print; print "    --allow-vm-acceptance-live-handoff \\"; next }
     $0 == description {
-      print "  pkgdesc='"'"'TEST-ONLY VM acceptance build (live handoff forced on): never ship'"'"'"
+      print "  pkgdesc='"'"'TEST-ONLY VM acceptance build: never ship'"'"'"
       next
     }
     { print }
@@ -121,7 +121,7 @@ if [[ $vm_acceptance == true ]]; then
   derive_vm_acceptance_buildscript "$package_dir/PKGBUILD" "$buildscript"
   makepkg_args+=(-p "$(basename "$buildscript")")
   validate_args+=(--allow-vm-acceptance-live-handoff)
-  printf 'TEST-ONLY: building a VM acceptance package whose daemon forces live handoff on.\n' >&2
+  printf 'TEST-ONLY: building a VM acceptance package.\n' >&2
 fi
 (
   cd "$package_dir"

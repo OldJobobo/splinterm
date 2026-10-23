@@ -163,7 +163,7 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "TEST-ONLY: this local package's daemon is a VM acceptance build "
-            "that forces live handoff on (never for release or Nix packages)"
+            "(never for release or Nix packages)"
         ),
     )
     return result
