@@ -1,8 +1,8 @@
 # Maintainer: OldJobobo
 pkgbase=splinterm
 pkgname=('splinterm' 'splinterm-mcp')
-pkgver=0.2.0dev
-_upstream_ver=0.2.0-dev
+pkgver=0.2.0
+_upstream_ver=0.2.0
 _commit=0000000000000000000000000000000000000000
 # Candidate template only; publish after verified GitHub release publication.
 # Candidate tooling must bind the new archive checksum and source commit.

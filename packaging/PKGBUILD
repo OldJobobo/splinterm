@@ -1,8 +1,8 @@
 # Maintainer: OldJobobo
 pkgbase=splinterm
 pkgname=('splinterm' 'splinterm-mcp')
-pkgver=0.2.0dev
-_build_version=0.2.0-dev
+pkgver=0.2.0
+_build_version=0.2.0
 pkgrel=1
 arch=('x86_64')
 options=('!strip')

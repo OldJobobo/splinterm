@@ -1,7 +1,7 @@
 # Maintainer: OldJobobo
 pkgbase=splinterm-bin
 pkgname=('splinterm-bin' 'splinterm-mcp-bin')
-pkgver=0.2.0dev
+pkgver=0.2.0
 # Candidate template only; publish after verified GitHub release publication.
 # Candidate tooling must bind the commit and checksums.
 pkgrel=1
@@ -11,8 +11,8 @@ url='https://github.com/ministry-of-taste/splinterm'
 license=('MIT')
 options=('!strip' '!debug')
 source=(
-  "splinterm-$pkgver-$CARCH.pkg.tar.zst::https://github.com/ministry-of-taste/splinterm/releases/download/v0.2.0-dev/splinterm-$_commit-$CARCH.pkg.tar.zst"
-  "splinterm-mcp-$pkgver-$CARCH.pkg.tar.zst::https://github.com/ministry-of-taste/splinterm/releases/download/v0.2.0-dev/splinterm-mcp-$_commit-$CARCH.pkg.tar.zst"
+  "splinterm-$pkgver-$CARCH.pkg.tar.zst::https://github.com/ministry-of-taste/splinterm/releases/download/v0.2.0/splinterm-$_commit-$CARCH.pkg.tar.zst"
+  "splinterm-mcp-$pkgver-$CARCH.pkg.tar.zst::https://github.com/ministry-of-taste/splinterm/releases/download/v0.2.0/splinterm-mcp-$_commit-$CARCH.pkg.tar.zst"
 )
 noextract=(
   "splinterm-$pkgver-$CARCH.pkg.tar.zst"
