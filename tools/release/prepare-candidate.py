@@ -337,7 +337,7 @@ def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
     binary_srcinfo = write_srcinfo(binary_recipe)
 
     notes = output / "RELEASE-NOTES.md"
-    create_notes(commit, version, notes)
+    create_notes(commit, arguments.version, notes)
     assets = [
         asset_record(source_archive, "source-archive", output),
         asset_record(main_package, "arch-package", output),

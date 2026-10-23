@@ -30,15 +30,14 @@ which locates the private package session that `package-launch` owns
 Live upgrade is enabled in every shipped build since the enablement change
 (below): `WINDOW_CONTINUITY_READY` is `true` (operator decision 2026-10-22), so
 a plain local package (`package-build`, then `package-install
---confirm-guest-install`) is expected to perform a real live upgrade, and the
-sequence can run on plain packages A and B.
+--confirm-guest-install`) performs a real live upgrade, and the sequence runs
+on plain packages A and B.
 
-**Acceptance status.** The operator enabled live upgrade on 2026-10-22 ahead
-of a plain-package run. Recorded so far, on TEST-ONLY packages: the full
-sequence on 023f7769 passed every product step except r3's exit code (7, not
-6), which #202 fixed by saying why a replaced client cannot confirm. The
-plain-package run on the enabled build is still to come; it is recorded in
-Plan 0052 once it passes, and until then this enablement is not accepted.
+**Acceptance status.** Accepted. The operator enabled live upgrade on
+2026-10-22, and on 2026-10-23 the full sequence passed on plain packages of
+4b7210a7, every step through this helper: c1 3, c2 3, c3 0, c5 4, r3 7 with the
+daemon rolled back, r4 4, and x1 4. An earlier run on TEST-ONLY packages of
+023f7769 had passed every product step except r3's exit code, fixed by #202.
 
 Before enablement, the operator approved (2026-10-19) a **test-only build that
 forces readiness**, and it stays available:
