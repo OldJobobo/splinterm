@@ -20,13 +20,15 @@ use crate::renderer::ChromeSource;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum LairExplorerFilter {
     #[default]
-    All,
     Live,
     Saved,
+    All,
 }
 
 impl LairExplorerFilter {
-    pub(crate) const ALL: [Self; 3] = [Self::All, Self::Live, Self::Saved];
+    /// The header's filters, in the order shown: Live (the default), Saved,
+    /// then All.
+    pub(crate) const ALL: [Self; 3] = [Self::Live, Self::Saved, Self::All];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -38,9 +40,9 @@ impl LairExplorerFilter {
 
     pub(crate) const fn next(self) -> Self {
         match self {
-            Self::All => Self::Live,
             Self::Live => Self::Saved,
             Self::Saved => Self::All,
+            Self::All => Self::Live,
         }
     }
 }
@@ -154,7 +156,7 @@ impl Default for LairExplorerUi {
             visible: false,
             focused: false,
             search_active: false,
-            filter: LairExplorerFilter::All,
+            filter: LairExplorerFilter::Live,
             query: BoundedTextEditor::new(String::new(), 256, 64, true),
             expanded: HashSet::new(),
             selected: None,
@@ -239,8 +241,19 @@ impl LairExplorerUi {
         true
     }
 
+    /// The filter rows are drawn with: the chosen one, except that a search
+    /// looks through every Lair, so a saved or stopped one is found while the
+    /// default Live filter is chosen. Clearing the search returns to it.
+    fn effective_filter(&self) -> LairExplorerFilter {
+        if normalized_query(self.query.text()).is_empty() {
+            self.filter
+        } else {
+            LairExplorerFilter::All
+        }
+    }
+
     fn includes_lifecycle(&self, lifecycle: NavigationLifecycle) -> bool {
-        self.filter != LairExplorerFilter::Live
+        self.effective_filter() != LairExplorerFilter::Live
             || matches!(
                 lifecycle,
                 NavigationLifecycle::Running | NavigationLifecycle::Starting
@@ -248,7 +261,7 @@ impl LairExplorerUi {
     }
 
     fn includes_dojo(&self, dojo: &NavigationExplorerDojo) -> bool {
-        self.filter != LairExplorerFilter::Live
+        self.effective_filter() != LairExplorerFilter::Live
             || dojo
                 .splints
                 .iter()
@@ -734,9 +747,10 @@ impl LairExplorerUi {
         let query = normalized_query(self.query.text());
         let searching = !query.is_empty();
         let mut rows = Vec::new();
+        let filter = self.effective_filter();
         for lair in &view.lairs {
-            if (self.filter == LairExplorerFilter::Saved && !lair.retention.is_protected())
-                || (self.filter == LairExplorerFilter::Live
+            if (filter == LairExplorerFilter::Saved && !lair.retention.is_protected())
+                || (filter == LairExplorerFilter::Live
                     && !lair.dojos.iter().any(|dojo| self.includes_dojo(dojo)))
             {
                 continue;
@@ -1190,12 +1204,51 @@ pub(super) mod tests {
     };
 
     #[test]
+    fn search_looks_through_every_lair_and_clearing_it_returns_to_the_filter() {
+        let view = view();
+        let ids = view.lairs.iter().map(|lair| lair.id).collect::<Vec<_>>();
+        let stopped = view.lairs[1].label.clone();
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view);
+        assert_eq!(explorer.filter(), LairExplorerFilter::Live);
+        let live_rows = explorer.rows();
+        assert!(live_rows.iter().all(|row| row.id != ids[1]));
+        explorer.set_search(stopped);
+        assert!(explorer.rows().iter().any(|row| row.id == ids[1]));
+        assert_eq!(explorer.filter(), LairExplorerFilter::Live);
+        explorer.set_search(String::new());
+        assert_eq!(explorer.rows(), live_rows);
+    }
+
+    #[test]
+    fn filters_show_live_first_and_cycle_live_saved_all() {
+        assert_eq!(
+            LairExplorerFilter::ALL,
+            [
+                LairExplorerFilter::Live,
+                LairExplorerFilter::Saved,
+                LairExplorerFilter::All
+            ]
+        );
+        assert_eq!(LairExplorerFilter::default(), LairExplorerFilter::Live);
+        assert_eq!(LairExplorerUi::default().filter(), LairExplorerFilter::Live);
+        let mut filter = LairExplorerFilter::Live;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            filter = filter.next();
+            seen.push(filter.label());
+        }
+        assert_eq!(seen, ["Saved", "All", "Live"]);
+    }
+
+    #[test]
     fn activity_filters_keep_identity_order_and_default_stopped_collapse() {
         let view = view();
         let ids = view.lairs.iter().map(|lair| lair.id).collect::<Vec<_>>();
         let mut explorer = LairExplorerUi::default();
         explorer.set_view(view);
-        assert_eq!(explorer.filter(), LairExplorerFilter::All);
+        assert_eq!(explorer.filter(), LairExplorerFilter::Live);
+        explorer.set_filter(LairExplorerFilter::All);
         assert!(
             explorer
                 .rows()
@@ -1295,7 +1348,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn live_search_does_not_leak_ancestors_of_filtered_descendants() {
+    fn search_under_live_finds_stopped_splints_with_their_ancestors() {
         let mut view = view();
         let first = &mut view.lairs[0].dojos[0].splints[0];
         first.label = "stopped-only-label".into();
@@ -1313,13 +1366,25 @@ pub(super) mod tests {
         let mut explorer = LairExplorerUi::default();
         explorer.set_view(view);
         explorer.set_filter(LairExplorerFilter::Live);
+        // Search looks through every Lair: a stopped Splint is found under
+        // Live, with its Lair and Dojo, exactly as under All.
         explorer.set_search("stopped-only-label".into());
-        assert!(explorer.rows().is_empty());
+        let under_live = explorer.rows();
+        assert_eq!(under_live.len(), 3);
         explorer.set_search("live-label".into());
         assert_eq!(explorer.rows().len(), 3);
         explorer.set_filter(LairExplorerFilter::All);
         explorer.set_search("stopped-only-label".into());
-        assert_eq!(explorer.rows().len(), 3);
+        assert_eq!(explorer.rows(), under_live);
+        // Without a search, Live still hides the stopped-only branch's Splint.
+        explorer.set_filter(LairExplorerFilter::Live);
+        explorer.set_search(String::new());
+        assert!(
+            explorer
+                .rows()
+                .iter()
+                .all(|row| row.label != "stopped-only-label")
+        );
     }
 
     pub(crate) fn view() -> NavigationExplorerView {
@@ -1420,6 +1485,8 @@ pub(super) mod tests {
     #[test]
     fn context_click_captures_non_current_lair_without_activation_or_selection() {
         let mut explorer = LairExplorerUi::default();
+        // The target is a stopped Lair, which the default Live filter hides.
+        explorer.set_filter(LairExplorerFilter::All);
         let view = view();
         let target = view.lairs[1].id;
         explorer.set_view(view);
@@ -1653,6 +1720,8 @@ pub(super) mod tests {
     #[test]
     fn search_is_bounded_label_only_and_keeps_parent_context() {
         let mut explorer = LairExplorerUi::default();
+        // Search looks through every Lair, so these matches in a stopped Lair
+        // are found under the default Live filter.
         explorer.set_view(view());
         explorer.begin_search();
         assert!(explorer.append_search("draft"));

@@ -175,7 +175,7 @@ restorable Dojo opens a restore confirmation rather than reporting a permission
 failure. Detached starting or mixed-state Dojos still cannot be attached;
 Explorer explains this lifecycle restriction instead of calling it a denial.
 
-The header offers **All / Live / Saved**, initially **All**. **Live** keeps
+The header offers **Live / Saved / All**, initially **Live**. **Live** keeps
 running or starting Splints and their parent context; a mixed parent containing
 only stopped or unavailable Splints is not live. **Saved** keeps saved and pinned Lairs,
 including any live work inside them. These filters preserve the authoritative
@@ -183,7 +183,9 @@ Lair → Dojo → Splint order; pinning adds a status marker, not refresh-driven
 sorting. Branches begin collapsed, and refreshing preserves disclosure choices.
 A chevron icon before each Lair and Dojo points right when collapsed and down
 when expanded, and a dot marks the current row.
-Label search operates within the chosen filter. The accessibility status names
+Label search looks through every Lair, whatever the filter, so a saved or
+stopped Lair is found while Live is chosen; clearing the search returns to the
+chosen filter. The accessibility status names
 the active filter and announces the keyboard shortcut.
 
 While Explorer has focus:
@@ -197,7 +199,7 @@ While Explorer has focus:
   Splint to focus its pane. Selecting a row alone does not activate it: the
   **selected** row is the navigation target, while **current** identifies the
   terminal work already active in the Window.
-- Outside search, press `f` to cycle All / Live / Saved, or click a header filter.
+- Outside search, press `f` to cycle Live / Saved / All, or click a header filter.
   If filtering hides the selected row, selection moves to a visible row without
   activating it. Hidden rows cannot receive navigation actions.
 - Press `/` or `Ctrl+F` to search navigation labels, not terminal output or
