@@ -211,10 +211,15 @@ pub fn shown(text: &str, maximum_scalars: usize) -> String {
     shown_escaping(text, maximum_scalars, unsafe_display_character)
 }
 
-/// A name or path inside a list row or prompt: also escapes the quotes and
-/// the separator the row puts around and between names, so a name cannot
-/// fake another segment of the row.
-fn shown_name(text: &str, maximum_scalars: usize) -> String {
+/// A name or path inside a list row or the consent prompt: also escapes the
+/// quotes and the separator the row puts around and between names, so a
+/// name cannot fake another segment of the row. The prompt escapes names
+/// and paths with this too, so a name reads the same in the prompt that
+/// approves it and in the list later. Whitespace is not collapsed: tabs,
+/// newlines, and the other control whitespace are escaped like any unsafe
+/// character, and spaces stay as they are.
+#[must_use]
+pub fn shown_name(text: &str, maximum_scalars: usize) -> String {
     shown_escaping(text, maximum_scalars, |character| {
         unsafe_display_character(character) || matches!(character, '‘' | '’' | '·')
     })
@@ -524,15 +529,6 @@ impl AccessRow {
     }
 }
 
-/// What a pointer release on a list row does.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RowClick {
-    /// Not a press and release on the same entry.
-    Ignored,
-    Selected,
-    Activate,
-}
-
 /// What activating a list row asks the Window to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AccessActivation {
@@ -559,8 +555,8 @@ pub(crate) struct AgentAccessUi {
     revoking: HashSet<AccessEntryKey>,
     /// The selected entry left the list in a newer read, or the confirmation
     /// the person was answering closed because its entry ended: the row
-    /// now under the selection is not the one they chose, so Enter or a
-    /// click on it must not act until they choose again.
+    /// now under the selection is not the one they chose, so Enter on it
+    /// must not act until they choose again.
     selection_stale: bool,
 }
 
@@ -628,22 +624,18 @@ impl AgentAccessUi {
         self.set_notice(notice);
     }
 
-    /// What a pointer release on row `index` does, after a press on the
-    /// row that showed `pressed`. Only a press and release on the same entry
-    /// count; on the selected entry they activate it, on any other row (or
-    /// after the selection went stale) they select it.
-    pub(crate) fn release_click(&mut self, pressed: &AccessEntryKey, index: usize) -> RowClick {
-        let Some(row) = self.rows.get(index) else {
-            return RowClick::Ignored;
-        };
-        if &row.key != pressed {
-            return RowClick::Ignored;
-        }
-        if index == self.selected && !self.selection_stale {
-            return RowClick::Activate;
+    /// A pointer release on row `index`, after a press on the row that
+    /// showed `pressed`. Only a press and release on the same entry count,
+    /// and they only select it, the selected row and a stale selection
+    /// included. A click never revokes: after a revoke the selection moves
+    /// to another row, and clicking that row to choose it must not revoke
+    /// it too. Only Enter acts. Whether the click counted.
+    pub(crate) fn release_click(&mut self, pressed: &AccessEntryKey, index: usize) -> bool {
+        if self.rows.get(index).is_none_or(|row| &row.key != pressed) {
+            return false;
         }
         self.select_row(index);
-        RowClick::Selected
+        true
     }
 
     /// The entry on row `index`, for a pointer press.
@@ -768,9 +760,9 @@ impl AgentAccessUi {
         self.select_row(index)
     }
 
-    /// What Enter, or a click on the selected row, does. Rows that cannot be
-    /// revoked here explain why instead, and a stale selection does nothing
-    /// until the person chooses again.
+    /// What Enter does; a click only selects. Rows that cannot be revoked
+    /// here explain why instead, and a stale selection does nothing until
+    /// the person chooses again.
     pub(crate) fn activate(&mut self) -> Option<AccessActivation> {
         if self.selection_stale {
             self.set_notice("That access ended; choose again");
@@ -1901,30 +1893,75 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_click_acts_only_on_the_entry_it_pressed_and_only_when_selected() {
+    fn a_click_selects_only_the_entry_it_pressed_and_never_activates() {
         let lair_id = LairId::new();
         let mut ui = AgentAccessUi::new(Some(&snapshot(4, inventory(lair_id))), None);
         let pressed = ui.row_key(1).cloned().unwrap();
-        // Out of range never falls through to activation.
-        assert_eq!(ui.release_click(&pressed, 99), RowClick::Ignored);
+        // Out of range never falls through to a selection.
+        assert!(!ui.release_click(&pressed, 99));
         assert_eq!(ui.row_key(99), None);
         // Released on another entry: nothing.
-        assert_eq!(ui.release_click(&pressed, 2), RowClick::Ignored);
-        // The first click selects, the next on the selected row activates.
-        assert_eq!(ui.release_click(&pressed, 1), RowClick::Selected);
+        assert!(!ui.release_click(&pressed, 2));
+        assert_eq!(ui.selected_index(), 0);
+        // A click selects; another on the selected row only selects again.
+        assert!(ui.release_click(&pressed, 1));
         assert_eq!(ui.selected_index(), 1);
-        assert_eq!(ui.release_click(&pressed, 1), RowClick::Activate);
+        assert!(ui.release_click(&pressed, 1));
+        assert_eq!(ui.selected_index(), 1);
+        assert!(!ui.footer().contains("Revoking"), "{}", ui.footer());
         // A refresh between press and release moves another entry under
         // the pointer: the release is ignored.
         let mut entries = inventory(lair_id);
         entries.remove(1);
         ui.apply_snapshot(&snapshot(5, entries));
-        assert_eq!(ui.release_click(&pressed, 1), RowClick::Ignored);
-        // On a stale selection a click on the selected row only selects it.
+        assert!(!ui.release_click(&pressed, 1));
+        // On a stale selection Enter waits for a new choice, and a click on
+        // the selected row is that choice, still without acting.
+        assert_eq!(ui.activate(), None);
+        assert_eq!(ui.footer(), "That access ended; choose again");
         let now_there = ui.row_key(0).cloned().unwrap();
         assert_eq!(ui.selected_index(), 0);
-        assert_eq!(ui.release_click(&now_there, 0), RowClick::Selected);
-        assert_eq!(ui.release_click(&now_there, 0), RowClick::Activate);
+        assert!(ui.release_click(&now_there, 0));
+        assert!(ui.release_click(&now_there, 0));
+        // Enter is what acts: the "Always" grant asks first.
+        assert!(matches!(ui.activate(), Some(AccessActivation::Confirm(_))));
+    }
+
+    #[test]
+    fn a_click_never_revokes_the_row_a_revoke_moved_the_selection_to() {
+        let lair_id = LairId::new();
+        let mut ui = AgentAccessUi::new(Some(&snapshot(4, inventory(lair_id))), None);
+        // Enter revokes the just-this-once grant at once.
+        assert!(ui.select_index(1));
+        assert_eq!(
+            ui.activate(),
+            Some(AccessActivation::Revoke(AccessRevokeTarget::Grant {
+                grant_id: 17
+            }))
+        );
+        // The next read no longer lists it, and the selection lands on
+        // another row.
+        let mut entries = inventory(lair_id);
+        entries.remove(1);
+        ui.apply_snapshot(&snapshot(5, entries));
+        ui.finish_revoke(Some(&AccessEntryKey::Grant { grant_id: 17 }), "Revoked");
+        let target = ui.row_key(1).cloned().unwrap();
+        assert_eq!(target, AccessEntryKey::Grant { grant_id: 18 });
+        // Clicking that row to choose it, once or again, only selects it.
+        assert!(ui.release_click(&target, 1));
+        assert_eq!(ui.selected_index(), 1);
+        assert!(ui.release_click(&target, 1));
+        assert!(ui.release_click(&target, 1));
+        assert!(!ui.footer().contains("Revoking"), "{}", ui.footer());
+        // Nothing was revoked or sent: Enter still revokes it, once.
+        assert_eq!(
+            ui.activate(),
+            Some(AccessActivation::Revoke(AccessRevokeTarget::Grant {
+                grant_id: 18
+            }))
+        );
+        assert_eq!(ui.activate(), None);
+        assert_eq!(ui.footer(), "Revoking…");
     }
 
     #[test]
@@ -1962,6 +1999,29 @@ pub(crate) mod tests {
         );
         // Notices keep their own punctuation.
         assert_eq!(shown("a · b", 16), "a · b");
+    }
+
+    /// The consent prompt escapes with `shown_name` too, so a hostile name
+    /// reads the same in the prompt and in the list: no whitespace is
+    /// collapsed, and tabs and newlines are escaped like any control.
+    #[test]
+    fn a_hostile_agent_name_is_listed_in_the_prompts_escaped_form() {
+        let hostile = "evil\u{1b}[31mRED\u{202e}gpj.exe\u{7}\tend";
+        let escaped = "evil\\u{001b}[31mRED\\u{202e}gpj.exe\\u{0007}\\u{0009}end";
+        assert_eq!(shown_name(hostile, 64), escaped);
+        assert_eq!(shown_name("a  b\nc", 64), "a  b\\u{000a}c");
+        let lair_id = LairId::new();
+        let mut agent = entry(remembered_key(), AccessEntryKind::Remembered, lair_id);
+        agent.identity.display_name = Some("gpj\u{202e}\u{7}\tx".into());
+        let ui = AgentAccessUi::new(Some(&snapshot(1, vec![agent])), None);
+        let row = &ui.rows()[0];
+        assert!(
+            row.title
+                .starts_with("‘gpj\\u{202e}\\u{0007}\\u{0009}x’ · "),
+            "{}",
+            row.title
+        );
+        assert!(!row.title.chars().any(unsafe_display_character));
     }
 
     #[test]

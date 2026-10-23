@@ -437,7 +437,9 @@ The prompt is deliberate by default:
 
 The prompt shows the agent's reported name, its exact executable path, the
 workspace name with its short ID, the level with one line of what it allows, and
-the exact scopes.
+the exact scopes. Names and paths are shown escaped, as data, in the same form
+as the **Agent access** list: a control or bidirectional character appears as an
+escape such as `\u{202e}`, so the name you approve reads the same in the list.
 
 A request that a grant already covers is answered at once, without a prompt.
 Prompts appear one at a time; further requests wait their turn. If you do not
@@ -461,9 +463,10 @@ coming from the policy file and read-only here.
 row starts with a word for its kind (ALWAYS, OPEN, ONCE, WAITING, or POLICY),
 names the agent, the access, and the workspace, and says whether the agent is
 connected now; the footer shows the selected entry's executable, how it is
-identified, its times, and what Enter does. Type to search. Enter on a
-just-this-once or while-open grant revokes it at once; on an "Always" grant
-it first asks, with Cancel selected. A pending request or a policy rule
+identified, its times, and what Enter does. Type to search. A click only
+selects a row and never revokes it; Enter revokes. Enter on a just-this-once or
+while-open grant revokes it at once; on an "Always" grant it first asks, with
+Cancel selected. A pending request or a policy rule
 explains instead: answer the request in its prompt, or remove the rule from
 `policy.json`. Agent names and paths are shown escaped, as data. The list
 refreshes every few seconds, and a confirmation whose entry changed meanwhile

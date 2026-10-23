@@ -65,7 +65,9 @@ fn unsafe_label_character(character: char) -> bool {
 
 /// At most `maximum` characters of `value`, with control and bidi-formatting
 /// characters replaced, so daemon- or peer-supplied text cannot restyle or
-/// reorder trusted UI.
+/// reorder trusted UI. The upgrade and launcher dialogs use this; the
+/// access prompt escapes instead, as the **Agent access** list does (see
+/// `display_name`).
 pub(in crate::app) fn trusted_label(value: &str, maximum: usize) -> String {
     value
         .chars()
@@ -90,22 +92,20 @@ const DISPLAY_NAME_CHARS: usize = 60;
 /// narrower Window wraps it narrower still.
 const PROMPT_LINE_CHARS: usize = 100;
 
-/// `value` as one line of display text: unsafe characters replaced, runs of
-/// whitespace collapsed to one space, and at most `maximum` characters, the
-/// last an ellipsis when it was cut.
+/// An untrusted name or path (the agent's reported name, the program, a
+/// workspace name) as one line of display text, escaped exactly as the
+/// **Agent access** list escapes it, so the name approved here reads the
+/// same there later: every unsafe character, tabs and newlines among them,
+/// and the list's quotes and separator are shown as `\u{…}`, and spaces
+/// stay as they are. At most `maximum` characters, the last an ellipsis
+/// when it was cut; an escape is never cut in two.
 fn display_name(value: &str, maximum: usize) -> String {
-    // Whitespace (tabs and newlines among it) collapses first; what stays
-    // unsafe is then replaced.
-    let collapsed = trusted_label(
-        &value.split_whitespace().collect::<Vec<_>>().join(" "),
-        MAX_CONSENT_PATH_CHARS,
-    );
-    if collapsed.chars().count() <= maximum {
-        return collapsed;
+    let shown = splinterm::frontend::shown_name(value, maximum);
+    // Cut text gets its ellipsis past `maximum`; uncut text always fits.
+    if shown.chars().count() <= maximum {
+        return shown;
     }
-    let mut cut: String = collapsed.chars().take(maximum.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
+    splinterm::frontend::shown_name(value, maximum.saturating_sub(1))
 }
 
 /// One line of the prompt, wrapped at [`PROMPT_LINE_CHARS`] at most; every
@@ -211,7 +211,7 @@ fn chosen_lines(prompt: &ConsentPrompt, selected: usize, workspace: &str) -> Cho
         .and_then(|offer| offer.shared_by.as_deref())
         .map(|path| {
             prompt_line(
-                shared_identity_line(&trusted_label(path, MAX_CONSENT_PATH_CHARS)),
+                shared_identity_line(&display_name(path, MAX_CONSENT_PATH_CHARS)),
                 4,
             )
         });
@@ -259,7 +259,7 @@ fn consent_text(
     lines.push(prompt_line(
         format!(
             "Program: {}",
-            trusted_label(&prompt.requester, MAX_CONSENT_PATH_CHARS)
+            display_name(&prompt.requester, MAX_CONSENT_PATH_CHARS)
         ),
         9,
     ));
@@ -467,8 +467,8 @@ mod tests {
     };
 
     use super::{
-        consent_renderer, consent_window_options, grant_label, keyboard_hint,
-        read_private_frame_bounded, trusted_label, write_private_frame_bounded,
+        DISPLAY_NAME_CHARS, consent_renderer, consent_window_options, display_name, grant_label,
+        keyboard_hint, read_private_frame_bounded, trusted_label, write_private_frame_bounded,
     };
 
     /// Every selection's text, as the Window lays it out.
@@ -757,7 +757,10 @@ mod tests {
                 assert!(joined.contains(&shared));
             }
             let text = layout.rows.join("\n");
-            assert!(text.contains("Agent (reported by the agent, not verified): Agent name"));
+            // The tab is escaped as the list shows it; spaces stay.
+            assert!(
+                text.contains("Agent (reported by the agent, not verified): Agent  \\u{0009} name")
+            );
             assert!(text.contains(&format!("{}…", "a".repeat(10))));
             assert!(text.contains(&format!("'{}…'", "n".repeat(59))));
             assert!(text.contains(
@@ -828,10 +831,75 @@ mod tests {
         let text = laid_out(&prompt, 2).rows.join("\n");
         assert!(text.contains(&format!("Always allow Manage for '{}…'", "w".repeat(59))));
         assert!(!text.contains('\u{202e}'));
+        // A shorter name shows the override escaped, as the list does.
+        prompt.target = ConsentTarget::Lair {
+            lair_id: splinterm_core::LairId::new(),
+            lair_name: "w\u{202e}v".to_owned(),
+        };
+        let text = laid_out(&prompt, 2).rows.join("\n");
+        assert!(
+            text.contains("Always allow Manage for 'w\\u{202e}v'"),
+            "{text}"
+        );
+        // The bound never cuts an escape in two.
+        assert_eq!(
+            display_name(&format!("{}\u{202e}", "a".repeat(55)), 60),
+            format!("{}…", "a".repeat(55))
+        );
+        assert_eq!(display_name("abc\u{202e}", 11), "abc\\u{202e}");
+    }
+
+    /// The prompt shows a hostile name in exactly the escaped form the
+    /// **Agent access** list shows it in, so the name a person approves
+    /// reads the same there later, and nothing in it can break a line or
+    /// reorder or hide the text around it.
+    #[test]
+    fn the_prompt_escapes_untrusted_names_and_paths_as_the_list_does() {
+        let hostile = "evil\u{1b}[31mRED\u{202e}gpj.exe\u{7}\tend";
+        let escaped = "evil\\u{001b}[31mRED\\u{202e}gpj.exe\\u{0007}\\u{0009}end";
+        assert_eq!(display_name(hostile, DISPLAY_NAME_CHARS), escaped);
+        assert_eq!(
+            splinterm::frontend::shown_name(hostile, DISPLAY_NAME_CHARS),
+            escaped,
+            "the list's escaper"
+        );
+        let mut prompt = manage_prompt();
+        prompt.agent_name = Some(hostile.to_owned());
+        prompt.requester = format!("/opt/{hostile}");
+        prompt.target = ConsentTarget::Lair {
+            lair_id: splinterm_core::LairId::new(),
+            lair_name: hostile.to_owned(),
+        };
+        prompt.durations[2].shared_by = Some(format!("/opt/{hostile}"));
+        for selected in 0..prompt.durations.len() {
+            let layout = laid_out(&prompt, selected);
+            for row in &layout.rows {
+                assert!(
+                    !row.chars()
+                        .any(splinterm::frontend::unsafe_display_character),
+                    "{row:?}"
+                );
+            }
+            let text = layout.rows.join("\n");
+            assert!(
+                text.contains(&format!(
+                    "Agent (reported by the agent, not verified): {escaped}"
+                )),
+                "{text}"
+            );
+            assert!(text.contains(&format!("Program: /opt/{escaped}")), "{text}");
+            assert!(text.contains(&format!(": '{escaped}'")), "{text}");
+            if selected == 2 {
+                assert!(
+                    text.contains(&format!("Any program that runs /opt/{escaped}")),
+                    "{text}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn trusted_consent_labels_replace_control_characters() {
+    fn trusted_dialog_labels_replace_control_characters() {
         assert_eq!(
             trusted_label("safe\nspoof\u{1b}\u{202e}rtl\u{2066}", 64),
             "safe�spoof��rtl�"
