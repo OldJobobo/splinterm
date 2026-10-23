@@ -368,3 +368,32 @@ class TrustedDialogEngagementTests(unittest.TestCase):
                     ]
                     self.assertEqual(len(clicked), 1)
         self.assertGreaterEqual(answered, 4)
+
+    def test_log_checks_ignore_colour_and_survive_an_early_match(self) -> None:
+        definition = next(
+            line
+            for line in HELPER_MODULE.PRELUDE.splitlines()
+            if line.startswith("expect_log()")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "daemon.log"
+            # A coloured key=value field first, then far more than a pipe
+            # buffer, so a reader that stopped early would break the pipe.
+            log.write_bytes(
+                b"\x1b[3mdaemon_generation\x1b[0m\x1b[2m=\x1b[0m2 adopted\n"
+                + b"filler line after the match\n" * 200_000
+            )
+
+            def check(needle: str) -> subprocess.CompletedProcess[str]:
+                script = f'set -euo pipefail\n{definition}\nexpect_log "$1" "$2"'
+                return subprocess.run(
+                    ["bash", "-c", script, "_", needle, str(log)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(check("daemon_generation=2").returncode, 0)
+            missing = check("daemon_generation=3")
+            self.assertEqual(missing.returncode, 1)
+            self.assertIn("missing", missing.stderr)

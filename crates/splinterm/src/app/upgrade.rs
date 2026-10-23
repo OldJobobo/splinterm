@@ -514,14 +514,15 @@ async fn confirm_handoff(previous: &HandoffReport, process: Option<DaemonProcess
 /// This client was trusted when it asked for the upgrade, so a refusal now
 /// means the serving daemon no longer accepts its binary. Replacing the
 /// installed `splinterm` while the upgrade runs does that, since the running
-/// process keeps the old file, and it also makes the daemon roll back. A
-/// stale binary never regains trust (AGENTS.md 4.4), so nothing is
-/// confirmed; a fresh `splinterm upgrade` runs the installed file and can
-/// report.
+/// process keeps the old file. The refusal alone does not say when that
+/// happened, so the outcome stays unknown: before adoption it makes the
+/// daemon roll back, after the commit it does not. A stale binary never
+/// regains trust (AGENTS.md 4.4); a fresh `splinterm upgrade` runs the
+/// installed file and can report.
 pub(in crate::app) fn refused_confirmation_line() -> (UpgradeExit, String) {
     (
         UpgradeExit::Unconfirmed,
-        "splinterd is serving again but no longer accepts this splinterm, so the upgrade is not confirmed. That happens when the installed splinterm is replaced while the upgrade runs, which also makes the daemon roll back. Run `splinterm upgrade` to see which build serves now.".to_owned(),
+        "splinterd is serving again but no longer accepts this splinterm, so the upgrade is not confirmed. The installed splinterm may have been replaced while the upgrade ran. Run the installed `splinterm upgrade` to see which build serves now.".to_owned(),
     )
 }
 
@@ -1115,7 +1116,8 @@ mod tests {
         let (exit, line) = refused_confirmation_line();
         assert_eq!(exit, UpgradeExit::Unconfirmed);
         assert!(line.contains("no longer accepts this splinterm"), "{line}");
-        assert!(line.contains("replaced while the upgrade runs"), "{line}");
+        assert!(line.contains("may have been replaced"), "{line}");
+        assert!(!line.contains("roll back"), "{line}");
         assert!(line.contains("splinterm upgrade"), "{line}");
     }
 

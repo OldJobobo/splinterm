@@ -87,8 +87,10 @@ point_into() {
 }
 expect() { grep -Fq -- "$1" "$2" || { printf 'missing %q in %s\n' "$1" "$2" >&2; exit 1; }; }
 # The private daemon logs with ANSI colour, which splits key=value fields, so
-# match daemon.log with the colour codes removed.
-expect_log() { sed 's/\x1b\[[0-9;]*m//g' "$2" | grep -Fq -- "$1" || { printf 'missing %q in %s\n' "$1" "$2" >&2; exit 1; }; }
+# match daemon.log with the colour codes removed. grep reads the whole stream
+# (no -q): stopping at an early match would make sed fail with SIGPIPE, and
+# pipefail would then report a line that is there as missing.
+expect_log() { sed 's/\x1b\[[0-9;]*m//g' "$2" | grep -F -- "$1" >/dev/null || { printf 'missing %q in %s\n' "$1" "$2" >&2; exit 1; }; }
 """
 
 # Linux input key codes for `omarchy-vm.sh input key` (ydotool).
@@ -601,7 +603,7 @@ jq '{acquired_before, old_handle_expired, reacquired}' "$ev/mcp/result.json\""""
         "r3-rollback",
         "4 rollback round",
         "A real rollback: the installed client changes inode while the D10 prompt is open",
-        "While the prompt is open, /usr/bin/splinterm is replaced by a byte-identical copy (cp -p, then rename: a new inode, pacman -Qk still clean). Proceeding (G) makes the forward candidate refuse the changed install pair at adoption and roll back: exit 7, saying the daemon no longer accepts this splinterm because it was replaced while the upgrade ran (the CLI runs the old inode); a fresh `splinterm upgrade` shows the same daemon PID now executing the sealed rollback snapshot at generation 1 with no rollback copy, W1 relaunched as the installed /usr/bin/splinterm, reconnected (its 3 s 'Rolled back' notice may be gone by the capture), and typing again.",
+        "While the prompt is open, /usr/bin/splinterm is replaced by a byte-identical copy (cp -p, then rename: a new inode, pacman -Qk still clean). Proceeding (G) makes the forward candidate refuse the changed install pair at adoption and roll back: exit 7, saying the daemon no longer accepts this splinterm, which may have been replaced (the CLI runs the old inode); a fresh `splinterm upgrade` shows the same daemon PID now executing the sealed rollback snapshot at generation 1 with no rollback copy, W1 relaunched as the installed /usr/bin/splinterm, reconnected (its 3 s 'Rolled back' notice may be gone by the capture), and typing again.",
         (
             guest('kill -STOP "$(cat "$ev/w2-pid")"'),
             start_upgrade("r3"),
@@ -628,7 +630,7 @@ pacman -Qk splinterm"""
             wait_for_exit("r3", 7),
             guest(
                 """expect 'no longer accepts this splinterm' "$ev/r3-upgrade.log"
-expect 'replaced while the upgrade runs' "$ev/r3-upgrade.log\""""
+expect 'may have been replaced while the upgrade ran' "$ev/r3-upgrade.log\""""
             ),
             pause(5),
             guest(
