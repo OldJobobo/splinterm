@@ -342,7 +342,14 @@ fn navigation_status(
         SemanticFocus::Terminal => "Focus Explorer to change filters",
         SemanticFocus::None => "Navigation shortcuts unavailable",
     };
-    format!("{} filter · {status} · {hint}", explorer.filter().label())
+    let scope = match (explorer.searching_all_lairs(), explorer.filter()) {
+        (false, filter) => format!("{} filter", filter.label()),
+        (true, crate::frontend::LairExplorerFilter::All) => "Searching all Lairs".to_owned(),
+        // The results come from every Lair; the chosen filter returns when the
+        // search is cleared.
+        (true, filter) => format!("Searching all Lairs, {} filter kept", filter.label()),
+    };
+    format!("{scope} · {status} · {hint}")
 }
 
 fn identities(
@@ -458,7 +465,7 @@ mod tests {
         assert_eq!(empty.focus, SemanticFocus::Search);
         assert_eq!(
             empty.status.as_deref(),
-            Some("All filter · No matches · Typing searches labels")
+            Some("Searching all Lairs · No matches · Typing searches labels")
         );
         assert_eq!(empty.query, "no matches");
         assert!(
@@ -561,6 +568,31 @@ mod tests {
         explorer.set_filter(LairExplorerFilter::All);
         let restored = accessibility.refresh(&explorer, context());
         assert_eq!(restored.items, all.items);
+
+        // A search under Live or Saved says it covers every Lair and that the
+        // filter is kept; clearing it announces the filter again.
+        for filter in [LairExplorerFilter::Live, LairExplorerFilter::Saved] {
+            explorer.set_filter(filter);
+            explorer.set_search("a".into());
+            let searching = accessibility.refresh(&explorer, context());
+            let status = searching.status.as_deref().unwrap();
+            assert!(
+                status.starts_with(&format!(
+                    "Searching all Lairs, {} filter kept",
+                    filter.label()
+                )),
+                "{status}"
+            );
+            explorer.set_search(String::new());
+            let cleared = accessibility.refresh(&explorer, context());
+            assert!(
+                cleared
+                    .status
+                    .as_deref()
+                    .unwrap()
+                    .starts_with(&format!("{} filter", filter.label()))
+            );
+        }
     }
 
     #[test]

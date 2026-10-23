@@ -441,6 +441,12 @@ impl LairExplorerUi {
         self.query.text()
     }
 
+    /// Whether a search is active, so rows come from every Lair whatever the
+    /// chosen filter.
+    pub(crate) fn searching_all_lairs(&self) -> bool {
+        !normalized_query(self.query.text()).is_empty()
+    }
+
     pub(crate) fn editor_mut(&mut self) -> &mut BoundedTextEditor {
         &mut self.query
     }
