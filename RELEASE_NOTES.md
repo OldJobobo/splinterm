@@ -16,7 +16,6 @@ running; a Window is only a view.
 0.2.0 changes the private daemon protocol. A 0.2.0 client cannot talk to a 0.1.x
 daemon, and the reverse, so read "Upgrading from 0.1.x" before installing.
 
-<!-- PENDING: live upgrade enablement PR -->
 ## Live daemon upgrade
 
 - `splinterm upgrade` reports whether the running daemon could hand its
@@ -52,8 +51,9 @@ daemon, and the reverse, so read "Upgrading from 0.1.x" before installing.
 - Exit statuses: 0 report shown or upgrade completed; 1 error; 2 usage error;
   3 cancelled, nothing changed; 4 live upgrade unavailable now, nothing changed;
   5 another upgrade in progress; 6 did not complete, previous build still
-  serving with terminals kept; 7 result unconfirmed, run `splinterm upgrade` to
-  check.
+  serving with terminals kept; 7 result unconfirmed (for example because the
+  installed `splinterm` was replaced while the upgrade ran), run
+  `splinterm upgrade` to check.
 - Other commands are never retried after a mutation is interrupted. A command
   refused during an upgrade says it did not run; one cut off by the upgrade says
   it may or may not have taken effect. Plain reads (`ping`, `list`, `topology`,
@@ -205,8 +205,11 @@ a hostile program running as your account.
   configuration already uses the chord. A module written by an earlier release
   shows as `Dialog focus missing` in `splinterm integration omarchy status`;
   run `enable` again to upgrade it.
-- Trusted dialogs use your configured font, and in a small tiled Window their
-  answer areas start below the text instead of covering it.
+- Trusted dialogs use your configured font and ask the desktop for one fixed
+  size, so tiling desktops such as Hyprland float them instead of tiling them.
+  Given a smaller size anyway, a dialog rewraps its text and then shrinks it.
+  While any text is still hidden, it can only be declined: it never grants,
+  proceeds, or restarts, and says so in place of its key hints.
 
 ## Agent status
 
@@ -258,6 +261,9 @@ a hostile program running as your account.
   is never echoed, logged, or put on the clipboard, and an unanswered prompt
   ends the attempt after 120 seconds. Host keys are still never accepted
   through it.
+- A launch whose command ends before its Window opens, such as
+  `splinterm-xdg-terminal-exec -- true`, now prints "splinterm: the command
+  ended before its Window opened." and succeeds instead of failing.
 - A graphical command that fails, such as a desktop launch that fails before
   its Window maps, now prints its full reason on one line after "splinterm
   graphical client failed:" instead of that phrase alone. A configuration that
