@@ -7189,7 +7189,7 @@ impl App {
                     .modal
                     .trusted_consent
                     .as_mut()
-                    .and_then(TrustedConsentUi::render)
+                    .and_then(|consent| consent.render(Instant::now()))
                 else {
                     return;
                 };
@@ -11007,6 +11007,13 @@ impl App {
             self.scheduling.terminal_redraw_pending = terminal_priority;
             return Ok(());
         };
+        // While part of a dialog's text is hidden it cannot say yes, and
+        // its green area is dimmed.
+        let proceed_enabled = self
+            .modal
+            .trusted_consent
+            .as_ref()
+            .is_none_or(|consent| !consent.clipped());
         // Below the dialog's text, which must never be covered while it fits.
         let trusted_action_top = self
             .modal
@@ -11286,6 +11293,7 @@ impl App {
                     height,
                     button_top,
                     self.presentation.theme.background,
+                    proceed_enabled,
                 );
             }
             if full_transient_canvas_content {

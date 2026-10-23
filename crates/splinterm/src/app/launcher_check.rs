@@ -49,7 +49,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use splinterd::dialog_shortcut::DialogShortcut;
 use splinterm::automation::{Connection, protocol_error, socket_path};
-use splinterm::frontend::dialog_text::{text_rows, wrap_line};
+use splinterm::frontend::dialog_text::text_rows;
 use splinterm::{DialogLine, DialogText, TrustedConsentUi, WindowOptions};
 use splinterm_protocol::{ErrorCode, HandoffReport};
 use tokio::net::UnixStream;
@@ -445,6 +445,38 @@ fn prose(text: impl Into<String>) -> DialogLine {
     DialogLine::new(text).with_wrap_at(WRAP_COLUMNS)
 }
 
+/// `line` as the terminal note prints it: wrapped at its own width with its
+/// hanging indent, and never inside a word, so a long path or unit name
+/// stays whole (on a row of its own) for copying.
+fn terminal_rows(line: &DialogLine) -> Vec<String> {
+    let Some(width) = line.wrap_at else {
+        return vec![line.text.clone()];
+    };
+    let leading = line.text.len() - line.text.trim_start_matches(' ').len();
+    let mut rows = Vec::new();
+    let mut row = " ".repeat(leading);
+    let mut has_word = false;
+    for word in line.text.split_whitespace() {
+        if has_word && row.chars().count() + 1 + word.chars().count() > width {
+            rows.push(std::mem::take(&mut row));
+            row = " ".repeat(line.indent);
+            has_word = false;
+        }
+        if has_word {
+            row.push(' ');
+        }
+        row.push_str(word);
+        has_word = true;
+    }
+    if has_word || rows.is_empty() {
+        if !has_word {
+            row.clear();
+        }
+        rows.push(row);
+    }
+    rows
+}
+
 /// One blocking reason as its bulleted paragraph.
 fn reason_paragraph(text: &str) -> DialogLine {
     DialogLine::new(format!("  • {text}"))
@@ -467,7 +499,7 @@ fn reason_lines(reasons: &[String]) -> Vec<DialogLine> {
             )
         })
         .collect();
-    let rows = |line: &DialogLine| wrap_line(line, usize::MAX).len();
+    let rows = |line: &DialogLine| terminal_rows(line).len();
     if paragraphs.iter().map(rows).sum::<usize>() <= MAX_REASON_LINES {
         return paragraphs;
     }
@@ -477,7 +509,7 @@ fn reason_lines(reasons: &[String]) -> Vec<DialogLine> {
         if room == 0 {
             break;
         }
-        let wrapped = wrap_line(&paragraph, usize::MAX);
+        let wrapped = terminal_rows(&paragraph);
         if wrapped.len() <= room {
             room -= wrapped.len();
             kept.push(paragraph);
@@ -586,7 +618,7 @@ pub(in crate::app) fn question_lines(question: &RestartQuestion) -> Vec<DialogLi
 pub(in crate::app) fn question_text(question: &RestartQuestion) -> Vec<String> {
     question_lines(question)
         .iter()
-        .flat_map(|line| wrap_line(line, usize::MAX))
+        .flat_map(terminal_rows)
         .collect()
 }
 
@@ -1645,6 +1677,24 @@ splinterm-splint-notes.service loaded active running Something else
                 .join(" ")
                 .split_whitespace()
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The terminal note never splits a word, however long: a long path
+    /// gets a row of its own, whole, for copying.
+    #[test]
+    fn the_terminal_note_never_splits_a_long_word() {
+        let path = format!("/{}", "p".repeat(100));
+        let rows = terminal_rows(&prose(format!("Run {path} to see it.")));
+        assert_eq!(rows, ["Run".to_owned(), path, "to see it.".to_owned()]);
+        let bullet = terminal_rows(&reason_paragraph(&"word ".repeat(30)));
+        assert!(bullet[0].starts_with("  • word"));
+        assert!(bullet[1..].iter().all(|row| row.starts_with("      word")));
+        assert!(bullet.iter().all(|row| row.chars().count() <= WRAP_COLUMNS));
+        assert_eq!(terminal_rows(&DialogLine::blank()), [""]);
+        assert_eq!(
+            terminal_rows(&DialogLine::new("  Running:   Splinterm 0.2.6")),
+            ["  Running:   Splinterm 0.2.6"]
         );
     }
 

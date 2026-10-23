@@ -384,13 +384,39 @@ pub fn layout(
     columns: usize,
     max_rows: usize,
 ) -> DialogLayout {
+    layout_with_notice(variants, selected, columns, max_rows, None)
+}
+
+/// [`layout`], except that when the text does not fit, `notice` (when
+/// given) takes the place of every hint row: a dialog that hides part of
+/// its text says so instead of saying how to say yes.
+#[must_use]
+pub fn layout_with_notice(
+    variants: &[DialogText],
+    selected: usize,
+    columns: usize,
+    max_rows: usize,
+    notice: Option<&str>,
+) -> DialogLayout {
     let Some(text) = variants.get(selected).or_else(|| variants.first()) else {
         return DialogLayout::default();
     };
     let tallest = tallest_slots(variants, columns);
-    let rows = wrapped_rows(text, columns, &tallest);
+    let mut rows = wrapped_rows(text, columns, &tallest);
     let clipped = rows.len() > max_rows;
-    let keep: Vec<bool> = if clipped {
+    if let Some(notice) = notice.filter(|_| clipped) {
+        rows.retain(|row| row.role != DialogLineRole::Hint);
+        rows.extend(
+            wrap_line(&DialogLine::hint(notice), columns)
+                .into_iter()
+                .map(|text| LaidRow {
+                    text,
+                    role: DialogLineRole::Hint,
+                    duration: None,
+                }),
+        );
+    }
+    let keep: Vec<bool> = if rows.len() > max_rows {
         let hints = rows
             .iter()
             .filter(|row| row.role == DialogLineRole::Hint)
@@ -412,7 +438,12 @@ pub fn layout(
     } else {
         vec![true; rows.len()]
     };
-    let last_body = clipped
+    // The marker shows only where body rows were dropped.
+    let body_dropped = rows
+        .iter()
+        .zip(&keep)
+        .any(|(row, kept)| !*kept && row.role == DialogLineRole::Body);
+    let last_body = body_dropped
         .then(|| {
             rows.iter()
                 .zip(&keep)
@@ -707,6 +738,39 @@ mod tests {
         );
         assert_eq!(layout(&variants, 0, 40, 2).rows, ["keys", "click"]);
         assert!(layout(&variants, 0, 40, 0).rows.is_empty());
+    }
+
+    /// A dialog that hides text says so where its answer hints were.
+    #[test]
+    fn a_clipped_layout_shows_its_notice_instead_of_the_hints() {
+        let variants = text(vec![
+            DialogLine::new("TITLE"),
+            DialogLine::new("body one"),
+            DialogLine::new("body two"),
+            DialogLine::hint("G grants"),
+            DialogLine::hint("click green"),
+        ]);
+        let notice = Some("Part of this is hidden");
+        let fits = layout_with_notice(&variants, 0, 40, 5, notice);
+        assert!(!fits.clipped);
+        assert_eq!(fits.rows[3..], ["G grants", "click green"]);
+        let cut = layout_with_notice(&variants, 0, 40, 3, notice);
+        assert!(cut.clipped);
+        assert_eq!(
+            cut.rows,
+            ["TITLE", CLIPPED_MARKER, "Part of this is hidden"]
+        );
+        // Hiding only a hint still counts as hidden text, and the body,
+        // all in view, gets no marker.
+        let hints_only = layout_with_notice(&variants, 0, 40, 4, notice);
+        assert!(hints_only.clipped);
+        assert_eq!(
+            hints_only.rows,
+            ["TITLE", "body one", "body two", "Part of this is hidden"]
+        );
+        // The notice wraps like any line, and is cut last.
+        let narrow = layout_with_notice(&variants, 0, 12, 3, notice);
+        assert_eq!(narrow.rows, [CLIPPED_MARKER, "Part of this", "is hidden"]);
     }
 
     #[test]

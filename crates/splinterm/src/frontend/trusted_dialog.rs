@@ -99,8 +99,9 @@ impl Engagement {
         }
     }
 
-    /// Starts the arming delay again, for an engaged dialog.
-    const fn rearm(&mut self, now: Instant) {
+    /// Starts the arming delay again, for an engaged dialog. An unengaged
+    /// one stays unengaged.
+    pub(crate) const fn rearm(&mut self, now: Instant) {
         if self.engaged {
             self.armed_from = Some(now);
         }
@@ -254,6 +255,11 @@ impl AccessChoice {
         self.engagement.note_focus(now);
     }
 
+    /// Starts the arming delay again (see [`Engagement::rearm`]).
+    pub(crate) const fn rearm(&mut self, now: Instant) {
+        self.engagement.rearm(now);
+    }
+
     /// Selects an offered duration and starts the delay again. A withheld,
     /// unknown, or already selected index changes nothing.
     pub(crate) fn select(&mut self, index: usize, now: Instant) -> bool {
@@ -321,6 +327,22 @@ impl AccessChoice {
 }
 
 impl TrustedDialogKind {
+    /// What the dialog shows in place of its answer hints while part of its
+    /// text is hidden: it cannot say yes until the Window is larger.
+    pub(crate) const fn clipped_notice(self) -> &'static str {
+        match self {
+            Self::AccessConsent => {
+                "Part of this request is hidden, so it cannot be granted. Make this window larger to grant. Enter, Escape, D, or the red area deny."
+            }
+            Self::Upgrade => {
+                "Part of this question is hidden, so it cannot proceed. Make this window larger to proceed. Enter, Escape, D, or the red area cancel."
+            }
+            Self::Restart => {
+                "Part of this question is hidden, so it cannot restart. Make this window larger to restart. Enter, Escape, D, or the red area answer Not now."
+            }
+        }
+    }
+
     /// The title the Window maps with.
     pub(crate) const fn window_title(self) -> &'static str {
         match self {

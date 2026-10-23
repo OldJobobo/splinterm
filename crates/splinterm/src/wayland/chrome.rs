@@ -1,6 +1,6 @@
 //! Trusted consent and pane chrome painting.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use anyhow::{Context, Result};
 use unicode_width::UnicodeWidthChar;
@@ -35,6 +35,7 @@ struct TrustedLayoutKey {
     content: (u32, u32, u32, u32),
     scale_120: u32,
     renderer_generation: u64,
+    bounds: Option<(u32, u32)>,
 }
 
 /// A trusted dialog's fixed size and the inputs of its current layout.
@@ -43,6 +44,9 @@ pub(super) struct TrustedDialogLayout {
     key: Option<TrustedLayoutKey>,
     /// The logical size asked for as both minimum and maximum.
     pub(super) fixed_size: Option<(u32, u32)>,
+    /// The largest size the compositor suggested for the Window
+    /// (`xdg_toplevel.configure_bounds`), when it sent one.
+    pub(super) bounds: Option<(u32, u32)>,
 }
 
 impl TrustedDialogLayout {
@@ -50,8 +54,21 @@ impl TrustedDialogLayout {
         Self {
             key: None,
             fixed_size,
+            bounds: None,
         }
     }
+}
+
+/// The fixed size a dialog asks for: its `natural` size, but no larger than
+/// the compositor's suggested `bounds` (usually the output's usable area),
+/// so a long prompt never asks to be taller than the screen; its text then
+/// wraps or shrinks to fit. A bound of 0 means that dimension is unbounded.
+pub(super) fn bounded_fixed_size(natural: (u32, u32), bounds: Option<(u32, u32)>) -> (u32, u32) {
+    let Some((width, height)) = bounds else {
+        return natural;
+    };
+    let bound = |size: u32, bound: u32| if bound == 0 { size } else { size.min(bound) };
+    (bound(natural.0, width), bound(natural.1, height))
 }
 
 /// How a trusted dialog's text fits one candidate cell size in its Window.
@@ -151,6 +168,38 @@ fn in_action_area(y: f64, scale_120: u32, action_top: u32) -> bool {
     y * f64::from(scale_120) / f64::from(SCALE_DENOMINATOR) >= f64::from(action_top)
 }
 
+/// Where the action areas begin in a dialog drawn with `geometry` whose
+/// snapshot shows `text_rows` rows of text: the one computation both
+/// drawing and hit testing use.
+fn geometry_action_top(
+    width: u32,
+    height: u32,
+    geometry: &WindowGeometry,
+    text_rows: usize,
+) -> u32 {
+    trusted_consent_action_top(
+        width,
+        height,
+        geometry.grid_rect.y,
+        geometry.cell.height,
+        u32::try_from(text_rows)
+            .unwrap_or(u32::MAX)
+            .min(geometry.rows),
+    )
+}
+
+/// Whether a click `y` logical pixels down a dialog drawn with `geometry`
+/// at `scale_120`, showing `text_rows` rows of text, is in its action areas.
+fn action_area_hit(y: f64, scale_120: u32, geometry: &WindowGeometry, text_rows: usize) -> bool {
+    let top = geometry_action_top(
+        geometry.buffer_width(),
+        geometry.buffer_height(),
+        geometry,
+        text_rows,
+    );
+    in_action_area(y, scale_120, top)
+}
+
 /// The width of a trusted dialog's amber border, in buffer pixels.
 fn trusted_consent_border(width: u32, height: u32) -> u32 {
     width.min(height).div_ceil(80).max(4)
@@ -189,21 +238,16 @@ impl App {
         let Some(geometry) = geometry else {
             return trusted_consent_action_top(width, height, 0, 0, 0);
         };
-        let text_rows = self
-            .panes
+        geometry_action_top(width, height, geometry, self.trusted_text_rows())
+    }
+
+    /// How many rows of the dialog's snapshot hold text.
+    fn trusted_text_rows(&self) -> usize {
+        self.panes
             .pane
             .snapshot
             .as_ref()
-            .map_or(0, |snapshot| dialog_text_rows(&snapshot.visible_rows));
-        trusted_consent_action_top(
-            width,
-            height,
-            geometry.grid_rect.y,
-            geometry.cell.height,
-            u32::try_from(text_rows)
-                .unwrap_or(u32::MAX)
-                .min(geometry.rows),
-        )
+            .map_or(0, |snapshot| dialog_text_rows(&snapshot.visible_rows))
     }
 
     /// Whether a click `y` logical pixels down this trusted dialog falls in
@@ -226,12 +270,7 @@ impl App {
         let Some(geometry) = geometry else {
             return y >= f64::from(self.surface.logical_height) * 0.78;
         };
-        let top = self.trusted_consent_action_top(
-            geometry.buffer_width(),
-            geometry.buffer_height(),
-            Some(&geometry),
-        );
-        in_action_area(y, scale_120, top)
+        action_area_hit(y, scale_120, &geometry, self.trusted_text_rows())
     }
 
     /// Lays a trusted dialog's text out again whenever its Window's size,
@@ -251,10 +290,12 @@ impl App {
         }
         let content = self.content_rect();
         let scale_120 = self.surface.scale_120;
+        let bounds = self.modal.trusted_layout.bounds;
         let key = TrustedLayoutKey {
             content: (content.x, content.y, content.width, content.height),
             scale_120,
             renderer_generation: self.presentation.renderer_generation,
+            bounds,
         };
         if self.modal.trusted_layout.key == Some(key) {
             return Ok(());
@@ -275,7 +316,8 @@ impl App {
         else {
             return Ok(());
         };
-        // The fixed size, at the configured font and the current scale.
+        // The fixed size, at the configured font and the current scale, no
+        // larger than the compositor's suggested bounds.
         if let Ok(natural) = WindowGeometry::for_grid(
             u32::try_from(natural_columns(&variants)).unwrap_or(u32::MAX),
             u32::try_from(natural_rows(&variants)).unwrap_or(u32::MAX),
@@ -283,7 +325,8 @@ impl App {
             padding,
             scale_120,
         ) {
-            let size = (natural.logical_width(), natural.logical_height());
+            let size =
+                bounded_fixed_size((natural.logical_width(), natural.logical_height()), bounds);
             if self.modal.trusted_layout.fixed_size != Some(size) {
                 self.surface.window.set_min_size(Some(size));
                 self.surface.window.set_max_size(Some(size));
@@ -322,7 +365,7 @@ impl App {
             self.modal
                 .trusted_consent
                 .as_mut()
-                .and_then(|consent| consent.lay_out(fit.frame()))
+                .and_then(|consent| consent.lay_out_again(fit.frame(), Instant::now()))
         });
         if let Some(snapshot) = snapshot {
             self.install_trusted_dialog_snapshot(snapshot)?;
@@ -362,17 +405,22 @@ impl App {
     }
 }
 
+/// The green area's color while the dialog cannot say yes.
+const DIMMED_PROCEED: u32 = 0x0024_302a;
+
 /// Paints a trusted dialog's amber border and its red (left) and green
 /// (right) action areas, which begin `button_top` pixels down
 /// ([`App::trusted_consent_action_top`]). The gap between the areas is
 /// filled with `background`, so nothing drawn below `button_top` shows
-/// through it.
+/// through it. While the dialog cannot say yes (part of its text is
+/// hidden), the green area is drawn dimmed.
 pub(super) fn paint_trusted_consent_chrome(
     canvas: &mut [u8],
     width: u32,
     height: u32,
     button_top: u32,
     background: u32,
+    proceed_enabled: bool,
 ) {
     fn fill(canvas: &mut [u8], width: u32, x0: u32, y0: u32, x1: u32, y1: u32, rgb: u32) {
         let [_, red, green, blue] = rgb.to_be_bytes();
@@ -434,7 +482,11 @@ pub(super) fn paint_trusted_consent_chrome(
         button_top,
         width.saturating_sub(border),
         height.saturating_sub(border),
-        0x0020_7040,
+        if proceed_enabled {
+            0x0020_7040
+        } else {
+            DIMMED_PROCEED
+        },
     );
 }
 
@@ -1042,7 +1094,7 @@ pub(super) fn paint_pane_chrome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::{DialogIdentity, DialogLine, DialogLineRole, dialog_text};
+    use crate::frontend::{DialogLine, dialog_text};
     use crate::pane::PaneGeometry;
     use splinterm_core::Axis;
 
@@ -1097,16 +1149,18 @@ mod tests {
         }
     }
 
-    /// The text laid out for `fit`, as its snapshot rows.
-    fn laid_out(variants: &[DialogText], fit: &TrustedFit) -> TerminalSnapshot {
-        let frame = fit.frame();
-        let layout = dialog_text::layout(variants, 0, frame.wrap_columns, frame.max_text_rows);
-        dialog_text::dialog_snapshot(
-            layout.rows,
-            frame.grid_columns,
-            frame.grid_rows,
-            &DialogIdentity::default(),
-        )
+    /// The restart question as its dialog child builds it.
+    fn restart_dialog() -> crate::frontend::TrustedConsentUi {
+        let (decision, _answers) = std::sync::mpsc::channel();
+        crate::frontend::TrustedConsentUi::restart(decision).with_text(restart_text().remove(0))
+    }
+
+    /// `dialog` laid out for `fit` exactly as the Window lays it out.
+    fn laid_out(
+        dialog: &mut crate::frontend::TrustedConsentUi,
+        fit: &TrustedFit,
+    ) -> TerminalSnapshot {
+        dialog.lay_out_again(fit.frame(), Instant::now()).unwrap()
     }
 
     fn row_text(snapshot: &TerminalSnapshot, row: usize) -> String {
@@ -1117,12 +1171,12 @@ mod tests {
             .collect()
     }
 
-    fn fit_at(variants: &[DialogText], width: u32, height: u32) -> TrustedFit {
+    fn fit_at(variants: &[DialogText], width: u32, height: u32, scale_120: u32) -> TrustedFit {
         trusted_dialog_fit(
             content(width, height),
             cell(),
             TerminalPadding::DEFAULT,
-            SCALE_DENOMINATOR,
+            scale_120,
             variants,
         )
         .unwrap()
@@ -1134,10 +1188,49 @@ mod tests {
             .collect()
     }
 
+    const RED: [u8; 4] = [0x20, 0x20, 0x70, 0xff];
+
+    /// Every answer hint shows when the text fits; when it does not, the
+    /// notice that the question cannot say yes takes their place.
+    fn assert_answer_rows(
+        dialog: &crate::frontend::TrustedConsentUi,
+        shown: &[String],
+        text_rows: usize,
+        size: &str,
+    ) {
+        if dialog.clipped() {
+            assert!(
+                shown
+                    .iter()
+                    .any(|row| row.starts_with("Part of this question is hidden")),
+                "{size}: {shown:#?}"
+            );
+            assert!(
+                !shown.iter().any(|row| row.starts_with("[D / Esc")),
+                "{size}"
+            );
+        } else {
+            assert!(!shown.iter().any(|row| row == dialog_text::CLIPPED_MARKER));
+            for hint in ["[D / Esc / Enter", "Click the red left area"] {
+                assert!(
+                    shown.iter().any(|row| row.starts_with(hint)),
+                    "{size}: {hint}: {shown:#?}"
+                );
+            }
+            assert!(
+                shown[text_rows - 1].ends_with("keyboard."),
+                "{size}: {shown:#?}"
+            );
+        }
+    }
+
     /// At its natural size the dialog fits exactly, and in every smaller or
-    /// odd Window (the 2026-10-22 tiles among them) its text is rewrapped to
-    /// the columns there, ends above the action areas the Window draws, and
-    /// a click is in an action area exactly where those areas are drawn.
+    /// odd Window (the 2026-10-22 tiles among them), at 1x and at 1.25x, its
+    /// text is laid out again, ends above the action areas as they are
+    /// painted, and a click (in logical pixels, converted to buffer pixels)
+    /// is in an action area exactly where those areas are painted. Every
+    /// size shows how to answer: the hints, or the notice that replaces
+    /// them while text is hidden.
     #[test]
     fn relaid_text_stays_above_the_drawn_action_areas_and_clicks_agree() {
         let variants = restart_text();
@@ -1149,7 +1242,12 @@ mod tests {
             SCALE_DENOMINATOR,
         )
         .unwrap();
-        let natural_fit = fit_at(&variants, natural.logical_width(), natural.logical_height());
+        let natural_fit = fit_at(
+            &variants,
+            natural.logical_width(),
+            natural.logical_height(),
+            SCALE_DENOMINATOR,
+        );
         assert!(natural_fit.fits());
         assert_eq!(natural_fit.wrap_columns, natural_columns(&variants));
         let sizes = [
@@ -1161,79 +1259,127 @@ mod tests {
             (300, 200),
             (1200, 900),
         ];
-        for (width, height) in sizes {
-            let fit = fit_at(&variants, width, height);
-            let snapshot = laid_out(&variants, &fit);
-            let geometry = fit.geometry;
-            assert!(
-                snapshot.columns <= geometry.columns as usize,
-                "{width}x{height}"
-            );
-            assert!(snapshot.rows <= geometry.rows as usize, "{width}x{height}");
-            let text_rows = u32::try_from(dialog_text_rows(&snapshot.visible_rows)).unwrap();
-            let top = trusted_consent_action_top(
-                geometry.buffer_width(),
-                geometry.buffer_height(),
-                geometry.grid_rect.y,
-                geometry.cell.height,
-                text_rows,
-            );
-            let text_bottom = geometry.grid_rect.y + text_rows * geometry.cell.height;
-            assert!(
-                text_bottom <= top,
-                "{width}x{height}: text ends at {text_bottom}, actions at {top}"
-            );
-            for y in 0..geometry.buffer_height() {
-                assert_eq!(
-                    in_action_area(f64::from(y), SCALE_DENOMINATOR, top),
-                    y >= top,
-                    "{width}x{height} at {y}"
-                );
-            }
-            // Text that fits is never cut, and the last rows are the hints.
-            if fit.fits() {
-                let shown = shown_rows(&snapshot);
-                assert!(!shown.iter().any(|row| row == dialog_text::CLIPPED_MARKER));
-                let last = usize::try_from(text_rows).unwrap() - 1;
+        for scale_120 in [SCALE_DENOMINATOR, 150] {
+            for (width, height) in sizes {
+                let size = format!("{width}x{height} at {scale_120}");
+                let fit = fit_at(&variants, width, height, scale_120);
+                let mut dialog = restart_dialog();
+                let snapshot = laid_out(&mut dialog, &fit);
+                assert_eq!(dialog.clipped(), !fit.fits(), "{size}");
+                let geometry = fit.geometry;
+                assert!(snapshot.columns <= geometry.columns as usize, "{size}");
+                assert!(snapshot.rows <= geometry.rows as usize, "{size}");
+                let text_rows = dialog_text_rows(&snapshot.visible_rows);
+                let (buffer_width, buffer_height) =
+                    (geometry.buffer_width(), geometry.buffer_height());
+                let top = geometry_action_top(buffer_width, buffer_height, &geometry, text_rows);
+                let text_bottom =
+                    geometry.grid_rect.y + u32::try_from(text_rows).unwrap() * geometry.cell.height;
                 assert!(
-                    shown[last].ends_with("keyboard."),
-                    "{width}x{height}: {shown:#?}"
+                    text_bottom <= top,
+                    "{size}: text ends at {text_bottom}, actions at {top}"
                 );
+                // The painted red area and the hit test agree on every
+                // buffer row above the bottom border.
+                let mut canvas =
+                    vec![0; usize::try_from(buffer_width * buffer_height * 4).unwrap()];
+                paint_trusted_consent_chrome(
+                    &mut canvas,
+                    buffer_width,
+                    buffer_height,
+                    top,
+                    0x0014_1820,
+                    !dialog.clipped(),
+                );
+                let border = trusted_consent_border(buffer_width, buffer_height);
+                let x = buffer_width / 4;
+                for y in border..buffer_height - border {
+                    let index = usize::try_from((y * buffer_width + x) * 4).unwrap();
+                    let painted_red = canvas[index..index + 4] == RED;
+                    let logical_y =
+                        (f64::from(y) + 0.5) * f64::from(SCALE_DENOMINATOR) / f64::from(scale_120);
+                    assert_eq!(
+                        action_area_hit(logical_y, scale_120, &geometry, text_rows),
+                        painted_red,
+                        "{size} at buffer row {y}"
+                    );
+                }
+                assert_answer_rows(&dialog, &shown_rows(&snapshot), text_rows, &size);
             }
         }
+        // The reported 621x368 tile does not fit at this font, so it says
+        // so and cannot restart.
+        let mut dialog = restart_dialog();
+        laid_out(&mut dialog, &fit_at(&variants, 621, 368, SCALE_DENOMINATOR));
+        assert!(dialog.clipped());
     }
 
     /// A narrower Window with room enough rewraps and cuts nothing; one too
-    /// short at this font keeps every hint row and marks the cut body.
+    /// short at this font marks the cut body and says it cannot say yes.
     #[test]
-    fn narrow_windows_rewrap_and_short_ones_keep_the_hints() {
+    fn narrow_windows_rewrap_and_short_ones_say_what_is_hidden() {
         let variants = restart_text();
-        let narrow = fit_at(&variants, 621, 600);
+        let narrow = fit_at(&variants, 621, 600, SCALE_DENOMINATOR);
         assert!(narrow.wrap_columns < natural_columns(&variants));
         assert!(narrow.fits(), "{narrow:?}");
-        let short = fit_at(&variants, 621, 200);
+        let short = fit_at(&variants, 621, 200, SCALE_DENOMINATOR);
         assert!(!short.fits());
-        let shown = shown_rows(&laid_out(&variants, &short));
+        let mut dialog = restart_dialog();
+        let shown = shown_rows(&laid_out(&mut dialog, &short));
         assert!(
             shown.iter().any(|row| row == dialog_text::CLIPPED_MARKER),
             "{shown:#?}"
         );
-        for hint in [
-            "[D / Esc / Enter",
-            "Click the red left area",
-            "Click inside this dialog",
-        ] {
-            assert!(
-                shown.iter().any(|row| row.starts_with(hint)),
-                "{hint}: {shown:#?}"
-            );
-        }
         assert!(
-            variants[0]
-                .lines
+            shown
                 .iter()
-                .any(|line| line.role == DialogLineRole::Hint)
+                .any(|row| row.starts_with("Part of this question is hidden")),
+            "{shown:#?}"
         );
+    }
+
+    /// The font decision fed by the real fit: in the reported 621x368 tile
+    /// a 9x19 cell does not fit and a 7x14 one does, so the dialog steps
+    /// down to it, unless that is below 70% of the configured size.
+    #[test]
+    fn the_font_steps_down_to_a_cell_that_really_fits() {
+        let variants = restart_text();
+        let large = CellGeometry::from_metrics(9, 19, 15, 4, 15).unwrap();
+        let small = CellGeometry::from_metrics(7, 14, 11, 3, 11).unwrap();
+        let fits = |cell| {
+            trusted_dialog_fit(
+                content(621, 368),
+                cell,
+                TerminalPadding::DEFAULT,
+                SCALE_DENOMINATOR,
+                &variants,
+            )
+            .unwrap()
+            .fits()
+        };
+        assert!(!fits(large));
+        assert!(fits(small));
+        let candidates = [(0, 19.0, fits(large)), (-1, 14.0, fits(small))];
+        let step = dialog_font_step(19.0, candidates);
+        assert_eq!((step.zoom_steps, step.fits), (-1, true));
+        // 14 px is below 70% of a 21 px configured size: not used.
+        let step = dialog_font_step(21.0, [(0, 21.0, fits(large)), (-1, 14.0, fits(small))]);
+        assert_eq!((step.zoom_steps, step.fits), (0, false));
+    }
+
+    /// C1: the fixed size never asks for more than the compositor's
+    /// suggested bounds; without bounds, or along an unbounded (0) side, it
+    /// is the natural size.
+    #[test]
+    fn the_fixed_size_stays_within_the_suggested_bounds() {
+        // A long consent prompt: about 63 rows of 17 px.
+        let natural = (824, 1095);
+        assert_eq!(bounded_fixed_size(natural, None), natural);
+        assert_eq!(bounded_fixed_size(natural, Some((1920, 1040))), (824, 1040));
+        assert_eq!(bounded_fixed_size(natural, Some((600, 400))), (600, 400));
+        assert_eq!(bounded_fixed_size(natural, Some((0, 900))), (824, 900));
+        assert_eq!(bounded_fixed_size(natural, Some((700, 0))), (700, 1095));
+        assert_eq!(bounded_fixed_size(natural, Some((3840, 2160))), natural);
     }
 
     #[test]
@@ -1254,7 +1400,7 @@ mod tests {
     fn the_gap_between_the_action_areas_is_painted_over() {
         let (width, height) = (200, 100);
         let mut canvas = vec![0xff; usize::try_from(width * height * 4).unwrap()];
-        paint_trusted_consent_chrome(&mut canvas, width, height, 70, 0x0014_1820);
+        paint_trusted_consent_chrome(&mut canvas, width, height, 70, 0x0014_1820, true);
         let pixel = |x: u32, y: u32| {
             let index = usize::try_from((y * width + x) * 4).unwrap();
             [
@@ -1273,6 +1419,10 @@ mod tests {
         assert_eq!(pixel(150, 80), [0x40, 0x70, 0x20, 0xff]);
         // Above the action areas the canvas is untouched.
         assert_eq!(pixel(100, 60), [0xff, 0xff, 0xff, 0xff]);
+        // A dialog that cannot say yes dims its green area.
+        paint_trusted_consent_chrome(&mut canvas, width, height, 70, 0x0014_1820, false);
+        let index = usize::try_from((80 * width + 150) * 4).unwrap();
+        assert_eq!(canvas[index..index + 4], [0x2a, 0x30, 0x24, 0xff]);
     }
 
     #[test]

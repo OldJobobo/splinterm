@@ -86,6 +86,9 @@ pub struct TrustedConsentUi {
     identity: DialogIdentity,
     /// Where the text was last laid out.
     frame: Option<DialogFrame>,
+    /// Whether that layout hides part of the text. While it does, nothing
+    /// grants, proceeds, or restarts; only the no answers count.
+    clipped: bool,
 }
 
 impl TrustedConsentUi {
@@ -115,6 +118,7 @@ impl TrustedConsentUi {
             text: None,
             identity: DialogIdentity::default(),
             frame: None,
+            clipped: false,
         }
     }
 
@@ -131,6 +135,7 @@ impl TrustedConsentUi {
             text: None,
             identity: DialogIdentity::default(),
             frame: None,
+            clipped: false,
         }
     }
 
@@ -147,6 +152,7 @@ impl TrustedConsentUi {
             text: None,
             identity: DialogIdentity::default(),
             frame: None,
+            clipped: false,
         }
     }
 
@@ -179,7 +185,9 @@ impl TrustedConsentUi {
     /// the size it asks the compositor for as both its minimum and maximum.
     #[must_use]
     pub fn into_window_options(mut self) -> WindowOptions {
-        let snapshot = self.natural_frame().and_then(|frame| self.lay_out(frame));
+        let snapshot = self
+            .natural_frame()
+            .and_then(|frame| self.lay_out(frame, Instant::now()));
         let size = |value: Option<usize>| {
             value.map_or(0, |value| u16::try_from(value).unwrap_or(u16::MAX))
         };
@@ -231,20 +239,31 @@ impl TrustedConsentUi {
 
     /// Lays the current selection's text out in `frame` and returns its
     /// snapshot; later redraws keep that frame. `None` without text.
-    pub(crate) fn lay_out(&mut self, frame: DialogFrame) -> Option<TerminalSnapshot> {
+    ///
+    /// A layout that hides part of the text shows
+    /// [`TrustedDialogKind::clipped_notice`] in place of the answer hints
+    /// and makes every yes answer inert. When the whole text shows again,
+    /// an engaged dialog arms again from `now`, so a yes counts only once
+    /// the whole text has been in view for the arming delay.
+    pub(crate) fn lay_out(&mut self, frame: DialogFrame, now: Instant) -> Option<TerminalSnapshot> {
         let variants = self.variants();
         if variants.is_empty() {
             return None;
         }
-        let layout = dialog_text::layout(
+        let layout = dialog_text::layout_with_notice(
             &variants,
             self.selected_variant(),
             frame.wrap_columns,
             frame.max_text_rows,
+            Some(self.kind.clipped_notice()),
         );
         if let Some(access) = self.access.as_mut() {
             access.duration_rows.clone_from(&layout.duration_rows);
         }
+        if self.clipped && !layout.clipped {
+            self.rearm(now);
+        }
+        self.clipped = layout.clipped;
         self.frame = Some(frame);
         Some(dialog_text::dialog_snapshot(
             layout.rows,
@@ -252,6 +271,33 @@ impl TrustedConsentUi {
             frame.grid_rows,
             &self.identity,
         ))
+    }
+
+    /// Lays the text out for a new Window size, scale, or font
+    /// ([`Self::lay_out`]) and arms an engaged dialog again from `now`:
+    /// the action areas and duration rows may have moved under the pointer.
+    pub(crate) fn lay_out_again(
+        &mut self,
+        frame: DialogFrame,
+        now: Instant,
+    ) -> Option<TerminalSnapshot> {
+        let snapshot = self.lay_out(frame, now)?;
+        self.rearm(now);
+        Some(snapshot)
+    }
+
+    /// Whether the current layout hides part of the text, so no yes answer
+    /// counts.
+    pub(crate) const fn clipped(&self) -> bool {
+        self.clipped
+    }
+
+    /// Starts an engaged dialog's arming delay again; never engages one.
+    fn rearm(&mut self, now: Instant) {
+        self.engagement.rearm(now);
+        if let Some(access) = self.access.as_mut() {
+            access.choice.rearm(now);
+        }
     }
 
     /// The chord that engages this dialog, if any.
@@ -284,10 +330,12 @@ impl TrustedConsentUi {
         action: Option<ConsentAction>,
         now: Instant,
     ) -> Option<TrustedInput> {
+        let clipped = self.clipped;
         let access = self.access.as_mut()?;
         match action? {
             ConsentAction::Deny => Some(TrustedInput::Answer(false)),
-            ConsentAction::Grant => Some(TrustedInput::Answer(true)),
+            // Nothing grants while part of the request is hidden.
+            ConsentAction::Grant => (!clipped).then_some(TrustedInput::Answer(true)),
             ConsentAction::Select(index) => access
                 .choice
                 .select(index, now)
@@ -315,6 +363,7 @@ impl TrustedConsentUi {
         }
         self.kind
             .key_decision(key, repeat, self.engagement, now)
+            .filter(|proceed| !(*proceed && self.clipped))
             .map(TrustedInput::Answer)
     }
 
@@ -330,6 +379,7 @@ impl TrustedConsentUi {
         }
         self.kind
             .click_decision(proceed_area, self.engagement, now)
+            .filter(|proceed| !(*proceed && self.clipped))
             .map(TrustedInput::Answer)
     }
 
@@ -346,10 +396,10 @@ impl TrustedConsentUi {
 
     /// The access consent dialog rendered for its current selection, laid
     /// out where it was last.
-    pub(crate) fn render(&mut self) -> Option<TerminalSnapshot> {
+    pub(crate) fn render(&mut self, now: Instant) -> Option<TerminalSnapshot> {
         self.access.as_ref()?;
         let frame = self.frame.or_else(|| self.natural_frame())?;
-        self.lay_out(frame)
+        self.lay_out(frame, now)
     }
 
     /// Sends the answer: for the access consent dialog, a grant of the
@@ -573,6 +623,40 @@ mod tests {
         }
     }
 
+    /// A frame with room for only five of the consent text's eight rows.
+    fn clipped_frame() -> DialogFrame {
+        DialogFrame {
+            max_text_rows: 5,
+            ..narrow_frame()
+        }
+    }
+
+    fn consent_two_durations() -> TrustedConsentUi {
+        let (decision, _answers) = std::sync::mpsc::channel();
+        TrustedConsentUi::access_consent(
+            decision,
+            vec![
+                (GrantDuration::Once, true),
+                (GrantDuration::WorkspaceSession, true),
+            ],
+            Box::new(consent_text),
+        )
+    }
+
+    fn snapshot_text(snapshot: &TerminalSnapshot) -> String {
+        snapshot
+            .visible_rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| cell.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn narrow_frame() -> DialogFrame {
         DialogFrame {
             wrap_columns: 40,
@@ -598,7 +682,7 @@ mod tests {
         );
         // Laid out narrower than it asked for, the "while open" duration
         // wraps onto rows 5 and 6.
-        let snapshot = dialog.lay_out(narrow_frame()).unwrap();
+        let snapshot = dialog.lay_out(narrow_frame(), Instant::now()).unwrap();
         assert_eq!(snapshot.columns, 40);
         assert_eq!(
             dialog.access.as_ref().unwrap().duration_rows,
@@ -777,11 +861,11 @@ mod tests {
             dialog.access.as_ref().unwrap().duration_rows,
             [(4, 0), (5, 1)]
         );
-        dialog.lay_out(narrow_frame()).unwrap();
         let now = Instant::now();
+        dialog.lay_out(narrow_frame(), now).unwrap();
         dialog.engage(now);
         assert_eq!(dialog.row_input(6, now), Some(TrustedInput::Redraw));
-        let redrawn = dialog.render().unwrap();
+        let redrawn = dialog.render(now).unwrap();
         assert_eq!(redrawn.columns, 40);
         let row = |index: usize| -> String {
             redrawn.visible_rows[index]
@@ -806,5 +890,164 @@ mod tests {
             .with_text(consent_text(0))
             .into_window_options();
         assert_eq!(options.initial_columns, 64);
+    }
+
+    /// S1: while part of the request is hidden, `G` and the green area
+    /// grant nothing, the deny answers still count, and the dialog says
+    /// why. Once all of it shows again, granting arms only after the
+    /// arming delay.
+    #[test]
+    fn nothing_grants_while_part_of_the_request_is_hidden() {
+        let mut dialog = consent_two_durations();
+        let start = Instant::now();
+        let snapshot = dialog.lay_out(clipped_frame(), start).unwrap();
+        assert!(dialog.clipped());
+        let shown = snapshot_text(&snapshot);
+        assert!(shown.contains("Part of this request is hidden"), "{shown}");
+        assert!(!shown.contains("G or the green area grants"), "{shown}");
+        dialog.engage(start);
+        let armed = start + UPGRADE_ARMING_DELAY;
+        assert_eq!(dialog.key_input(TrustedDialogKey::G, false, armed), None);
+        assert_eq!(dialog.action_area_input(true, armed), None);
+        for key in [
+            TrustedDialogKey::D,
+            TrustedDialogKey::Escape,
+            TrustedDialogKey::Enter,
+        ] {
+            assert_eq!(
+                dialog.key_input(key, false, armed),
+                Some(TrustedInput::Answer(false)),
+                "{key:?}"
+            );
+        }
+        assert_eq!(
+            dialog.action_area_input(false, armed),
+            Some(TrustedInput::Answer(false))
+        );
+        // The whole request in view again: the delay starts over.
+        let shown_again = armed + Duration::from_secs(5);
+        dialog.lay_out(narrow_frame(), shown_again).unwrap();
+        assert!(!dialog.clipped());
+        assert_eq!(
+            dialog.key_input(TrustedDialogKey::G, false, shown_again),
+            None
+        );
+        assert_eq!(dialog.action_area_input(true, shown_again), None);
+        let rearmed = shown_again + UPGRADE_ARMING_DELAY;
+        assert_eq!(
+            dialog.key_input(TrustedDialogKey::G, false, rearmed),
+            Some(TrustedInput::Answer(true))
+        );
+        assert_eq!(
+            dialog.action_area_input(true, rearmed),
+            Some(TrustedInput::Answer(true))
+        );
+    }
+
+    /// The arrow keys still choose a duration while the request is hidden;
+    /// choosing never grants, so that is harmless.
+    #[test]
+    fn a_hidden_request_still_lets_the_duration_move_but_never_grants() {
+        let mut dialog = consent_two_durations();
+        let start = Instant::now();
+        dialog.lay_out(clipped_frame(), start).unwrap();
+        dialog.engage(start);
+        let armed = start + UPGRADE_ARMING_DELAY;
+        assert_eq!(
+            dialog.key_input(TrustedDialogKey::Down, false, armed),
+            Some(TrustedInput::Redraw)
+        );
+        let later = armed + Duration::from_secs(5);
+        assert!(dialog.render(later).is_some());
+        assert!(dialog.clipped());
+        assert_eq!(dialog.key_input(TrustedDialogKey::G, false, later), None);
+    }
+
+    /// S1 for the yes/no questions: nothing proceeds or restarts while
+    /// text is hidden, on the key or the green area, and the no answers
+    /// still count. Showing everything again re-arms but never engages.
+    #[test]
+    fn yes_no_questions_never_say_yes_while_text_is_hidden() {
+        for (build, proceed) in [
+            (
+                TrustedConsentUi::upgrade as fn(_) -> TrustedConsentUi,
+                TrustedDialogKey::G,
+            ),
+            (
+                TrustedConsentUi::restart as fn(_) -> TrustedConsentUi,
+                TrustedDialogKey::R,
+            ),
+        ] {
+            let (decision, _answers) = std::sync::mpsc::channel();
+            let mut dialog = build(decision).with_text(consent_text(0));
+            let start = Instant::now();
+            let snapshot = dialog.lay_out(clipped_frame(), start).unwrap();
+            assert!(dialog.clipped());
+            let shown = snapshot_text(&snapshot);
+            assert!(shown.contains("Part of this question is hidden"), "{shown}");
+            dialog.engage(start);
+            let armed = start + UPGRADE_ARMING_DELAY;
+            assert_eq!(dialog.key_input(proceed, false, armed), None);
+            assert_eq!(dialog.action_area_input(true, armed), None);
+            assert_eq!(
+                dialog.key_input(TrustedDialogKey::Escape, false, armed),
+                Some(TrustedInput::Answer(false))
+            );
+            assert_eq!(
+                dialog.action_area_input(false, armed),
+                Some(TrustedInput::Answer(false))
+            );
+            let shown_again = armed + Duration::from_secs(5);
+            dialog.lay_out(narrow_frame(), shown_again).unwrap();
+            assert_eq!(dialog.key_input(proceed, false, shown_again), None);
+            let rearmed = shown_again + UPGRADE_ARMING_DELAY;
+            assert_eq!(
+                dialog.key_input(proceed, false, rearmed),
+                Some(TrustedInput::Answer(true))
+            );
+            assert_eq!(
+                dialog.action_area_input(true, rearmed),
+                Some(TrustedInput::Answer(true))
+            );
+
+            // A dialog nobody engaged stays inert when its text shows again.
+            let (decision, _answers) = std::sync::mpsc::channel();
+            let mut idle = build(decision).with_text(consent_text(0));
+            idle.lay_out(clipped_frame(), start).unwrap();
+            idle.lay_out(narrow_frame(), shown_again).unwrap();
+            let much_later = shown_again + Duration::from_secs(60);
+            assert_eq!(idle.key_input(proceed, false, much_later), None);
+            assert_eq!(idle.action_area_input(true, much_later), None);
+        }
+    }
+
+    /// S2: laying the text out again for a new size, scale, or font arms an
+    /// engaged dialog again, since its areas and rows may have moved under
+    /// the pointer; an unengaged one stays inert.
+    #[test]
+    fn laying_out_again_for_the_window_rearms_an_engaged_dialog() {
+        let mut dialog = consent_two_durations().into_window_options();
+        let mut dialog = dialog.trusted_consent.take().unwrap();
+        let start = Instant::now();
+        dialog.engage(start);
+        let armed = start + UPGRADE_ARMING_DELAY;
+        assert_eq!(
+            dialog.key_input(TrustedDialogKey::G, false, armed),
+            Some(TrustedInput::Answer(true))
+        );
+        let moved = armed + Duration::from_secs(1);
+        dialog.lay_out_again(narrow_frame(), moved).unwrap();
+        assert_eq!(dialog.key_input(TrustedDialogKey::G, false, moved), None);
+        assert_eq!(dialog.action_area_input(true, moved), None);
+        assert_eq!(
+            dialog.key_input(TrustedDialogKey::G, false, moved + UPGRADE_ARMING_DELAY),
+            Some(TrustedInput::Answer(true))
+        );
+        let mut idle = consent_two_durations();
+        idle.lay_out_again(narrow_frame(), start).unwrap();
+        assert_eq!(
+            idle.key_input(TrustedDialogKey::G, false, start + Duration::from_secs(60)),
+            None
+        );
     }
 }
