@@ -185,20 +185,37 @@ pub fn revoke_all_summary(counts: AccessRevocationCounts, done: bool) -> String 
 /// Whether a character of untrusted text must never reach trusted UI as is:
 /// controls, bidirectional and invisible formatting (zero-width spaces and
 /// joiners, word joiner, invisible operators, isolates), the line and
-/// paragraph separators, and the byte-order mark. The consent prompt and the
-/// **Agent access** list use this one set.
+/// paragraph separators, the byte-order mark, and the other characters that
+/// draw nothing in common fonts (soft hyphen, Hangul fillers, Mongolian
+/// selectors, interlinear annotation marks, musical formatting, and tag
+/// characters, which could hide text after a name). Emoji variation selectors
+/// (U+FE00–FE0F) stay, so emoji in names draw as emoji. The consent prompt,
+/// the **Agent access** list, and `splinterm access list` use this one set.
 #[must_use]
 pub fn unsafe_display_character(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
-            '\u{061c}'
+            '\u{00ad}'
+                | '\u{034f}'
+                | '\u{061c}'
+                | '\u{115f}'
+                | '\u{1160}'
+                | '\u{17b4}'
+                | '\u{17b5}'
+                | '\u{180b}'..='\u{180f}'
                 | '\u{200b}'..='\u{200f}'
                 | '\u{2028}'
                 | '\u{2029}'
                 | '\u{202a}'..='\u{202e}'
                 | '\u{2060}'..='\u{2069}'
+                | '\u{3164}'
                 | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{fff0}'..='\u{fffb}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0000}'..='\u{e0fff}'
         )
 }
 
@@ -222,6 +239,16 @@ pub fn shown(text: &str, maximum_scalars: usize) -> String {
 pub fn shown_name(text: &str, maximum_scalars: usize) -> String {
     shown_escaping(text, maximum_scalars, |character| {
         unsafe_display_character(character) || matches!(character, '‘' | '’' | '·')
+    })
+}
+
+/// [`shown_name`] for the consent prompt, which quotes names with ASCII `'`:
+/// that quote is escaped too, so a name cannot close its quote early and
+/// make its own text read as the prompt's fixed wording.
+#[must_use]
+pub fn shown_prompt_name(text: &str, maximum_scalars: usize) -> String {
+    shown_escaping(text, maximum_scalars, |character| {
+        unsafe_display_character(character) || matches!(character, '‘' | '’' | '·' | '\'')
     })
 }
 
@@ -2001,7 +2028,23 @@ pub(crate) mod tests {
         assert_eq!(shown("a · b", 16), "a · b");
     }
 
-    /// The consent prompt escapes with `shown_name` too, so a hostile name
+    #[test]
+    fn characters_that_draw_nothing_are_escaped_but_emoji_selectors_stay() {
+        for hidden in [
+            '\u{00ad}', '\u{034f}', '\u{115f}', '\u{17b4}', '\u{180e}', '\u{3164}',
+            '\u{ffa0}', '\u{fff9}', '\u{1bca0}', '\u{1d173}', '\u{e0001}', '\u{e0041}',
+        ] {
+            assert!(unsafe_display_character(hidden), "{hidden:?}");
+        }
+        assert_eq!(
+            shown("/usr/bin/claude\u{e0041}\u{e0042}", 64),
+            "/usr/bin/claude\\u{e0041}\\u{e0042}"
+        );
+        assert!(!unsafe_display_character('\u{fe0f}'));
+        assert_eq!(shown("deploy \u{2764}\u{fe0f}", 64), "deploy \u{2764}\u{fe0f}");
+    }
+
+    /// The consent prompt escapes as `shown_name` does (and its own `'`), so a hostile name
     /// reads the same in the prompt and in the list: no whitespace is
     /// collapsed, and tabs and newlines are escaped like any control.
     #[test]

@@ -96,16 +96,16 @@ const PROMPT_LINE_CHARS: usize = 100;
 /// workspace name) as one line of display text, escaped exactly as the
 /// **Agent access** list escapes it, so the name approved here reads the
 /// same there later: every unsafe character, tabs and newlines among them,
-/// and the list's quotes and separator are shown as `\u{…}`, and spaces
-/// stay as they are. At most `maximum` characters, the last an ellipsis
-/// when it was cut; an escape is never cut in two.
+/// the list's quotes and separator, and the prompt's own `'` quote are shown
+/// as `\u{…}`, and spaces stay as they are. At most `maximum` characters,
+/// the last an ellipsis when it was cut; an escape is never cut in two.
 fn display_name(value: &str, maximum: usize) -> String {
-    let shown = splinterm::frontend::shown_name(value, maximum);
+    let shown = splinterm::frontend::shown_prompt_name(value, maximum);
     // Cut text gets its ellipsis past `maximum`; uncut text always fits.
     if shown.chars().count() <= maximum {
         return shown;
     }
-    splinterm::frontend::shown_name(value, maximum.saturating_sub(1))
+    splinterm::frontend::shown_prompt_name(value, maximum.saturating_sub(1))
 }
 
 /// One line of the prompt, wrapped at [`PROMPT_LINE_CHARS`] at most; every
@@ -853,6 +853,25 @@ mod tests {
     /// **Agent access** list shows it in, so the name a person approves
     /// reads the same there later, and nothing in it can break a line or
     /// reorder or hide the text around it.
+    #[test]
+    fn a_workspace_name_cannot_close_the_prompts_quote() {
+        let name = "Scratch' once (five minutes, this process only";
+        assert_eq!(
+            display_name(name, DISPLAY_NAME_CHARS),
+            "Scratch\\u{0027} once (five minutes, this process only"
+        );
+        let mut prompt = manage_prompt();
+        prompt.target = ConsentTarget::Lair {
+            lair_id: splinterm_core::LairId::new(),
+            lair_name: name.to_owned(),
+        };
+        for selected in 0..prompt.durations.len() {
+            let text = laid_out(&prompt, selected).rows.join("\n");
+            assert!(!text.contains("Scratch'"), "{text}");
+            assert!(text.contains("Scratch\\u{0027}"), "{text}");
+        }
+    }
+
     #[test]
     fn the_prompt_escapes_untrusted_names_and_paths_as_the_list_does() {
         let hostile = "evil\u{1b}[31mRED\u{202e}gpj.exe\u{7}\tend";

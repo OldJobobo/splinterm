@@ -30,7 +30,7 @@ pub(crate) use agent_access::{
 pub use agent_access::{
     AccessSnapshot, MAX_WINDOW_ACCESS_ENTRIES, RevokeAllCheck, WindowAccessCommand,
     WindowAccessUpdate, check_revoke_all, counts_are_empty, revoke_all_summary, shown, shown_name,
-    unsafe_display_character,
+    shown_prompt_name, unsafe_display_character,
 };
 /// An "Always" inventory entry for `lair_id`, for tests outside `frontend`.
 #[cfg(test)]
