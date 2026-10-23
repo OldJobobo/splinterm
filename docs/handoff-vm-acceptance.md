@@ -141,7 +141,7 @@ The step IDs are the helper's. Each step's full commands are in `plan`.
 | `p0-package-status` | `package-status` | Recorded, including whether `splinterm-mcp` is installed and the guest's `splinterd.service` state |
 | `p0-sysctl` | `exec`: record `vm.memfd_noexec`, kernel | 0 or 1 |
 | `p0-build-a` | record the package kind; `package-build` (with `--vm-acceptance-live-handoff` for TEST-ONLY packages) | Package A builds; for a TEST-ONLY package, validation prints the TEST-ONLY banner |
-| `p0-install-a` | `package-install --confirm-guest-install --vm-acceptance-live-handoff` | Installed, with rollback copies saved; the private install check passes |
+| `p0-install-a` | check the recorded package kind; `package-install --confirm-guest-install` (with `--vm-acceptance-live-handoff` for TEST-ONLY packages) | Installed, with rollback copies saved; the private install check passes |
 | `p0-save-a` | `exec`: copy package A's files outside the guest source checkout | Copied, for the rollback round |
 | `p0-install-mcp` (optional, for M1) | `exec`: `sudo pacman -U` package A's `splinterm-mcp` | Installed |
 
@@ -152,7 +152,7 @@ The step IDs are the helper's. Each step's full commands are in `plan`.
 | `s1-launch` | `package-launch` | W1 maps on workspace 8 |
 | `s1-record` | `desktop-exec`: record W1, the daemon, focus, cursor, monitors | Recorded |
 | `s1-smoke` | guard, type `echo smoke-ok` | Echoed; no other Window moved. On failure: `package-stop` and abort |
-| `s1-dry-run` | `exec`: `splinterm upgrade` | Generation 1, local package build, rollback copy kept, "nothing blocks it"; for TEST-ONLY packages, the daemon log has the TEST-ONLY warning |
+| `s1-dry-run` | `exec`: `splinterm upgrade` | Generation 1, local package build, rollback copy kept, "nothing blocks it"; for plain packages, `/usr/bin/splinterd` carries no TEST-ONLY marker; for TEST-ONLY packages, the daemon log has the TEST-ONLY warning |
 
 ### Phase 2: setup
 
