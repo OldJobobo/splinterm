@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -397,3 +398,137 @@ class TrustedDialogEngagementTests(unittest.TestCase):
             missing = check("daemon_generation=3")
             self.assertEqual(missing.returncode, 1)
             self.assertIn("missing", missing.stderr)
+
+# A stand-in `splinterm-mcp` for the agent: the first Lair answers after two
+# pending calls, the second stays pending, reads are refused, and the client
+# name it was given is written next to it.
+FAKE_ACCESS_MCP = r"""
+import json, pathlib, sys
+calls = {}
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    method = message["method"]
+    params = message.get("params", {})
+    result = {"structuredContent": {"ok": True, "data": {}}}
+    if method == "initialize":
+        (pathlib.Path(sys.argv[1]) / "client-name").write_text(params["clientInfo"]["name"])
+    elif method == "tools/call":
+        name = params["name"]
+        arguments = params["arguments"]
+        if name == "splinterm.request_lair_access":
+            lair = arguments["lair_id"]
+            calls[lair] = calls.get(lair, 0) + 1
+            if "cancel_request_id" in arguments:
+                data = {"status": "cancelled"}
+            elif lair == "lair-a" and calls[lair] >= 3:
+                data = {"status": "granted", "source": "ephemeral", "grant_id": "17"}
+            else:
+                data = {"status": "pending", "pending_request_id": "4"}
+            result = {"structuredContent": {"ok": True, "data": data}}
+        elif name == "splinterm.read_terminal":
+            result = {"isError": True, "structuredContent": {"ok": False, "error": {"code": "unauthorized"}}}
+        elif name == "splinterm.acquire_control":
+            result = {"structuredContent": {"ok": True, "data": {"controller_handle": "h1"}}}
+    print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)
+"""
+
+
+class AccessAgentTests(unittest.TestCase):
+    def test_agent_runs_numbered_commands_and_collects_pending_answers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "fake-mcp.py"
+            fake.write_text(FAKE_ACCESS_MCP, encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            commands = [
+                {"op": "request", "lair_id": "lair-a", "level": "look"},
+                {"op": "request", "lair_id": "lair-b", "level": "manage", "until": "once"},
+                {"op": "cancel", "lair_id": "lair-b", "cancel_request_id": "4"},
+                {"op": "request", "lair_id": "lair-b", "level": "look", "deadline_seconds": 0},
+                {"op": "read", "splint_id": "splint-1"},
+                {"op": "acquire", "splint_id": "splint-1", "incarnation": 2, "takeover": True},
+                {"op": "release"},
+                {"op": "release"},
+                {"op": "bogus"},
+                {"op": "exit"},
+            ]
+            for number, command in enumerate(commands, start=1):
+                (state / f"cmd-{number}.json").write_text(json.dumps(command), encoding="utf-8")
+            name = "agent\x1b[31m‮evil"
+            status = PROBE_MODULE.run_agent(
+                [sys.executable, str(fake), str(root)], state, name, 5, 0.01
+            )
+            self.assertEqual(status, 0)
+            out = [
+                json.loads((state / f"out-{number}.json").read_text(encoding="utf-8"))
+                for number in range(1, len(commands) + 1)
+            ]
+            self.assertEqual(out[0]["status"], "granted")
+            self.assertEqual(out[0]["calls"], 3)
+            self.assertEqual(out[0]["grant_id"], "17")
+            self.assertEqual(out[1]["status"], "pending")
+            self.assertEqual(out[1]["calls"], 1)
+            self.assertEqual(out[1]["pending_request_id"], "4")
+            self.assertEqual(out[2]["status"], "cancelled")
+            self.assertTrue(out[3]["deadline_passed"])
+            self.assertEqual(out[4], {"op": "read", "ok": False, "code": "unauthorized"})
+            self.assertTrue(out[5]["handle"])
+            self.assertTrue(out[6]["ok"])
+            self.assertEqual(out[7]["code"], "no_handle")
+            self.assertEqual(out[8]["code"], "bad_command")
+            self.assertEqual(out[9], {"op": "exit", "ok": True})
+            self.assertEqual((root / "client-name").read_text(), name)
+            self.assertTrue((state / "agent.pid").is_file())
+
+    def test_agent_gives_up_when_no_command_arrives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "fake-mcp.py"
+            fake.write_text(FAKE_ACCESS_MCP, encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                PROBE_MODULE.run_agent(
+                    [sys.executable, str(fake), str(root)], root / "state", "agent", 0.2, 0.01
+                )
+
+    def test_agent_waits_out_a_half_written_command_and_survives_a_bad_one(self) -> None:
+        import threading
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "fake-mcp.py"
+            fake.write_text(FAKE_ACCESS_MCP, encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            (state / "cmd-1.json").write_text("[1, 2]", encoding="utf-8")
+
+            def publish_late() -> None:
+                # Written in place while the agent already polls: first a
+                # truncated object, completed a moment later.
+                time.sleep(0.3)
+                path = state / "cmd-2.json"
+                path.write_text('{"op": "request", "lair_id": "lair-b", "le', encoding="utf-8")
+                time.sleep(0.3)
+                path.write_text(
+                    json.dumps({"op": "request", "lair_id": "lair-b", "level": "look", "until": "once"}),
+                    encoding="utf-8",
+                )
+                (state / "cmd-3.json").write_text('{"op": "exit"}', encoding="utf-8")
+
+            writer = threading.Thread(target=publish_late)
+            writer.start()
+            with mock.patch.object(PROBE_MODULE, "COMMAND_SETTLE_SECONDS", 1.0):
+                status = PROBE_MODULE.run_agent(
+                    [sys.executable, str(fake), str(root)], state, "agent", 5, 0.01
+                )
+            writer.join()
+            self.assertEqual(status, 0)
+            first = json.loads((state / "out-1.json").read_text(encoding="utf-8"))
+            self.assertEqual(first["code"], "bad_command")
+            second = json.loads((state / "out-2.json").read_text(encoding="utf-8"))
+            self.assertEqual(second["status"], "pending")
+            third = json.loads((state / "out-3.json").read_text(encoding="utf-8"))
+            self.assertEqual(third, {"op": "exit", "ok": True})
