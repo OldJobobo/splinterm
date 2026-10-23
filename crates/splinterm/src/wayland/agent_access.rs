@@ -13,8 +13,7 @@ use super::{
 };
 use crate::frontend::{
     AGENT_ACCESS_PAGE_ITEMS, AccessActivation, AccessMarks, AccessSnapshot, AgentAccessUi,
-    PromptReconcile, RevokeAccessUi, RowClick, WindowAccessCommand, WindowAccessUpdate,
-    counts_are_empty,
+    PromptReconcile, RevokeAccessUi, WindowAccessCommand, WindowAccessUpdate, counts_are_empty,
 };
 use crate::renderer::command_palette_row_hit_test;
 use splinterm_protocol::AccessEntryKey;
@@ -296,8 +295,8 @@ impl App {
     }
 
     /// Pointer input over the palette while it shows the access list: a
-    /// press and release on one row selects it, and on the selected row
-    /// activates it, as Enter does. Whether anything changed.
+    /// press and release on one row selects it, and never revokes it; only
+    /// Enter does. Whether anything changed.
     pub(super) fn handle_agent_access_pointer(
         &mut self,
         event: &PointerEvent,
@@ -329,17 +328,11 @@ impl App {
                 let Some(list) = self.modal.agent_access.as_mut() else {
                     return false;
                 };
-                match list.release_click(&pressed, index) {
-                    RowClick::Ignored => false,
-                    RowClick::Selected => {
-                        self.refresh_command_palette();
-                        true
-                    }
-                    RowClick::Activate => {
-                        self.activate_agent_access();
-                        true
-                    }
+                if !list.release_click(&pressed, index) {
+                    return false;
                 }
+                self.refresh_command_palette();
+                true
             }
             PointerEventKind::Axis { vertical, .. } if !vertical.is_none() => {
                 let Some((direction, count)) = self.modal.session_picker_wheel.push(
