@@ -1476,12 +1476,12 @@ fn build_daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 /// A round that leaves serve for the exec boundary stops its runtime and the
 /// systemd connection and crosses the boundary ([`stop_runtime_and_cross`]).
 /// A successful exec never returns. Every build contains the forward exec
-/// since Plan 0061 M3.11b, but no round leaves serve for the boundary while
+/// since Plan 0061 M3.11b, and live handoff is enabled for 0.2.0, but no
+/// round leaves serve for the boundary while
 /// [`handoff_requests::live_handoff_support`] refuses, because `Execute` is
-/// refused before the gate. That covers every build until window continuity
-/// lands (except the test-only VM acceptance build), and Nix-store builds in
-/// 0.2.0, and the boundary arms the exec only
-/// under the same decision ([`arm_forward_exec`]). When the boundary comes
+/// refused before the gate. That covers Nix-store builds in 0.2.0, and the
+/// boundary arms the exec only under the same decision
+/// ([`arm_forward_exec`]). When the boundary comes
 /// back, the next round serves the same generation again on a new runtime
 /// ([`StartupSource::Resumed`]).
 ///
@@ -2844,12 +2844,13 @@ fn cross_boundary(
 ///
 /// Compiled into every build since Plan 0061 M3.11b. The forward exec is
 /// armed only when [`handoff_requests::compiled_live_handoff_support`]
-/// allows it: never for a Nix-store build in 0.2.0, and never in any build
-/// while `handoff_requests::WINDOW_CONTINUITY_READY` is false, except the
-/// test-only VM acceptance build (`vm-acceptance-live-handoff`, which
-/// packaging refuses). `Execute` is already refused before the gate in both
-/// cases, so this second check is defence in depth. An unarmed plan returns `ExecNotWired` from the
-/// boundary, and the old generation resumes in process.
+/// allows it. Live handoff is enabled for 0.2.0
+/// (`handoff_requests::WINDOW_CONTINUITY_READY`), so that is every build
+/// except a Nix-store build, and a daemon whose build provenance is
+/// unreadable. `Execute` is already refused before the gate for both, so
+/// this second check is defence in depth. An unarmed plan returns
+/// `ExecNotWired` from the boundary, and the old generation resumes in
+/// process.
 ///
 /// The argument vector is rebuilt from this daemon's state, never copied
 /// from its own argv, which in an adopted daemon still names its activation
@@ -12664,9 +12665,10 @@ struct AttemptExec {
 /// A second `Execute` while a handoff runs is refused as in progress. Any
 /// other `Execute` is refused before the gate when
 /// [`handoff_requests::live_handoff_support`] refuses live handoff, or when
-/// the report names any blocking reason. The function refuses every build
-/// until window continuity lands, and Nix-store builds in 0.2.0 (Plan 0061
-/// M3.11b). Otherwise, while still `Preparing` and serving, the gate
+/// the report names any blocking reason. Live handoff is enabled for 0.2.0,
+/// so the function refuses only Nix-store builds and an unreadable build
+/// provenance (Plan 0061 M3.11b). Otherwise, while still `Preparing` and
+/// serving, the gate
 /// prepares the installed forward pair beside the borrowed rollback pair.
 /// It then fences, re-checks, drains, and persists; prepares every declared
 /// Window, waits for their acknowledgements, and asks the initiator about
@@ -12713,9 +12715,9 @@ async fn execute_daemon_handoff(
 }
 
 /// [`execute_daemon_handoff`] with live handoff support and the forward
-/// preparation step supplied. Only unit tests pass `Ok(())` for a build
-/// whose support refuses, so that they can drive the gate past it without a
-/// packaged installation or window continuity.
+/// preparation step supplied. Unit tests pass `Ok(())`, together with a
+/// report whose reasons they cleared, so that they can drive the gate
+/// without a packaged installation.
 async fn execute_daemon_handoff_with<F, Prepared>(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
@@ -19136,11 +19138,10 @@ mod tests {
         );
     }
 
+    /// Live handoff is supported for this build, so the dry run names only
+    /// what really blocks it: the open transient Lair and the missing
+    /// package installation. `Execute` is refused for those before the gate.
     #[tokio::test]
-    #[cfg_attr(
-        feature = "vm-acceptance-live-handoff",
-        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
-    )]
     async fn dry_run_reports_current_state_and_refused_execute_changes_nothing() {
         let state = test_state(false);
         let transient = Lair::transient("transient", PathBuf::from("/tmp"));
@@ -19167,13 +19168,17 @@ mod tests {
                     lair_ids: vec![transient_id],
                 },
                 splinterm_protocol::HandoffBlockingReason::NotPackaged,
-                splinterm_protocol::HandoffBlockingReason::Unsupported,
             ]
+        );
+        assert_eq!(
+            handoff_requests::live_handoff_support(report.build.provenance),
+            Ok(())
         );
         let revision = state.topology.read().await.revision();
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
         let refused = execute_daemon_handoff(&state, &report, None).await;
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(refused.message, "daemon handoff is unavailable");
         assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
         assert_eq!(
             state.topology.read().await.revision(),
@@ -19193,46 +19198,43 @@ mod tests {
         report
     }
 
-    /// The shipped `Execute` evaluates live handoff support itself. Even a
-    /// report that names no reason is refused before the gate while window
-    /// continuity has not landed. The answer names `Unsupported` and the
-    /// cause, and nothing is fenced, prepared, or broadcast.
+    /// The shipped `Execute` evaluates live handoff support itself, from the
+    /// report's provenance. Live handoff is enabled, but a Nix-store build is
+    /// still unsupported for 0.2.0: even a report that names no reason is
+    /// refused before the gate. The answer names `Unsupported` and Nix, and
+    /// nothing is fenced, prepared, or broadcast.
     #[tokio::test]
-    #[cfg_attr(
-        feature = "vm-acceptance-live-handoff",
-        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
-    )]
     async fn execute_is_refused_before_the_gate_while_live_handoff_is_unsupported() {
         let state = test_state(false);
-        let report = gated_handoff_report(&state).await;
+        let mut report = gated_handoff_report(&state).await;
+        report.build.provenance = splinterm_protocol::HandoffBuildProvenance::NixStore;
+        let support = handoff_requests::live_handoff_support(report.build.provenance);
+        assert_eq!(
+            support,
+            Err(handoff_requests::LiveHandoffUnsupported::NixStore)
+        );
         let revision = state.topology.read().await.revision();
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
         let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let refused = execute_daemon_handoff_with(
-            &state,
-            &report,
-            handoff_requests::live_handoff_support(report.build.provenance),
-            None,
-            {
-                let prepared = Arc::clone(&prepared);
-                move |_| async move {
-                    prepared.store(true, Ordering::SeqCst);
-                    Ok(ExecTestPreparation)
-                }
-            },
-        )
+        let refused = execute_daemon_handoff_with(&state, &report, support, None, {
+            let prepared = Arc::clone(&prepared);
+            move |_| async move {
+                prepared.store(true, Ordering::SeqCst);
+                Ok(ExecTestPreparation)
+            }
+        })
         .await;
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             refused.handoff_blocking_reasons,
             [splinterm_protocol::HandoffBlockingReason::Unsupported]
         );
-        assert!(
-            refused
-                .message
-                .contains("open Windows cannot survive it yet"),
-            "{}",
-            refused.message
+        assert_eq!(
+            refused.message,
+            format!(
+                "daemon handoff is unavailable: {}",
+                handoff_requests::LiveHandoffUnsupported::NixStore.message()
+            )
         );
         // The shipped wrapper gives the same answer.
         let shipped = execute_daemon_handoff(&state, &report, None).await;
@@ -19246,6 +19248,41 @@ mod tests {
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
         assert!(!state.handoff_exit.is_ready());
         assert_eq!(state.topology.read().await.revision(), revision);
+    }
+
+    /// Live handoff is enabled: for this build's own provenance the shipped
+    /// `Execute` no longer stops before the gate once nothing blocks it. It
+    /// begins the attempt and prepares the installed forward pair, which a
+    /// daemon without a package installation cannot, so the attempt cancels
+    /// as failed and the fresh report names `NotPackaged` alone.
+    #[tokio::test]
+    async fn the_shipped_execute_reaches_the_gate_for_a_supported_build() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        assert_eq!(
+            handoff_requests::live_handoff_support(report.build.provenance),
+            Ok(())
+        );
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let error = execute_daemon_handoff(&state, &report, None).await;
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            error.message,
+            "daemon handoff is unavailable: preparation could not complete"
+        );
+        assert_eq!(
+            error.handoff_blocking_reasons,
+            [splinterm_protocol::HandoffBlockingReason::NotPackaged]
+        );
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                cancelled(HandoffCancelReason::Failed),
+            ]
+        );
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(!state.handoff_exit.is_ready());
     }
 
     /// Plan 0061 D8: a daemon started by a live handoff (adopted forward or
@@ -19279,7 +19316,7 @@ mod tests {
                 handoff_requests::SPENT_BY_HANDOFF
             )
         );
-        // The shipped wrapper names window continuity as well.
+        // The shipped wrapper, with the full report, names the restart too.
         let shipped = execute_daemon_handoff(&state, &full, None).await;
         assert!(
             shipped.message.contains(handoff_requests::SPENT_BY_HANDOFF),
@@ -19655,10 +19692,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        feature = "vm-acceptance-live-handoff",
-        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
-    )]
     async fn a_second_execute_is_refused_while_a_handoff_runs_and_a_dry_run_still_reports() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
@@ -19682,10 +19715,11 @@ mod tests {
             .await
             .expect("a dry run never waits for the fence")
             .unwrap();
-        assert!(
-            dry_run
-                .blocking_reasons
-                .contains(&splinterm_protocol::HandoffBlockingReason::Unsupported)
+        // The point-in-time report under the fence: this development daemon
+        // is not packaged, and live handoff itself is supported.
+        assert_eq!(
+            dry_run.blocking_reasons,
+            [splinterm_protocol::HandoffBlockingReason::NotPackaged]
         );
         attempt.cancel(HandoffCancelReason::Requested).await;
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
@@ -20229,10 +20263,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        feature = "vm-acceptance-live-handoff",
-        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
-    )]
     async fn execute_runs_the_gate_and_reaches_topology_subscribers_in_sequence() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
@@ -20241,14 +20271,12 @@ mod tests {
         let task = AbortOnDrop::new(spawn_topology_subscription(7, subscription, outbound, None));
         let error = execute_with_forward_prepared(&state, &report).await;
         // A preparation without exec authority: the attempt cancels as
-        // failed, and the fresh report still names `Unsupported`.
+        // failed, and the fresh report names only `NotPackaged`, since live
+        // handoff is supported.
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             error.handoff_blocking_reasons,
-            [
-                splinterm_protocol::HandoffBlockingReason::NotPackaged,
-                splinterm_protocol::HandoffBlockingReason::Unsupported,
-            ]
+            [splinterm_protocol::HandoffBlockingReason::NotPackaged]
         );
         for (expected_sequence, expected_phase) in [
             (1, HandoffStatusPhase::Preparing),
@@ -20718,18 +20746,21 @@ mod tests {
         assert!(state.topology_transactions.try_acquire().is_ok());
     }
 
+    /// An installed pair that is the running build cancels as blocked and
+    /// says so; the fresh report names only `NotPackaged` for this
+    /// development daemon, since live handoff is supported.
     #[tokio::test]
-    #[cfg_attr(
-        feature = "vm-acceptance-live-handoff",
-        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
-    )]
     async fn an_installed_running_build_cancels_as_blocked_and_says_so() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff_with(&state, &report, Ok(()), None, |_| async {
-            Err::<(), _>(handoff_requests::ForwardRefusal::NoInstalledUpgrade)
-        })
+        let error = execute_daemon_handoff_with(
+            &state,
+            &report,
+            handoff_requests::live_handoff_support(report.build.provenance),
+            None,
+            |_| async { Err::<(), _>(handoff_requests::ForwardRefusal::NoInstalledUpgrade) },
+        )
         .await;
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
@@ -20738,10 +20769,7 @@ mod tests {
         );
         assert_eq!(
             error.handoff_blocking_reasons,
-            [
-                splinterm_protocol::HandoffBlockingReason::NotPackaged,
-                splinterm_protocol::HandoffBlockingReason::Unsupported,
-            ]
+            [splinterm_protocol::HandoffBlockingReason::NotPackaged]
         );
         assert_eq!(
             handoff_status_phases(&mut subscription),
@@ -24260,8 +24288,9 @@ mod tests {
     }
 
     // Plan 0061 M3.13b1: Window participation on the old side. Every test
-    // drives the gate with live handoff support passed as `Ok(())`, so all of
-    // them run while `handoff_requests::WINDOW_CONTINUITY_READY` is false.
+    // drives the gate with live handoff support passed as `Ok(())` and a
+    // report whose reasons it cleared, so none of them depends on this
+    // build's provenance or packaging, or on `handoff_requests::WINDOW_CONTINUITY_READY`.
 
     /// A sealed memfd standing in for the forward client snapshot.
     fn sealed_test_client_snapshot() -> (

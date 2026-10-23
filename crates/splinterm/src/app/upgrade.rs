@@ -273,8 +273,10 @@ pub(in crate::app) fn reason_line(
         HandoffBlockingReason::Unsupported if provenance == HandoffBuildProvenance::NixStore => {
             "Live upgrade is not supported for Nix installations in Splinterm 0.2.0.".to_owned()
         }
+        // Any other build that refuses: a daemon from before live upgrade
+        // was enabled, or one whose build provenance is unknown.
         HandoffBlockingReason::Unsupported => {
-            "Live upgrade is not available in this build yet.".to_owned()
+            "The running daemon's build does not support live upgrade.".to_owned()
         }
     }
 }
@@ -928,8 +930,13 @@ mod tests {
         }
     }
 
+    /// A running daemon from before live upgrade was enabled refuses it as
+    /// `Unsupported`, with its own message. The command says the running
+    /// daemon's build lacks live upgrade, relays the daemon's cause, and
+    /// gives the restart path, after which the installed build can upgrade
+    /// live.
     #[test]
-    fn window_continuity_refusal_says_live_upgrade_is_not_in_this_build_and_how_to_restart() {
+    fn a_daemon_build_without_live_upgrade_says_so_and_how_to_restart() {
         let base = report(1, 1, HandoffBuildProvenance::ReleaseCandidate, Vec::new());
         let (exit, lines) = outcome_lines(
             &DaemonHandoffOutcome::Unavailable {
@@ -941,11 +948,12 @@ mod tests {
         assert_eq!(exit, UpgradeExit::Unavailable);
         let text = lines.join("\n");
         assert!(
-            text.contains("Live upgrade is not available in this build yet."),
+            text.contains("The running daemon's build does not support live upgrade."),
             "{text}"
         );
+        assert!(!text.contains("in this build yet"), "{text}");
         assert!(
-            text.contains("open Windows cannot survive it yet"),
+            text.contains("splinterd: daemon handoff is unavailable: live handoff is not available in this release"),
             "{text}"
         );
         assert!(text.contains("Nothing changed"), "{text}");

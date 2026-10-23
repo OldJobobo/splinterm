@@ -143,8 +143,10 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 
 `--vm-acceptance-live-handoff` is for maintainers' live-upgrade VM acceptance
 only (`docs/handoff-vm-acceptance.md`). It builds a **test-only** daemon with
-the `vm-acceptance-live-handoff` feature, which forces live upgrade on before
-the release enables it. The checked-in recipes never enable that feature. The
+the `vm-acceptance-live-handoff` feature, which forced live upgrade on for a
+local package build before the release enabled it. Live upgrade is now enabled
+in every build, so the feature changes no decision, but the build still carries
+its test-only marker. The checked-in recipes never enable that feature. The
 package's provenance record and package validation refuse a daemon carrying the
 feature's marker in any release-candidate or Nix package, and in a local
 package unless it was explicitly requested. Install such a package only in the
@@ -434,8 +436,9 @@ systemctl --user start splinterd.service
 ```
 
 `splinterm upgrade` reports whether the running daemon could instead hand its
-terminals to the newly installed build without a restart. Live upgrade is not
-enabled in this release, so the restart above remains the upgrade path; see
+terminals to the newly installed build without a restart, and
+`splinterm upgrade --now` does so. The 0.1.x packages above predate live
+upgrade, so for them the restart above is the upgrade path; see
 [Daemon upgrade](cli.md#daemon-upgrade). Without the manual restart, the next
 desktop launch asks before restarting; see
 [Desktop launcher and the running daemon](#desktop-launcher-and-the-running-daemon).

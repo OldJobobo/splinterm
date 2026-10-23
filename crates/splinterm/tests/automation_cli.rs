@@ -2122,17 +2122,47 @@ fn upgrade_without_now_prints_the_report_and_changes_nothing() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("not available in this build yet"),
+        stdout.contains("The running daemon's build does not support live upgrade."),
         "{stdout}"
     );
+    assert!(!stdout.contains("in this build yet"), "{stdout}");
     assert!(
         stdout.contains("systemctl --user stop splinterd.service"),
         "{stdout}"
     );
 }
 
+/// A running daemon whose build supports live upgrade and that nothing
+/// blocks: the report says so, offers no restart, and changes nothing.
 #[test]
-fn upgrade_now_refused_for_window_continuity_exits_unavailable_with_the_restart_path() {
+fn upgrade_without_now_reports_that_nothing_blocks_a_supported_daemon() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_trusted_upgrade_client(&listener, 1);
+        answer_dry_run(&mut stream, upgrade_report(1, 1, false));
+        let mut rest = Vec::new();
+        stream.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+    });
+    let output = run_upgrade(&["upgrade"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Live upgrade: nothing blocks it."),
+        "{stdout}"
+    );
+    assert!(stdout.contains("splinterm upgrade --now"), "{stdout}");
+    assert!(!stdout.contains("not available"), "{stdout}");
+    assert!(!stdout.contains("systemctl"), "{stdout}");
+}
+
+/// A running daemon from before live upgrade was enabled refuses `--now`
+/// with its own message: the command relays it and gives the restart path.
+#[test]
+fn upgrade_now_refused_by_an_older_daemon_exits_unavailable_with_the_restart_path() {
     let socket = socket_path();
     let listener = UnixListener::bind(&socket).unwrap();
     let server = thread::spawn(move || {
@@ -2154,6 +2184,10 @@ fn upgrade_now_refused_for_window_continuity_exits_unavailable_with_the_restart_
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Live upgrade is not available now."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("The running daemon's build does not support live upgrade."),
         "{stderr}"
     );
     assert!(

@@ -1,7 +1,9 @@
 # Live-upgrade VM acceptance (Plan 0061 M3.17)
 
-This is the bounded graphical sequence that must pass before live daemon
-upgrade is enabled in a release. The coordinator shows it to the operator,
+This is the bounded graphical sequence that proves live daemon upgrade in a
+real guest. It was written to pass before live upgrade was enabled, and it is
+the acceptance run for a release that ships it. The coordinator shows it to the
+operator,
 and **nothing in it runs without the operator's explicit approval of the
 whole sequence** (AGENTS.md §2.6 and §3), including the guest package
 replacement it performs (§4.4).
@@ -25,18 +27,24 @@ which locates the private package session that `package-launch` owns
 
 ## What is tested, and with what
 
-Live upgrade stays off in every shipped build until the enablement change
-(below): `WINDOW_CONTINUITY_READY` is `false`. To drive a real live upgrade
-first, the operator approved (2026-10-19) a **test-only build that forces
-readiness**:
+Live upgrade is enabled in every shipped build since the enablement change
+(below): `WINDOW_CONTINUITY_READY` is `true` (operator decision 2026-10-22), so
+a plain local package (`package-build`, then `package-install
+--confirm-guest-install`) performs a real live upgrade, and the sequence can
+run on plain packages A and B.
+
+Before enablement, the operator approved (2026-10-19) a **test-only build that
+forces readiness**, and it stays available:
 
 - `splinterd`'s `vm-acceptance-live-handoff` feature makes live handoff treat
   window continuity as ready for a local package build
-  (`local-committed-head`) only. Release-candidate, Nix-store, and unpackaged
-  builds stay refused. The daemon logs a warning at every serve start,
+  (`local-committed-head`) only. Since enablement every build already does, so
+  the feature changes no decision; Nix-store builds stay refused in it as in
+  every build. The daemon logs a warning at every serve start,
   "TEST-ONLY VM acceptance build", at the `warn` level; `package-launch` runs
   the private daemon with `RUST_LOG=info`, so its `daemon.log` carries this
-  and the handoff phase lines the steps check.
+  and the handoff phase lines the steps check (a plain package logs the
+  handoff phase lines without the warning).
 - Such a daemon carries a marker. Package provenance generation and package
   validation refuse it in every release-candidate and Nix package, and in a
   local package unless explicitly requested. No PKGBUILD, Nix recipe,
@@ -48,6 +56,16 @@ readiness**:
   `package-install --confirm-guest-install --vm-acceptance-live-handoff`
   build and install such a package in the guest. The package description
   reads "TEST-ONLY VM acceptance build (live handoff forced on): never ship".
+
+**Plain or TEST-ONLY packages.** `tools/testbed/handoff-vm-acceptance.py`, as
+checked in, still builds and installs TEST-ONLY packages for package A, package
+B, and the rollback round, and `s1-dry-run` expects the TEST-ONLY warning in the
+daemon log. To run the sequence on plain packages instead, those
+`package-build` and `package-install` invocations drop
+`--vm-acceptance-live-handoff`, and `s1-dry-run` does not expect the warning;
+every other pass condition is the same. Which packages a recorded session uses
+is the operator's choice when approving it. `z2-plain-package` is mandatory
+either way.
 
 Two packages are needed, because a live upgrade needs an installed build whose
 pair identity differs from the running one:
@@ -112,7 +130,7 @@ The step IDs are the helper's. Each step's full commands are in `plan`.
 | `p0-status` | `status` | Guest up, Hyprland running, ydotool active |
 | `p0-package-status` | `package-status` | Recorded, including whether `splinterm-mcp` is installed and the guest's `splinterd.service` state |
 | `p0-sysctl` | `exec`: record `vm.memfd_noexec`, kernel | 0 or 1 |
-| `p0-build-a` | `package-build --vm-acceptance-live-handoff` | Package A builds; validation prints the TEST-ONLY banner |
+| `p0-build-a` | `package-build --vm-acceptance-live-handoff` | Package A builds; for a TEST-ONLY package, validation prints the TEST-ONLY banner |
 | `p0-install-a` | `package-install --confirm-guest-install --vm-acceptance-live-handoff` | Installed, with rollback copies saved; the private install check passes |
 | `p0-save-a` | `exec`: copy package A's files outside the guest source checkout | Copied, for the rollback round |
 | `p0-install-mcp` (optional, for M1) | `exec`: `sudo pacman -U` package A's `splinterm-mcp` | Installed |
@@ -124,7 +142,7 @@ The step IDs are the helper's. Each step's full commands are in `plan`.
 | `s1-launch` | `package-launch` | W1 maps on workspace 8 |
 | `s1-record` | `desktop-exec`: record W1, the daemon, focus, cursor, monitors | Recorded |
 | `s1-smoke` | guard, type `echo smoke-ok` | Echoed; no other Window moved. On failure: `package-stop` and abort |
-| `s1-dry-run` | `exec`: `splinterm upgrade` | Generation 1, local package build, rollback copy kept, "nothing blocks it"; the daemon log has the TEST-ONLY warning |
+| `s1-dry-run` | `exec`: `splinterm upgrade` | Generation 1, local package build, rollback copy kept, "nothing blocks it"; for TEST-ONLY packages, the daemon log has the TEST-ONLY warning |
 
 ### Phase 2: setup
 
@@ -217,37 +235,50 @@ Abort at once, run `z1-cleanup` and then `z2-plain-package`, and report if any o
 - **Nix** refuses live upgrade for 0.2.0. The headless NixOS test proves the
   refusal and the restart path (`nix/headless-test.py`).
 
-## The enablement change (separate, operator-approved)
+## The enablement change (done, operator-approved)
 
-After this sequence passes and is recorded, live upgrade is enabled by one
-small pull request, approved by the operator on its own:
+**Done** (operator decision 2026-10-22, "enable"): live upgrade is enabled for
+0.2.0 by one small change, approved by the operator on its own:
 
-- `crates/splinterd/src/handoff_requests.rs`: set
-  `WINDOW_CONTINUITY_READY` to `true`, and update its doc comment, the
-  module's "Staging" section, and `LiveHandoffUnsupported::WindowContinuityPending`
-  (which then only names a build that predates enablement, or is removed).
-- The tests that assert the shipped decision change with it:
-  - in `handoff_requests.rs`: `a_packaged_build_is_unsupported_only_until_window_continuity`,
+- `crates/splinterd/src/handoff_requests.rs`: `WINDOW_CONTINUITY_READY` is
+  `true`; its doc comment and the module's "Enablement" section (formerly
+  "Staging") describe live upgrade as enabled.
+  `LiveHandoffUnsupported::WindowContinuityPending` stays, naming only a build
+  without window continuity, which no build of this source is, so that the
+  decision's readiness input is still a real, unit-tested refusal.
+- The tests that asserted the shipped decision now assert the enabled one, and
+  still cover every refusal that remains (Nix, unknown provenance, not
+  packaged, D8, transient Lairs). They no longer need ignoring in
+  `cargo test --features splinterd/vm-acceptance-live-handoff`, since that
+  build now makes the same decision:
+  - in `handoff_requests.rs`:
+    `a_packaged_build_supports_live_handoff_now_that_window_continuity_is_ready`
+    (formerly `a_packaged_build_is_unsupported_only_until_window_continuity`),
     `an_unpackaged_build_always_reports_not_packaged`,
-    `idle_development_daemon_reports_not_packaged_and_unsupported`,
+    `idle_development_daemon_reports_only_not_packaged` (formerly
+    `idle_development_daemon_reports_not_packaged_and_unsupported`),
     `transient_lairs_block_with_an_exact_count_and_a_bounded_named_subset`,
     `compiled_build_identity_reports_a_valid_dry_run`, and
-    `only_the_vm_acceptance_build_forces_window_continuity`;
-  - in `main.rs`: `execute_is_refused_before_the_gate_while_live_handoff_is_unsupported`,
+    `window_continuity_is_ready_in_every_build_and_only_nix_is_refused`
+    (formerly `only_the_vm_acceptance_build_forces_window_continuity`);
+  - in `main.rs`: `execute_is_refused_before_the_gate_while_live_handoff_is_unsupported`
+    (now for a Nix-store build),
+    `the_shipped_execute_reaches_the_gate_for_a_supported_build` (new),
     `dry_run_reports_current_state_and_refused_execute_changes_nothing`,
     `a_second_execute_is_refused_while_a_handoff_runs_and_a_dry_run_still_reports`,
     `an_installed_running_build_cancels_as_blocked_and_says_so`, and
     `execute_runs_the_gate_and_reaches_topology_subscribers_in_sequence`.
-
-  The VM acceptance build already runs with readiness forced: in
-  `cargo test --features splinterd/vm-acceptance-live-handoff` these tests are
-  ignored or take their forced-ready branch, so that build previews exactly
-  which tests the enablement change touches. The D8 tests pass either way.
-- The comments that describe the gate as closed, in `handoff_exec.rs`,
+  - in the real-exec target `handoff_exec_adoption`, `old-side-signal-carry`
+    no longer expects the "live handoff is unsupported" log line: its exec
+    stays unarmed only because the drill holds no forward daemon.
+- The comments that described the gate as closed, in `handoff_exec.rs`,
   `handoff_rollback.rs`, `main.rs` (`run_daemon`, `arm_forward_exec`), and the
   real-exec test module documentation.
-- User documentation: `docs/cli.md` (`splinterm upgrade` stops saying
-  live upgrade is unavailable in this build) and the release notes.
+- User documentation: `docs/cli.md` (`splinterm upgrade` no longer says live
+  upgrade is unavailable in this build), `docs/usage.md`, `docs/headless.md`,
+  and `docs/packaging.md`. A running daemon from before enablement still
+  reports `Unsupported`; the client now says that the running daemon's build
+  does not support live upgrade, and gives the restart path.
 - What it does **not** change:
   - Nix stays refused.
   - D8 stays: one live upgrade per daemon until it restarts.

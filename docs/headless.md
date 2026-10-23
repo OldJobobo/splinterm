@@ -225,17 +225,19 @@ unknown files or weaken ownership checks to force startup.
 
 `splinterm upgrade` reports whether the running daemon could hand its terminals
 to the installed build without a restart, and `splinterm upgrade --now` starts
-that live upgrade. Live upgrade is not enabled in this release, so both report
-it as unavailable and the restart procedure above remains the upgrade path. The
-command never restarts the daemon itself. See
-[Daemon upgrade](cli.md#daemon-upgrade) for its prompts, trust rule, and exit
-statuses.
+that live upgrade. Nix installations are refused for all of Splinterm 0.2.0, and
+whenever the command reports live upgrade as unavailable, the restart procedure
+above remains the upgrade path. The command never restarts the daemon itself.
+See [Daemon upgrade](cli.md#daemon-upgrade) for its prompts, trust rule, and
+exit statuses.
 
 ## Accepted 0.2 upgrade contract (launcher states implemented)
 
-The preceding restart procedure remains authoritative until the guarded
-in-place re-exec contract in [ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md)
-is released. The desktop launcher now implements the matching, idle-restart,
+The guarded in-place re-exec contract in
+[ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md) is enabled for `0.2.0`
+through `splinterm upgrade --now`; the preceding restart procedure remains
+authoritative wherever live upgrade is unavailable, such as for Nix
+installations. The desktop launcher now implements the matching, idle-restart,
 active-confirmation, and `0.1.x` bootstrap states below; see
 [Desktop launcher and the running daemon](packaging.md#desktop-launcher-and-the-running-daemon).
 The accepted `0.2.0` target distinguishes four paths:

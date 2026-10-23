@@ -567,9 +567,10 @@ policy, or recovery work.
 
 `splinterm upgrade` shows whether the daemon could hand its running terminals to
 a newly installed build without stopping them, and `splinterm upgrade --now`
-starts that live upgrade. Live upgrade is not enabled in this release, so today
-it reports live upgrade as unavailable and restarting the daemon remains the
-upgrade path. See [Daemon upgrade](cli.md#daemon-upgrade).
+starts that live upgrade. It needs an installed package build; Nix installations
+are refused for all of Splinterm 0.2.0. Whenever it reports live upgrade as
+unavailable, restarting the daemon remains the upgrade path. See
+[Daemon upgrade](cli.md#daemon-upgrade).
 
 During a live upgrade every Window shows "Preparing upgrade…" and then
 "Upgrading — input paused". Typed keys, pastes, and session-changing actions
