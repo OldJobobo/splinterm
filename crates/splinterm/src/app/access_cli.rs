@@ -110,18 +110,15 @@ pub(in crate::app) fn resolve_access_request(
     }
 }
 
-/// Text for a terminal: control and bidirectional formatting characters are
-/// shown escaped, so agent-reported names, paths, and workspace names can
-/// neither move the cursor nor reorder the line.
+/// Text for a terminal: the characters the **Agent access** list and the
+/// consent prompt escape (controls, bidirectional and invisible formatting)
+/// are shown escaped here too, so agent-reported names, paths, and workspace
+/// names can neither move the cursor, reorder the line, nor hide text, and
+/// read the same in all three.
 fn printable(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     for character in text.chars() {
-        if character.is_control()
-            || matches!(
-                character,
-                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-            )
-        {
+        if splinterm::frontend::unsafe_display_character(character) {
             let _ = write!(shown, "\\u{{{:04x}}}", u32::from(character));
         } else {
             shown.push(character);
@@ -588,6 +585,17 @@ mod tests {
             panic!("not an access command");
         };
         resolve_access_request(command)
+    }
+
+    #[test]
+    fn the_cli_escapes_the_same_characters_as_the_list_and_prompt() {
+        let hostile = "evil\u{1b}RED\u{202e}gpj\u{200b}x\u{feff}y\u{2028}z\u{2060}end";
+        let shown = printable(hostile);
+        assert_eq!(shown, splinterm::frontend::shown(hostile, 1024));
+        assert_eq!(
+            shown,
+            "evil\\u{001b}RED\\u{202e}gpj\\u{200b}x\\u{feff}y\\u{2028}z\\u{2060}end"
+        );
     }
 
     #[test]
