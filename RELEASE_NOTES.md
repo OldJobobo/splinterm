@@ -351,6 +351,9 @@ a hostile program running as your account.
 
 ## Dojos, tabs, and the Explorer
 
+- The Lair Explorer opens on **Live**, and its filters read Live, Saved, All
+  (`f` cycles them in that order). Search looks through every Lair whatever the
+  filter, so a saved or stopped Lair is found from Live too.
 - `multiplexer.close-unused=yes` makes Close Tab and closing a Window end a
   Dojo that was never used, instead of leaving it running detached. Typing, a
   split, a rename, or a program in the foreground all count as use. Default
