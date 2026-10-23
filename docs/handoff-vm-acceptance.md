@@ -162,7 +162,7 @@ attempt open long enough to make that change deterministically.
 |---|---|---|
 | `r1-restart` | `package-stop`; clear the policy seed; `package-launch`; record | A fresh daemon from package B serves generation 1, keeps its rollback copy, and nothing blocks |
 | `r2-setup` | guard; `Ctrl+Shift+D` and `r2-mark`; `package-launch-extra launch`; reinstall package A through `package-install …` | W1 has two tabs; W2 maps; A installs over B (a different pair); the same daemon still serves and nothing blocks |
-| `r3-rollback` | stop W2; `splinterm upgrade --now`; record the dialog; replace `/usr/bin/splinterm` by a byte-identical copy (new inode); guard the dialog, click inside its text, wait 1 s, press G | Exit 6 ("rolled back"). The same daemon PID runs `/memfd:splinterd-daemon` (the sealed rollback snapshot) at generation 1 with no rollback copy. The log shows `phase="adoption"`, the install-prefix refusal, and the rollback. W1 relaunched as the installed `/usr/bin/splinterm`, reconnected, shows "Rolled back", and types again (`after-rollback`). `pacman -Qk splinterm` stays clean |
+| `r3-rollback` | stop W2; `splinterm upgrade --now`; record the dialog; replace `/usr/bin/splinterm` by a byte-identical copy (new inode); guard the dialog, click inside its text, wait 1 s, press G | Exit 7: the CLI still runs the replaced inode, so the rolled-back daemon refuses it, and it says it is no longer accepted and the installed splinterm may have been replaced. A fresh `splinterm upgrade` then confirms the rollback: the same daemon PID runs `/memfd:splinterd-daemon` (the sealed rollback snapshot) at generation 1 with no rollback copy. The log shows `phase="adoption"`, the install-prefix refusal, and the rollback. W1 relaunched as the installed `/usr/bin/splinterm`, reconnected (its "Rolled back" notice lasts 3 s, so the capture may miss it), and types again (`after-rollback`). `pacman -Qk splinterm` stays clean |
 | `r4-no-second-handoff` | `exec`: `splinterm upgrade --now` | D8 for a rollback daemon: exit 4, "needs a daemon restart first" |
 | `r5-close-extra` | resume W2; `package-close-extra 1` | Closed |
 
@@ -170,7 +170,7 @@ attempt open long enough to make that change deterministically.
 
 | Step | Action | Pass |
 |---|---|---|
-| `f1-exit-codes` | `exec`: collect the recorded exit statuses | c1 = c2 = 3, c3 = 0, r3 = 6; c5 and r4 exited 4 and the stale client 1. Code 7 (unconfirmed) needs a daemon that does not answer within 15 s after a commit and is not reachable deterministically; its classification is unit-tested |
+| `f1-exit-codes` | `exec`: collect the recorded exit statuses | c1 = c2 = 3, c3 = 0, r3 = 7; c5 and r4 exited 4 and the stale client 1. Code 6 (rolled back) needs a rollback whose CLI binary was not replaced, which the VM cannot drive; its classification is unit-tested |
 | `x1-memfd-noexec` (optional, guest-wide sysctl) | refuse unless the guest kernel is 6.6 or later; `package-stop`; `sysctl vm.memfd_noexec=2`; `package-launch`; dry run and `upgrade --now`; `package-stop`; restore the sysctl | Under `memfd_noexec=2` the kernel refuses the executable memfds (`MFD_EXEC`), so the fresh daemon keeps no rollback copy ("Rollback copy: not kept") and `upgrade --now` exits 4 with nothing changed. The sysctl returns to its recorded value |
 
 ### Phase 6: restore and cleanup (AGENTS.md §3.3)
