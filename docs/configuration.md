@@ -941,8 +941,10 @@ JSON palette still follows the text size from the Omarchy `shell.toml` layers,
 choosing the theme directory with the same order and brief-gap grace as the
 native theme.
 While `config.ini` sets both a terminal font size and `main.ui-font-pixelsize`,
-Splinterm does not report `base-size` problems, and with a JSON palette it does
-not report panel alpha problems. Bar size problems are reported in every case,
+Splinterm does not report `base-size` problems. While it sets a terminal font
+size, the point-size clamp above, which only the terminal uses, is not
+reported either. With a JSON palette Splinterm does not report panel alpha
+problems. Bar size problems are reported in every case,
 because every palette follows the bar.
 
 To opt the terminal out, set a size in `config.ini`, for example:
@@ -973,8 +975,11 @@ Chrome is always sized by the output scale (14 px is 28 px at scale 2), whatever
 `main.font-sizing-policy` says, and runtime zoom (`Ctrl++`, `Ctrl+-`) resizes
 only the terminal. Chrome rows keep fixed heights, so chrome text grows with its
 size only until it reaches a 24 px line height (logical pixels), then stays at
-that size; a large UI size is never clipped. Tab text stops earlier when the tab
-strip is shorter; see "Tab strip height" below.
+that size, so a large UI size is not clipped by its row. Tab text stops earlier
+when the tab strip is shorter; see "Tab strip height" below. Frame titles
+(`multiplexer.divider-style=frame`) sit in the pane's top border row, which is
+one terminal cell tall, so they also stop at the terminal's cell height and
+are cut to the chrome cells that fit between the frame's corners.
 
 A `base-size` change redraws chrome in open terminal Windows without a restart,
 as it does the terminal. **Reload configuration** applies a changed
@@ -1038,4 +1043,4 @@ close and new-tab glyphs and the remote tag use the chrome text size as other
 chrome does (see "Chrome text size"), but their line height also stays within the strip less the
 underline thickness above and below. At the default 26 px that is a 22 px
 line, so text stays vertically centred and clear of the underline at every
-zoom. Labels that do not fit end in `…` as before.
+size. Labels that do not fit end in `…` as before.

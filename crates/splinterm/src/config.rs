@@ -531,8 +531,11 @@ pub enum OmarchyShellConcern {
     Read,
     /// `[menu]` or `[popups]` `background-alpha`.
     PanelAlpha,
-    /// `[font] base-size`.
+    /// `[font] base-size`, which the terminal and chrome text both follow.
     TextSize,
+    /// `[font] base-size` maps to a point size outside what Splinterm
+    /// renders. Only the terminal uses that point size; chrome takes the px.
+    TerminalTextSize,
     /// `[bar] size-horizontal`.
     BarSize,
 }
@@ -773,7 +776,7 @@ pub fn resolve_omarchy_shell(
                 let points = omarchy_unbounded_point_size(px);
                 if !RENDERER_POINT_SIZES.contains(&u16::try_from(points).unwrap_or(u16::MAX)) {
                     load.diagnostics.push((
-                        OmarchyShellConcern::TextSize,
+                        OmarchyShellConcern::TerminalTextSize,
                         format!(
                             "{}: [font] base-size {raw:?} maps to {points} pt; using {} pt, the nearest size Splinterm renders",
                             origin.display(),
@@ -1372,7 +1375,9 @@ where
     let parsed = value
         .parse::<T>()
         .map_err(|_| anyhow::anyhow!("line {}: invalid number", line + 1))?;
-    if parsed < min || parsed > max {
+    // A range check rather than two comparisons: NaN fails both `<` and `>`,
+    // so `nan` would otherwise pass for a float key.
+    if !(min..=max).contains(&parsed) {
         bail!("line {}: number outside supported range", line + 1);
     }
     Ok(parsed)
@@ -3649,7 +3654,10 @@ mod tests {
             let small = bar(theme, "[font]\nbase-size = 6\n");
             assert_eq!(small.settings.bar_size_px, 20);
             assert_eq!(small.diagnostics.len(), 1, "{:?}", small.diagnostics);
-            assert_eq!(small.diagnostics[0].0, OmarchyShellConcern::TextSize);
+            assert_eq!(
+                small.diagnostics[0].0,
+                OmarchyShellConcern::TerminalTextSize
+            );
         }
         // A configured size outside the limits is reported when it is
         // clamped, against the layer that set it...
@@ -3842,11 +3850,20 @@ mod tests {
         for bounds in ["6", "96"] {
             assert!(parse(&format!("[main]\nui-font-pixelsize={bounds}\n")).is_ok());
         }
-        for invalid in ["5.9", "97", "big", ""] {
+        for invalid in ["5.9", "97", "big", "", "nan", "NaN", "inf", "-inf"] {
             assert!(
                 parse(&format!("[main]\nui-font-pixelsize={invalid}\n")).is_err(),
                 "{invalid:?}"
             );
+        }
+        // The same range check guards the terminal's float size keys.
+        for key in ["font-pixelsize", "font-point-size", "font-size"] {
+            for invalid in ["nan", "inf"] {
+                assert!(
+                    parse(&format!("[main]\n{key}={invalid}\n")).is_err(),
+                    "{key}={invalid}"
+                );
+            }
         }
         // Only [main] owns it.
         let elsewhere = parse("[explorer]\nui-font-pixelsize=16\n").unwrap();

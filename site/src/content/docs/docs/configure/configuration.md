@@ -57,9 +57,10 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | Key | Meaning | Default or range |
 | --- | --- | --- |
 | `main.font` | fontconfig pattern; styles remain in its resolved family | Fontconfig `monospace` Regular |
-| `main.font-pixelsize` | pixel font size; any size key stops Splinterm following Omarchy's text size | 6–96; Omarchy's text size, otherwise 14 |
+| `main.font-pixelsize` | terminal pixel font size; any size key stops the terminal following Omarchy's text size | 6–96; Omarchy's text size, otherwise 14 |
 | `main.font-point-size` | alternative point size | 6–96; unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` | `output-scale` |
+| `main.ui-font-pixelsize` | text size of tabs, Explorer, menus, the command palette and pickers, independent of the terminal font size and zoom; configuration reload applies it | 6–96; Omarchy's text size, otherwise 14 |
 | `main.startup` | `new-dojo` or `dojo-picker`: what a commandless desktop launch opens | `new-dojo` |
 | `main.omarchy-integration-hint` | under Omarchy without the `terminal` tag, show one desktop notification recommending `splinterm integration omarchy enable` | `yes` |
 | `main.padding-*` | four independent logical edges | 0–10000; 12 |
@@ -119,6 +120,8 @@ Omarchy's Glassy Windows works through the theme's `foot.ini`, as it does for Fo
 Splinterm also follows the Omarchy 4 shell's `shell.toml`. It layers the user's `~/.config/omarchy/shell.toml` over the active theme's `shell.toml` key by key, as the shell does. Terminal windows pick up edits within half a second; standalone session-picker and remote-status windows read them when they open. The action palette, Dojo and session picker, and Lair Explorer follow `[menu] background-alpha`. The tab context menu, Dojo prompt, search bar, and history overlay follow `[popups] background-alpha`. A panel is drawn as the window's own glass with that alpha layered over it, so panels stay opaque while Glassy Windows is off and with Omarchy's default of 1.0. Borders, selected rows, and text stay opaque, and Splinterm raises a panel's alpha as far as needed to keep its text at 4.5:1 contrast over any wallpaper.
 
 While `config.ini` sets no font size, Splinterm also follows Omarchy's text size, which `omarchy-display-text-size` writes as `[font] base-size`: the user `shell.toml` value, then the theme's, then Splinterm's 14 px default. Like Omarchy does for Foot, kitty, ghostty and alacritty, it uses `px × 9/12` points rounded to a whole point, so 12 px gives 9 pt and 16 px gives 12 pt, and the default `output-scale` policy sizes those points exactly as Foot does. Open terminal windows rescale live. Like the shell, Splinterm reads `base-size` with `parseInt` and a 1 px floor and clamps the resulting points to the 6–96 pt it renders; a value without digits keeps the current size, or 12 px at startup. Set `main.font-pixelsize` or `main.font-point-size` to opt out.
+
+Window chrome (tabs, Explorer, menus, the command palette and its lists, pickers and Dojo prompts) has its own text size: `main.ui-font-pixelsize` when set, otherwise Omarchy's `base-size` in px (12 px on a stock desktop) even when `config.ini` sets the terminal's size, otherwise 14 px. Runtime zoom resizes only the terminal. Chrome text stops growing where it would overflow its fixed row, and frame titles also stay within the terminal cell height of the pane border. A `base-size` change redraws chrome live, and **Reload configuration** applies a changed `main.ui-font-pixelsize`.
 
 Set an explicit JSON palette only to opt out of native discovery:
 

@@ -231,6 +231,7 @@ impl ChromeText {
         Self::load_styled(text, scale_120, ChromeTextStyle::Regular)
     }
 
+    #[cfg(test)]
     pub(crate) fn load_with_context(
         text: &str,
         scale_120: u32,

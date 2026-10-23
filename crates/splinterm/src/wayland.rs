@@ -192,7 +192,10 @@ mod tabs;
 mod terminal_state;
 #[cfg(test)]
 use chrome::divider_junction;
-use chrome::{paint_pane_chrome, paint_trusted_consent_chrome, sanitize_frame_title};
+use chrome::{
+    frame_title_maximum_cells, paint_pane_chrome, paint_trusted_consent_chrome,
+    sanitize_frame_title,
+};
 pub use clipboard::encode_bracketed_paste;
 use clipboard::{
     ACTIVE_CLIPBOARD_WORKERS, CLIPBOARD_IO_TIMEOUT, ClipboardRead, OwnedFieldTarget, PasteTarget,
@@ -944,6 +947,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pane_divider_style: options.pane_divider_style,
             frame_title_mode: options.frame_title_mode,
             frame_titles: HashMap::new(),
+            frame_title_cell: None,
             evidence_close_shortcuts: options.evidence_close_shortcuts,
             font_zoom_steps: 0,
             zoomed_splint: None,
@@ -2007,6 +2011,27 @@ struct CachedFrameTitle {
     text: ChromeText,
 }
 
+/// `((scale_120, terminal cell height, renderer generation), (chrome cell
+/// width, chrome cell height))` for frame titles.
+type FrameTitleCell = ((u32, u32, u64), (u32, u32));
+
+/// A frame title at the chrome size, never taller than the terminal cell of
+/// the top border row it is drawn in.
+fn load_frame_title(
+    source: &ChromeSource,
+    scale_120: u32,
+    context: &RenderContext,
+    terminal_cell_height: u32,
+) -> Result<ChromeText> {
+    ChromeText::load_source_styled_within(
+        source,
+        scale_120,
+        ChromeTextStyle::Regular,
+        context,
+        terminal_cell_height,
+    )
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent Wayland lifecycle and evidence-mode flags are not one state machine"
@@ -2086,6 +2111,9 @@ struct PresentationState {
     pane_divider_style: PaneDividerStyle,
     frame_title_mode: FrameTitleMode,
     frame_titles: HashMap<SplintId, CachedFrameTitle>,
+    /// The chrome cell (width, height) frame titles are drawn with, keyed by
+    /// scale, terminal cell height and renderer generation.
+    frame_title_cell: Option<FrameTitleCell>,
     evidence_close_shortcuts: bool,
     font_zoom_steps: i16,
     zoomed_splint: Option<SplintId>,
@@ -4051,10 +4079,15 @@ impl App {
         }))
     }
 
+    /// Prepares each framed pane's title for a top border row of the
+    /// terminal's `cell_width` × `cell_height` cells. Titles are chrome text
+    /// at the chrome size, but never taller than the terminal cell they sit
+    /// in, and are cut to the chrome cells that fit beside the corners.
     fn prepare_frame_titles(
         &mut self,
         pane_layout: Option<&PaneLayout>,
         cell_width: u32,
+        cell_height: u32,
     ) -> Result<()> {
         if self.presentation.pane_divider_style != PaneDividerStyle::Frame
             || self.presentation.frame_title_mode != FrameTitleMode::Splint
@@ -4066,11 +4099,36 @@ impl App {
             self.presentation.frame_titles.clear();
             return Ok(());
         };
+        let scale_120 = self.surface.scale_120;
+        let cell_key = (
+            scale_120,
+            cell_height,
+            self.presentation.renderer_generation,
+        );
+        // One chrome cell at the current chrome size and border row, measured
+        // once per change. Titles cached at another cell size, such as a
+        // hidden tab's from before a zoom, are loaded again.
+        let chrome_cell = match self.presentation.frame_title_cell {
+            Some((key, cell)) if key == cell_key => cell,
+            _ => {
+                let reference = load_frame_title(
+                    &ChromeSource::from("_"),
+                    scale_120,
+                    &self.presentation.render_context,
+                    cell_height,
+                )?;
+                let cell = (reference.pixel_width(), reference.pixel_height());
+                self.presentation.frame_title_cell = Some((cell_key, cell));
+                cell
+            }
+        };
+        let chrome_cell_width = chrome_cell.0;
         let mut requested = Vec::new();
         for pane in &pane_layout.panes {
-            let allocation = Self::buffer_rect(pane.allocation, self.surface.scale_120)?;
-            let columns = allocation.width / cell_width.max(1);
-            let Some(maximum_cells) = columns.checked_sub(6).filter(|cells| *cells > 0) else {
+            let allocation = Self::buffer_rect(pane.allocation, scale_120)?;
+            let Some(maximum_cells) =
+                frame_title_maximum_cells(allocation.width, cell_width, chrome_cell_width)
+            else {
                 continue;
             };
             let Some(splint) = topology.find_splint(pane.splint_id) else {
@@ -4097,20 +4155,24 @@ impl App {
                 .is_some_and(|cached| {
                     cached.source == source
                         && cached.maximum_cells == maximum_cells
-                        && cached.scale_120 == self.surface.scale_120
+                        && cached.scale_120 == scale_120
+                        && cached.text.pixel_height() == chrome_cell.1
+                        && cached.text.pixel_width()
+                            == cached.text.cells().saturating_mul(chrome_cell_width)
                 });
             if !current {
                 self.presentation.frame_titles.insert(
                     splint_id,
                     CachedFrameTitle {
-                        text: ChromeText::load_with_context(
-                            source.text(),
-                            self.surface.scale_120,
+                        text: load_frame_title(
+                            &source,
+                            scale_120,
                             &self.presentation.render_context,
+                            cell_height,
                         )?,
                         source,
                         maximum_cells,
-                        scale_120: self.surface.scale_120,
+                        scale_120,
                         bold: false,
                     },
                 );
@@ -10877,13 +10939,13 @@ impl App {
             .explorer_layout
             .clone_from(&explorer_layout);
         let pane_layout = self.computed_pane_layout()?;
-        let pane_cell_width = self
+        let (pane_cell_width, pane_cell_height) = self
             .panes
             .pane
             .snapshot_frame
             .as_ref()
-            .map_or(1, SnapshotFrame::cell_width);
-        self.prepare_frame_titles(pane_layout.as_ref(), pane_cell_width)?;
+            .map_or((1, 1), |frame| (frame.cell_width(), frame.cell_height()));
+        self.prepare_frame_titles(pane_layout.as_ref(), pane_cell_width, pane_cell_height)?;
         let active_splint = self.panes.focused_splint();
         let active_rect = active_splint.and_then(|splint_id| {
             pane_layout
@@ -14329,6 +14391,170 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(region(&actual), region(&expected));
+    }
+
+    /// Review of #212: frame titles are chrome text inside a border row laid
+    /// out in terminal cells. When the chrome cell is larger than the
+    /// terminal's (zoomed out, or a UI size above the terminal size), a title
+    /// must still fit its row whole and stop clear of the top-right corner.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one case table drives layout, unclipped paint and pane chrome checks"
+    )]
+    fn frame_titles_fit_their_border_row_at_every_chrome_and_terminal_size() {
+        use super::chrome::frame_title_placement;
+
+        let nine_point =
+            || RenderContext::new(u16::MAX).with_font_size_override(Some(FontSize::Points(9.0)));
+        let cases = [
+            // Stock Omarchy, one zoom-out step: 11.3 px terminal, 12 px chrome.
+            (
+                "zoomed out",
+                nine_point().with_chrome_font_size(FontSize::Pixels(12.0)),
+                -1,
+            ),
+            // The default context zoomed out ten steps, chrome far larger.
+            (
+                "zoom -10",
+                RenderContext::new(u16::MAX).at_maximum_chrome_font_size(),
+                -10,
+            ),
+            // An explicit small terminal under a larger UI size.
+            (
+                "ui above terminal",
+                nine_point().with_chrome_font_size(FontSize::Pixels(20.0)),
+                -6,
+            ),
+            // Chrome smaller than the terminal, as before.
+            ("ui below terminal", RenderContext::new(u16::MAX), 0),
+        ];
+        for (case, context, steps) in cases {
+            for scale in [120, 240] {
+                let (cell, _) = context.zoomed_cell_geometry(steps, scale).unwrap().unwrap();
+                let (cell_width, cell_height) = (cell.width, cell.height);
+                let splint = Splint::shell(PathBuf::from("/tmp"));
+                let splint_id = splint.id;
+                let layout = PaneLayout::compute_with_chrome(
+                    &LayoutNode::Leaf(splint),
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 320,
+                        height: 120,
+                    },
+                    PaneChrome::Frame {
+                        vertical_width: 8,
+                        horizontal_height: 16,
+                    },
+                    2,
+                    2,
+                )
+                .unwrap();
+                let allocation = App::buffer_rect(layout.panes[0].allocation, scale).unwrap();
+                let chrome_cell =
+                    load_frame_title(&ChromeSource::from("_"), scale, &context, cell_height)
+                        .unwrap()
+                        .pixel_width();
+                let maximum_cells =
+                    frame_title_maximum_cells(allocation.width, cell_width, chrome_cell).unwrap();
+                let source = ChromeSource::from(sanitize_frame_title(
+                    "a long Splint title that keeps going well past the pane's frame",
+                    maximum_cells,
+                ));
+                let text = load_frame_title(&source, scale, &context, cell_height).unwrap();
+                let label = format!("{case} at {scale}");
+                assert!(text.pixel_height() <= cell_height, "{label}");
+                assert!(text.cells() <= maximum_cells, "{label}");
+                let (clear, origin) =
+                    frame_title_placement(allocation, cell_width, cell_height, &text);
+                // The cleared title area stays in the border row and clear of
+                // both top corners, with a terminal cell of padding.
+                assert_eq!(clear.y, allocation.y, "{label}");
+                assert!(clear.height <= cell_height, "{label}");
+                assert!(
+                    clear.x + clear.width <= allocation.x + allocation.width - 2 * cell_width,
+                    "{label}"
+                );
+                assert!(origin.1 + text.pixel_height() <= allocation.y + cell_height);
+
+                // Painted whole: clipping to the cleared area changes nothing.
+                let (width, height) = (allocation.width + 8, allocation.height + 8);
+                let canvas = || vec![0_u8; usize::try_from(width * height * 4).unwrap()];
+                let everything = Rect {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                };
+                let (mut clipped, mut unclipped) = (canvas(), canvas());
+                text.paint(&mut clipped, width, height, origin, clear, 0x00ff_ffff);
+                text.paint(
+                    &mut unclipped,
+                    width,
+                    height,
+                    origin,
+                    everything,
+                    0x00ff_ffff,
+                );
+                assert_eq!(clipped, unclipped, "{label}: the title was cut");
+                assert!(clipped.iter().any(|byte| *byte != 0), "{label}");
+
+                // The pane chrome draws it there and nowhere else.
+                let theme = ResolvedTheme::default();
+                let mut titles = HashMap::new();
+                titles.insert(
+                    splint_id,
+                    CachedFrameTitle {
+                        source,
+                        maximum_cells,
+                        scale_120: scale,
+                        bold: false,
+                        text,
+                    },
+                );
+                let (mut bare, mut with_title) = (canvas(), canvas());
+                for (target, titles) in [(&mut bare, &HashMap::new()), (&mut with_title, &titles)] {
+                    paint_pane_chrome(
+                        target,
+                        width,
+                        height,
+                        &layout,
+                        Some(splint_id),
+                        theme,
+                        cell_width,
+                        cell_height,
+                        scale,
+                        titles,
+                    )
+                    .unwrap();
+                }
+                for y in 0..height {
+                    for x in 0..width {
+                        let index = usize::try_from((y * width + x) * 4).unwrap();
+                        if bare[index..index + 4] != with_title[index..index + 4] {
+                            assert!(
+                                (clear.x..clear.x + clear.width).contains(&x)
+                                    && (clear.y..clear.y + clear.height).contains(&y),
+                                "{label}: title paint at ({x}, {y}) outside {clear:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frame_title_cells_are_chrome_cells_beside_terminal_corners() {
+        // Three terminal cells on each side; the rest in chrome cells.
+        assert_eq!(frame_title_maximum_cells(200, 10, 10), Some(14));
+        assert_eq!(frame_title_maximum_cells(200, 10, 14), Some(10));
+        assert_eq!(frame_title_maximum_cells(200, 10, 7), Some(20));
+        assert_eq!(frame_title_maximum_cells(60, 10, 10), None);
+        assert_eq!(frame_title_maximum_cells(65, 10, 10), None);
+        assert_eq!(frame_title_maximum_cells(70, 10, 10), Some(1));
+        assert_eq!(frame_title_maximum_cells(70, 10, 0), Some(10));
     }
 
     #[test]

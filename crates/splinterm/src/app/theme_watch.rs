@@ -289,12 +289,13 @@ fn absent_startup_observation(source: &ThemeSource) -> Option<ThemeSourceFingerp
 /// which sizes the tab strip, is not a palette setting, so every palette
 /// follows it. A JSON palette also takes the text size but keeps Omarchy's
 /// opaque panel defaults. Diagnostics for a setting Splinterm ignores are
-/// dropped: alpha for a JSON palette, and the text size while `config.ini`
-/// sets both a font size and a UI font size (`report_text_size` false).
+/// dropped: alpha for a JSON palette, the text size while `config.ini` sets
+/// both a font size and a UI font size, and the terminal's point mapping of
+/// it while `config.ini` sets a terminal font size.
 fn with_omarchy_shell(
     mut theme: ResolvedTheme,
     layers: ShellLayers<'_>,
-    report_text_size: bool,
+    overrides: ThemeOverrides,
     fallback: OmarchyTextSizeFallback,
     diagnostics: &mut Vec<String>,
 ) -> ResolvedTheme {
@@ -305,7 +306,8 @@ fn with_omarchy_shell(
             .filter(|(concern, _)| match concern {
                 OmarchyShellConcern::Read | OmarchyShellConcern::BarSize => true,
                 OmarchyShellConcern::PanelAlpha => layers.panels,
-                OmarchyShellConcern::TextSize => report_text_size,
+                OmarchyShellConcern::TextSize => overrides.reports_text_size(),
+                OmarchyShellConcern::TerminalTextSize => overrides.follow_text_size,
             })
             .map(|(_, diagnostic)| diagnostic),
     );
@@ -369,7 +371,7 @@ fn prepare_startup_theme_with_loader(
         Some(layers) => with_omarchy_shell(
             theme,
             layers,
-            overrides.reports_text_size(),
+            overrides,
             OmarchyTextSizeFallback::OmarchyDefault,
             &mut shell_diagnostics,
         ),
@@ -469,7 +471,7 @@ fn resolve_live_theme_update(
         Some(layers) => with_omarchy_shell(
             palette,
             layers,
-            overrides.reports_text_size(),
+            overrides,
             ThemeOverrides::text_size_fallback(&current),
             shell_diagnostics,
         ),
@@ -1535,6 +1537,10 @@ mod tests {
         std::fs::create_dir_all(&theme).unwrap();
         std::fs::write(theme.join("shell.toml"), "[font]\nbase-size = 16\n").unwrap();
         let mut diagnostics = Vec::new();
+        let explicit = ThemeOverrides {
+            follow_text_size: false,
+            ..NO_OVERRIDES
+        };
         let resolved = with_omarchy_shell(
             ResolvedTheme::default(),
             ShellLayers {
@@ -1542,22 +1548,55 @@ mod tests {
                 user: None,
                 panels: true,
             },
-            false,
+            explicit,
             OmarchyTextSizeFallback::OmarchyDefault,
             &mut diagnostics,
         );
-        let applied = ThemeOverrides {
-            alpha: None,
-            blur: None,
-            follow_text_size: false,
-            follow_ui_text_size: true,
-        }
-        .apply(resolved);
+        let applied = explicit.apply(resolved);
         assert_eq!(applied.shell.text_size_px, None);
         // Chrome text still follows base-size.
         assert_eq!(applied.shell.ui_text_size_px, Some(16));
         assert_eq!(applied.shell.bar_size_px, 35);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The terminal's point mapping of `base-size` concerns only the
+    /// terminal: with an explicit terminal font size it is not reported,
+    /// though chrome still follows the px and an unparseable value still is.
+    #[test]
+    fn the_terminal_point_mapping_is_reported_only_while_the_terminal_follows() {
+        let root =
+            std::env::temp_dir().join(format!("splinterm-points-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        std::fs::create_dir_all(&theme).unwrap();
+        let explicit_font = ThemeOverrides {
+            follow_text_size: false,
+            ..NO_OVERRIDES
+        };
+        let reported = |contents: &str, overrides| {
+            std::fs::write(theme.join("shell.toml"), contents).unwrap();
+            let mut diagnostics = Vec::new();
+            let resolved = with_omarchy_shell(
+                ResolvedTheme::default(),
+                ShellLayers {
+                    theme_dir: &theme,
+                    user: None,
+                    panels: true,
+                },
+                overrides,
+                OmarchyTextSizeFallback::OmarchyDefault,
+                &mut diagnostics,
+            );
+            (resolved.shell.ui_text_size_px, diagnostics.len())
+        };
+        // 200 px maps to 150 pt, past the 96 pt the terminal renders.
+        let huge = "[bar]\nscale-with-font = off\n[font]\nbase-size = 200\n";
+        assert_eq!(reported(huge, NO_OVERRIDES), (Some(200), 1));
+        assert_eq!(reported(huge, explicit_font), (Some(200), 0));
+        let big = "[bar]\nscale-with-font = off\n[font]\nbase-size = big\n";
+        assert_eq!(reported(big, explicit_font), (Some(12), 1));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1580,7 +1619,11 @@ mod tests {
                     user: None,
                     panels: false,
                 },
-                follow_text_size,
+                ThemeOverrides {
+                    follow_text_size,
+                    follow_ui_text_size: follow_text_size,
+                    ..NO_OVERRIDES
+                },
                 OmarchyTextSizeFallback::OmarchyDefault,
                 &mut diagnostics,
             )
