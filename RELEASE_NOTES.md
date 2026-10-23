@@ -145,7 +145,9 @@ a hostile program running as your account.
   example **Always allow Manage for 'Workspace'**. Closing the prompt denies.
 - The prompt shows the agent's reported name (as a label only), its exact
   executable path, the workspace name with its short ID, the level, and the
-  exact scopes.
+  exact scopes. Names and paths appear as data: a control or bidirectional
+  character shows as an escape such as `\u{202e}`, the same in the prompt, the
+  **Agent access** list, and `splinterm access list`.
 - A request a grant already covers is answered at once, without a prompt.
   Prompts appear one at a time. An unanswered request stays pending for up to
   two minutes, and the agent collects your answer by asking again; MCP's
@@ -164,9 +166,10 @@ a hostile program running as your account.
   expires, and what it is doing now. `splinterm access revoke ID` ends one
   entry; `splinterm access revoke --all` first shows exact counts and asks
   (`--dry-run` only counts, `--yes` skips the question).
-- **Agent access** in the command palette shows the same list in a Window.
-  Enter on a just-this-once or while-open grant revokes it at once; on an
-  **Always** grant it asks first, with Cancel selected.
+- **Agent access** in the command palette shows the same list in a Window. A
+  click only selects a row. Enter on a just-this-once or while-open grant
+  revokes it at once; on an **Always** grant it asks first, with Cancel
+  selected.
 - In a Window with a command palette, **Revoke all access** and its shortcut,
   `Ctrl+Shift+R`, now show the exact counts from a dry run first, with Cancel
   selected, and count again before acting.
