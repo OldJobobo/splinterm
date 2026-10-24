@@ -35,6 +35,7 @@ persist-on-tab-organization=yes
 tab-strip-border=yes
 close-unused=no
 divider-style=line
+pane-gap=0
 frame-title=splint
 
 [cursor]
@@ -77,6 +78,7 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `multiplexer.new-splint-directory` | where a split inside a Dojo starts; same values | `inherit` |
 | `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used | `no` |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` | `line` |
+| `multiplexer.pane-gap` | empty logical px between neighbouring Splints: outside each frame with `frame`, around the centred line with `line`, plain spacing with `none`; never at the Window's edges; configuration reload applies it | 0–64; `0` |
 | `multiplexer.frame-title` | `splint` or `none` | `splint` |
 | `explorer.agent-status` | show reported agent status in the Explorer and on Dojo tabs (`no` hides it) | `yes` |
 | `key-bindings.profile` | `splinterm` or `omarchy-tmux` | `splinterm` |

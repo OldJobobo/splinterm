@@ -497,6 +497,8 @@ pub struct WindowOptions {
     /// Omarchy text size, otherwise 14 px ([`crate::config::resolve_ui_font_size`]).
     pub ui_font_size: Option<FontSize>,
     pub pane_divider_style: PaneDividerStyle,
+    /// `[multiplexer] pane-gap`: logical px between adjacent panes.
+    pub pane_gap: u32,
     pub frame_title_mode: FrameTitleMode,
     /// Fully validated client-local keymap for this Window.
     pub keymap: ResolvedKeymap,
@@ -585,6 +587,7 @@ impl Default for WindowOptions {
             theme: ResolvedTheme::default(),
             ui_font_size: None,
             pane_divider_style: PaneDividerStyle::Line,
+            pane_gap: 0,
             frame_title_mode: FrameTitleMode::Splint,
             keymap: ResolvedKeymap::default(),
             prefix_timeout_ms: 1_000,

@@ -37,6 +37,8 @@ pub const APP_ID: &str = "com.oldjobobo.splinterm";
 pub const TRUSTED_DIALOG_APP_ID: &str = splinterd::dialog_shortcut::TRUSTED_DIALOG_APP_ID;
 pub const DEFAULT_FONT: &str = "monospace:style=Regular";
 pub const STARTUP_FONT_FALLBACK: &str = "JetBrains Mono Nerd Font:style=Regular";
+/// The largest `[multiplexer] pane-gap`, in logical px.
+pub const MAX_PANE_GAP: u32 = 64;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FontAuthority {
@@ -89,6 +91,10 @@ pub struct AppConfig {
     /// Filesystem checks happen in the save worker, not during configuration parsing.
     pub clipboard_image_directory: Option<PathBuf>,
     pub pane_divider_style: PaneDividerStyle,
+    /// `[multiplexer] pane-gap`: empty logical px between adjacent Splint
+    /// panes' outer edges, outside any frame or around a divider line. Zero
+    /// is the classic tiled layout; the Window's outer edges never get a gap.
+    pub pane_gap: u32,
     pub frame_title_mode: FrameTitleMode,
     pub multiplexer_lifetime: MultiplexerLifetimeConfig,
     /// Where a new Dojo or Lair created inside a Window starts
@@ -231,6 +237,7 @@ impl Default for AppConfig {
             theme_path: None,
             clipboard_image_directory: None,
             pane_divider_style: PaneDividerStyle::Line,
+            pane_gap: 0,
             frame_title_mode: FrameTitleMode::Splint,
             multiplexer_lifetime: MultiplexerLifetimeConfig::default(),
             new_dojo_directory: LaunchDirectory::Home,
@@ -1233,6 +1240,10 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                         index + 1
                     ),
                 };
+                false
+            }
+            "multiplexer.pane-gap" => {
+                config.pane_gap = parse_range(value, 0, MAX_PANE_GAP, index)?;
                 false
             }
             "explorer.agent-status" => {
@@ -2557,6 +2568,27 @@ mod tests {
         }
         assert!(parse("[multiplexer]\ndivider-style=tmux\n").is_err());
         assert!(parse("[multiplexer]\nframe-title=osc\n").is_err());
+    }
+
+    #[test]
+    fn pane_gap_is_bounded_logical_pixels_defaulting_to_none() {
+        assert_eq!(parse("").unwrap().config.pane_gap, 0);
+        assert_eq!(AppConfig::default().pane_gap, 0);
+        for (value, expected) in [("0", 0), ("8", 8), (" 12 ", 12), ("64", MAX_PANE_GAP)] {
+            let loaded = parse(&format!("[multiplexer]\npane-gap={value}\n")).unwrap();
+            assert_eq!(loaded.config.pane_gap, expected, "{value:?}");
+            assert!(loaded.diagnostics.is_empty(), "{value:?}");
+        }
+        for value in ["65", "-1", "4.5", "nan", "NaN", "inf", "", "eight", "1e1"] {
+            assert!(
+                parse(&format!("[multiplexer]\npane-gap={value}\n")).is_err(),
+                "{value:?}"
+            );
+        }
+        // The key belongs to [multiplexer]; elsewhere it is an unknown key.
+        let misplaced = parse("[main]\npane-gap=8\n").unwrap();
+        assert_eq!(misplaced.config.pane_gap, 0);
+        assert!(!misplaced.diagnostics.is_empty());
     }
 
     #[test]

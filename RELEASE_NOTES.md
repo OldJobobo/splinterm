@@ -400,6 +400,11 @@ a hostile program running as your account.
 - Copy mode gains `w`/`b`/`e` word motions and `0`/`$`.
 - The Explorer docks beside a half-width terminal instead of covering it, and
   tabs, the Explorer, menus, and dialogs stay readable at maximum zoom.
+- `multiplexer.pane-gap` (0–64 logical px, default 0) leaves empty space
+  between neighbouring Splints: between whole frames with
+  `divider-style=frame`, around the centred line with `line`. The Window
+  background, glassy or not, shows through it. **Reload configuration**
+  applies it.
 
 ## Omarchy 4
 
