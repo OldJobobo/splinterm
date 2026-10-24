@@ -73,7 +73,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
-    globals::registry_queue_init,
+    globals::{GlobalList, registry_queue_init},
     protocol::{
         wl_data_device, wl_data_device_manager::DndAction, wl_data_source, wl_keyboard, wl_output,
         wl_pointer, wl_seat, wl_shm, wl_surface,
@@ -188,6 +188,7 @@ mod file_drop;
 mod handoff;
 mod input;
 mod selection;
+mod staged;
 mod tabs;
 mod terminal_state;
 #[cfg(test)]
@@ -230,6 +231,8 @@ use selection::{
     copy_mode_enter, copy_mode_is_valid, move_copy_cursor, selection_display_bounds,
     selection_endpoint, selection_is_retained, selection_text, transient_overlay_rows, url_at,
 };
+pub use staged::{PhaseEnd, WindowSurface, run_window_on};
+use staged::{key_repeat_reaches_phase, phase_end_parks};
 #[cfg(test)]
 use tabs::DEFAULT_TAB_STRIP_LOGICAL_HEIGHT;
 use tabs::{
@@ -750,11 +753,21 @@ pub fn check_window_options(mut options: WindowOptions) -> Result<(u32, u32)> {
 ///
 /// Returns an error when font setup, required Wayland globals, shared-memory buffers,
 /// keyboard state, capture output, or event dispatch cannot be initialized.
-#[allow(
-    clippy::too_many_lines,
-    reason = "Wayland global binding and application state initialization form one startup transaction"
-)]
 pub fn run(mut options: WindowOptions) -> Result<()> {
+    anyhow::ensure!(
+        !options.keep_surface,
+        "a Window that keeps its surface runs through run_window_on"
+    );
+    note_window_diagnostics(&options);
+    let prepared = prepare_window(&mut options)?;
+    let mut session = WaylandSession::open()?;
+    let mut app = session.new_app(options, prepared)?;
+    let event_loop_result = session.run_phase(&mut app);
+    session.finish(Some(app), event_loop_result)
+}
+
+/// Starts the Window's diagnostic record for a phase's Dojo and Splint.
+fn note_window_diagnostics(options: &WindowOptions) {
     if let Some(diagnostics) = diagnostics() {
         let dojo_id = options
             .initial_dojo
@@ -765,86 +778,263 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             .or_else(|| options.snapshot.as_ref().map(|snapshot| snapshot.splint_id));
         diagnostics.ensure_window(dojo_id, splint_id);
     }
+}
+
+/// The compositor connection and event loop a Window runs on. A staged Window
+/// ([`run_window_on`]) keeps one across its phases.
+struct WaylandSession {
+    connection: Connection,
+    globals: GlobalList,
+    queue_handle: QueueHandle<App>,
+    event_loop: EventLoop<'static, App>,
+    update_waker: Waker,
+}
+
+impl WaylandSession {
+    fn open() -> Result<Self> {
+        let connection = Connection::connect_to_env().context("connect to Wayland compositor")?;
+        let (globals, event_queue) =
+            registry_queue_init(&connection).context("read Wayland registry")?;
+        let queue_handle = event_queue.handle();
+        let event_loop: EventLoop<App> = EventLoop::try_new().context("create event loop")?;
+        WaylandSource::new(connection.clone(), event_queue)
+            .insert(event_loop.handle())
+            .context("register Wayland source")?;
+        let (update_ping, update_ping_source) = make_ping().context("create update wake source")?;
+        event_loop
+            .handle()
+            .insert_source(update_ping_source, |(), (), _| {})
+            .context("register update wake source")?;
+        let update_waker = Waker::from(Arc::new(UpdateWake(update_ping)));
+        Ok(Self {
+            connection,
+            globals,
+            queue_handle,
+            event_loop,
+            update_waker,
+        })
+    }
+
+    /// Binds the globals and creates the xdg toplevel a new Window draws on.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Wayland global binding and surface creation form one startup transaction"
+    )]
+    fn new_platform_and_surface(
+        &self,
+        options: &mut WindowOptions,
+        prepared: &PreparedWindow,
+    ) -> Result<(PlatformState, SurfaceState)> {
+        let globals = &self.globals;
+        let queue_handle = &self.queue_handle;
+        let (initial_width, initial_height) = (prepared.initial_width, prepared.initial_height);
+        let fixed_size = prepared.fixed_size;
+        let compositor = CompositorState::bind(globals, queue_handle)
+            .context("compositor does not provide wl_compositor")?;
+        let shell = XdgShell::bind(globals, queue_handle)
+            .context("compositor does not provide xdg-shell")?;
+        let shm = Shm::bind(globals, queue_handle).context("compositor does not provide wl_shm")?;
+        let data_device_manager = DataDeviceManagerState::bind(globals, queue_handle)
+            .context("compositor does not provide wl_data_device_manager")?;
+        let primary_selection_manager =
+            PrimarySelectionManagerState::bind(globals, queue_handle).ok();
+        let fractional_scale_manager = globals
+            .bind::<WpFractionalScaleManagerV1, _, _>(queue_handle, 1..=1, ())
+            .ok();
+        let viewporter = globals
+            .bind::<WpViewporter, _, _>(queue_handle, 1..=1, ())
+            .ok();
+        // Without the manager no text input is ever created, so nothing is composed.
+        let text_input_manager = options
+            .input_method
+            .then(|| bind_text_input_manager(globals, queue_handle))
+            .flatten();
+        let surface = compositor.create_surface(queue_handle);
+        let window = shell.create_window(surface, WindowDecorations::RequestServer, queue_handle);
+        let fractional_scale = fractional_scale_manager
+            .as_ref()
+            .zip(viewporter.as_ref())
+            .map(|(manager, _)| {
+                manager.get_fractional_scale(window.wl_surface(), queue_handle, ())
+            });
+        let viewport = fractional_scale_manager
+            .as_ref()
+            .zip(viewporter.as_ref())
+            .map(|(_, manager)| manager.get_viewport(window.wl_surface(), queue_handle, ()));
+        if let Some(viewport) = &viewport {
+            let (width, height) = viewport_destination(initial_width, initial_height)?;
+            viewport.set_destination(width, height);
+        }
+        window.set_title(initial_window_title(options));
+        window.set_app_id(
+            window_app_id(options.trusted_consent.is_some(), &options.app_id).to_owned(),
+        );
+        if fixed_size.is_some() {
+            window.set_min_size(fixed_size);
+            window.set_max_size(fixed_size);
+        }
+        window
+            .set_buffer_scale(1)
+            .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
+        window.commit();
+
+        let pool_size = bounded_window_backing_len(initial_width, initial_height)?;
+        let pool = SlotPool::new(pool_size, &shm).context("create SHM pool")?;
+        let background_effect_manager = globals
+            .bind::<ExtBackgroundEffectManagerV1, _, _>(queue_handle, 1..=1, ())
+            .ok();
+        let mut background_effect_state = BackgroundEffectState::default();
+        background_effect_state.set_manager_available(background_effect_manager.is_some());
+        background_effect_state.set_requested_blur(options.theme.background_blur);
+        background_effect_state.set_background_alpha(options.theme.background_alpha);
+        let background_effect_trace =
+            std::env::var_os("SPLINTERM_BACKGROUND_EFFECT_TRACE").is_some();
+        if background_effect_trace {
+            if let Some(manager) = &background_effect_manager {
+                eprintln!(
+                    "splinterm background-effect manager version={} bound",
+                    manager.version()
+                );
+            } else {
+                eprintln!("splinterm background-effect manager unavailable");
+            }
+        }
+        let platform = PlatformState {
+            registry_state: RegistryState::new(globals),
+            compositor,
+            seat_state: SeatState::new(globals, queue_handle),
+            output_state: OutputState::new(globals, queue_handle),
+            data_device_manager,
+            primary_selection_manager,
+            text_input_manager,
+            shm,
+            loop_handle: self.event_loop.handle(),
+            update_waker: self.update_waker.clone(),
+            output_count: 0,
+            entered_outputs: Vec::new(),
+            seat_count: 0,
+        };
+        let surface = SurfaceState {
+            fractional_scale,
+            viewport,
+            background_effect_manager,
+            background_effect: None,
+            background_effect_state,
+            background_effect_deferred_commit: None,
+            background_effect_reconcile_schedule: BackgroundEffectReconcileSchedule::default(),
+            background_effect_capabilities_received: false,
+            background_effect_trace,
+            window,
+            pool,
+            buffers: Vec::new(),
+            backing: Vec::new(),
+            logical_width: initial_width,
+            logical_height: initial_height,
+            configured: false,
+            scale_120: SCALE_DENOMINATOR,
+            integer_fallback_scale: 1,
+            mapped_notify: options.mapped.take(),
+        };
+        Ok((platform, surface))
+    }
+
+    /// Builds a new Window: a new surface and the phase's content on it.
+    fn new_app(&self, mut options: WindowOptions, prepared: PreparedWindow) -> Result<App> {
+        let (platform, surface) = self.new_platform_and_surface(&mut options, &prepared)?;
+        assemble_app(platform, surface, options, prepared, &self.update_waker)
+    }
+
+    /// Runs the event loop until the phase's content asks to end.
+    fn run_phase(&mut self, app: &mut App) -> Result<()> {
+        let queue_handle = &self.queue_handle;
+        while !app.scheduling.exit {
+            app.apply_updates(queue_handle)?;
+            app.accessibility_turn(queue_handle);
+            if !app.scheduling.exit {
+                app.flush_pending_terminal_input();
+                app.retry_pending_pane_resizes()?;
+            }
+            app.draw_if_pending(queue_handle)?;
+            app.tick_signoff(queue_handle)?;
+            app.apply_clipboard_reads()?;
+            app.apply_clipboard_image_events();
+            app.tick_cursor_blink(queue_handle)?;
+            let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
+                break;
+            };
+            self.event_loop
+                .dispatch(dispatch_timeout, app)
+                .context("dispatch Wayland events")?;
+        }
+        Ok(())
+    }
+
+    /// Unmaps the Window, if any is left, and ends the compositor connection.
+    fn finish(self, app: Option<App>, event_loop_result: Result<()>) -> Result<()> {
+        let failure = app.and_then(|mut app| {
+            app.release_background_effect();
+            let failure = app.scheduling.failure.take();
+            drop(app);
+            failure
+        });
+        let Self {
+            connection,
+            event_loop,
+            ..
+        } = self;
+        drop(event_loop);
+        let teardown_result = connection
+            .roundtrip()
+            .context("complete Wayland surface teardown")
+            .map(|_| ());
+        if (event_loop_result.is_err() || teardown_result.is_err())
+            && let Some(diagnostics) = diagnostics()
+        {
+            diagnostics.request_exit(ExitClass::ErrorWaylandDispatch);
+        }
+        event_loop_result?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        teardown_result
+    }
+}
+
+/// Binds the text-input (IME) manager, when the compositor offers one.
+fn bind_text_input_manager(
+    globals: &GlobalList,
+    queue_handle: &QueueHandle<App>,
+) -> Option<ZwpTextInputManagerV3> {
+    globals
+        .bind::<ZwpTextInputManagerV3, _, _>(queue_handle, 1..=1, ())
+        .ok()
+}
+
+/// Builds a phase's content on `platform` and `surface`, new or kept.
+#[allow(
+    clippy::too_many_lines,
+    reason = "application state initialization forms one startup transaction"
+)]
+fn assemble_app(
+    platform: PlatformState,
+    surface: SurfaceState,
+    mut options: WindowOptions,
+    prepared: PreparedWindow,
+    update_waker: &Waker,
+) -> Result<App> {
     let managed_tabs = options.initial_dojo.is_some();
     let PreparedWindow {
         render_context,
         inactive_options,
         text_row,
         snapshot_frame,
-        initial_width,
-        initial_height,
         fixed_size,
-    } = prepare_window(&mut options)?;
-    let connection = Connection::connect_to_env().context("connect to Wayland compositor")?;
-    let (globals, event_queue) =
-        registry_queue_init(&connection).context("read Wayland registry")?;
-    let queue_handle = event_queue.handle();
-    let mut event_loop: EventLoop<App> = EventLoop::try_new().context("create event loop")?;
-    WaylandSource::new(connection.clone(), event_queue)
-        .insert(event_loop.handle())
-        .context("register Wayland source")?;
-    let (update_ping, update_ping_source) = make_ping().context("create update wake source")?;
-    event_loop
-        .handle()
-        .insert_source(update_ping_source, |(), (), _| {})
-        .context("register update wake source")?;
-    let update_waker = Waker::from(Arc::new(UpdateWake(update_ping)));
-
-    let compositor = CompositorState::bind(&globals, &queue_handle)
-        .context("compositor does not provide wl_compositor")?;
-    let shell =
-        XdgShell::bind(&globals, &queue_handle).context("compositor does not provide xdg-shell")?;
-    let shm = Shm::bind(&globals, &queue_handle).context("compositor does not provide wl_shm")?;
-    let data_device_manager = DataDeviceManagerState::bind(&globals, &queue_handle)
-        .context("compositor does not provide wl_data_device_manager")?;
-    let primary_selection_manager =
-        PrimarySelectionManagerState::bind(&globals, &queue_handle).ok();
-    let fractional_scale_manager = globals
-        .bind::<WpFractionalScaleManagerV1, _, _>(&queue_handle, 1..=1, ())
-        .ok();
-    let viewporter = globals
-        .bind::<WpViewporter, _, _>(&queue_handle, 1..=1, ())
-        .ok();
-    // Without the manager no text input is ever created, so nothing is composed.
-    let text_input_manager = options
-        .input_method
-        .then(|| {
-            globals
-                .bind::<ZwpTextInputManagerV3, _, _>(&queue_handle, 1..=1, ())
-                .ok()
-        })
-        .flatten();
+        ..
+    } = prepared;
     let (clipboard_tx, clipboard_rx) = std_mpsc::channel();
-    let surface = compositor.create_surface(&queue_handle);
-    let window = shell.create_window(surface, WindowDecorations::RequestServer, &queue_handle);
-    let fractional_scale = fractional_scale_manager
-        .as_ref()
-        .zip(viewporter.as_ref())
-        .map(|(manager, _)| manager.get_fractional_scale(window.wl_surface(), &queue_handle, ()));
-    let viewport = fractional_scale_manager
-        .as_ref()
-        .zip(viewporter.as_ref())
-        .map(|(_, manager)| manager.get_viewport(window.wl_surface(), &queue_handle, ()));
-    if let Some(viewport) = &viewport {
-        let (width, height) = viewport_destination(initial_width, initial_height)?;
-        viewport.set_destination(width, height);
-    }
     let controller_active = options.controlled && options.commands.is_some();
-    window.set_title(initial_window_title(&options));
     let trusted_consent = options.trusted_consent;
     let session_picker = options.session_picker;
-    window.set_app_id(window_app_id(trusted_consent.is_some(), &options.app_id).to_owned());
-    if fixed_size.is_some() {
-        window.set_min_size(fixed_size);
-        window.set_max_size(fixed_size);
-    }
-    window
-        .set_buffer_scale(1)
-        .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
-    window.commit();
-
-    let pool_size = bounded_window_backing_len(initial_width, initial_height)?;
-    let pool = SlotPool::new(pool_size, &shm).context("create SHM pool")?;
     let signoff = SignoffProbe::from_environment(options.authority.development_bypass)?;
     let graphical_input_probe =
         GraphicalInputProbe::from_environment(options.authority.development_bypass)?;
@@ -873,61 +1063,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     }
     let initial_lair_id = initial_identity.lair_id;
     let initial_dojo_id = initial_identity.dojo_id;
-    let background_effect_manager = globals
-        .bind::<ExtBackgroundEffectManagerV1, _, _>(&queue_handle, 1..=1, ())
-        .ok();
-    let mut background_effect_state = BackgroundEffectState::default();
-    background_effect_state.set_manager_available(background_effect_manager.is_some());
-    background_effect_state.set_requested_blur(options.theme.background_blur);
-    background_effect_state.set_background_alpha(options.theme.background_alpha);
-    let background_effect_trace = std::env::var_os("SPLINTERM_BACKGROUND_EFFECT_TRACE").is_some();
-    if background_effect_trace {
-        if let Some(manager) = &background_effect_manager {
-            eprintln!(
-                "splinterm background-effect manager version={} bound",
-                manager.version()
-            );
-        } else {
-            eprintln!("splinterm background-effect manager unavailable");
-        }
-    }
     let mut app = App {
-        platform: PlatformState {
-            registry_state: RegistryState::new(&globals),
-            compositor,
-            seat_state: SeatState::new(&globals, &queue_handle),
-            output_state: OutputState::new(&globals, &queue_handle),
-            data_device_manager,
-            primary_selection_manager,
-            text_input_manager,
-            shm,
-            loop_handle: event_loop.handle(),
-            update_waker: update_waker.clone(),
-            output_count: 0,
-            entered_outputs: Vec::new(),
-            seat_count: 0,
-        },
-        surface: SurfaceState {
-            fractional_scale,
-            viewport,
-            background_effect_manager,
-            background_effect: None,
-            background_effect_state,
-            background_effect_deferred_commit: None,
-            background_effect_reconcile_schedule: BackgroundEffectReconcileSchedule::default(),
-            background_effect_capabilities_received: false,
-            background_effect_trace,
-            window,
-            pool,
-            buffers: Vec::new(),
-            backing: Vec::new(),
-            logical_width: initial_width,
-            logical_height: initial_height,
-            configured: false,
-            scale_120: SCALE_DENOMINATOR,
-            integer_fallback_scale: 1,
-            mapped_notify: options.mapped.take(),
-        },
+        platform,
+        surface,
         presentation: PresentationState {
             render_context,
             text_row,
@@ -991,6 +1129,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             scrollback_wheel: WheelAccumulator::default(),
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
+            pressed_keys: HashSet::new(),
+            carried_keys: HashSet::new(),
         },
         clipboard: ClipboardState {
             data_device: None,
@@ -1054,7 +1194,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         explorer: LairExplorerUi::default(),
         accessibility: navigation_accessibility::WindowAccessibility::new(update_waker.clone()),
         access: agent_access::WindowAccess::default(),
-        handoff: HandoffFrontend::new(options.handoff_status.take(), &update_waker),
+        handoff: HandoffFrontend::new(options.handoff_status.take(), update_waker),
         tab_state: TabsState {
             tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
             active_identity: initial_identity,
@@ -1126,63 +1266,14 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             terminal_redraw_pending: false,
             next_commit_sequence: 0,
             pending_frame_trace: None,
+            keep_surface: options.keep_surface,
+            parked: None,
         },
     };
     app.explorer
         .set_agent_status_enabled(options.agent_status_presentation);
     app.explorer.set_agent_glyphs(app.tab_state.agent.glyphs());
-
-    let event_loop_result: Result<()> = (|| {
-        while !app.scheduling.exit {
-            app.apply_updates(&queue_handle)?;
-            app.accessibility_turn(&queue_handle);
-            if !app.scheduling.exit {
-                app.flush_pending_terminal_input();
-                app.retry_pending_pane_resizes()?;
-            }
-            if app.scheduling.redraw_pending
-                && !pending_draw_waits_for_frame(
-                    app.scheduling.frame_pending,
-                    app.scheduling.terminal_redraw_pending,
-                )
-            {
-                if app.scheduling.terminal_redraw_pending {
-                    app.schedule_terminal_draw(&queue_handle)?;
-                } else {
-                    app.schedule_draw(&queue_handle)?;
-                }
-            }
-            app.tick_signoff(&queue_handle)?;
-            app.apply_clipboard_reads()?;
-            app.apply_clipboard_image_events();
-            app.tick_cursor_blink(&queue_handle)?;
-            let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
-                break;
-            };
-            event_loop
-                .dispatch(dispatch_timeout, &mut app)
-                .context("dispatch Wayland events")?;
-        }
-        Ok(())
-    })();
-    app.release_background_effect();
-    let failure = app.scheduling.failure.take();
-    drop(app);
-    drop(event_loop);
-    let teardown_result = connection
-        .roundtrip()
-        .context("complete Wayland surface teardown")
-        .map(|_| ());
-    if (event_loop_result.is_err() || teardown_result.is_err())
-        && let Some(diagnostics) = diagnostics()
-    {
-        diagnostics.request_exit(ExitClass::ErrorWaylandDispatch);
-    }
-    event_loop_result?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    teardown_result
+    Ok(app)
 }
 
 fn apply_theme(snapshot: &mut TerminalSnapshot, theme: ResolvedTheme) {
@@ -2168,6 +2259,12 @@ struct InputState {
     scrollback_wheel: WheelAccumulator,
     cursor_blink_visible: bool,
     last_cursor_blink: Instant,
+    /// Keys held down now, by raw code, so a staged Window can carry them
+    /// into its next phase.
+    pressed_keys: HashSet<u32>,
+    /// Keys held across a phase switch or pressed while parked: their
+    /// repeats are ignored until they are released.
+    carried_keys: HashSet<u32>,
 }
 
 struct ClipboardState {
@@ -2294,6 +2391,11 @@ struct SchedulingState {
     terminal_redraw_pending: bool,
     next_commit_sequence: u64,
     pending_frame_trace: Option<PendingFrameTrace>,
+    /// Whether a session-picker decision or the status Splint's exit parks
+    /// the Window for its next phase instead of closing it.
+    keep_surface: bool,
+    /// The exit that parked a staged Window; its input is discarded.
+    parked: Option<ExitClass>,
 }
 
 struct App {
@@ -2378,6 +2480,12 @@ impl ModalState {
 
 impl SchedulingState {
     fn request_exit(&mut self, exit_class: ExitClass) {
+        if self.keep_surface && phase_end_parks(exit_class) {
+            // The Window lives on into its next phase, which records its own exit.
+            self.parked = Some(exit_class);
+            self.exit = true;
+            return;
+        }
         if let Some(diagnostics) = diagnostics() {
             diagnostics.request_exit(exit_class);
         }
@@ -10753,6 +10861,23 @@ impl App {
                         .any(pane_command_retry_pending)
                 })
             })
+    }
+
+    /// Draws a pending redraw unless it must wait for a frame callback.
+    fn draw_if_pending(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
+        if self.scheduling.redraw_pending
+            && !pending_draw_waits_for_frame(
+                self.scheduling.frame_pending,
+                self.scheduling.terminal_redraw_pending,
+            )
+        {
+            if self.scheduling.terminal_redraw_pending {
+                self.schedule_terminal_draw(queue_handle)?;
+            } else {
+                self.schedule_draw(queue_handle)?;
+            }
+        }
+        Ok(())
     }
 
     fn event_loop_dispatch_timeout(&self) -> Option<Duration> {

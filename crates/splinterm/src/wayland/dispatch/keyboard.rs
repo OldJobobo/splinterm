@@ -5,10 +5,11 @@ use super::super::{
     KeymapPress, Keysym, Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle,
     RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
     WindowTopologyCommand, close_other_tabs_command, command_palette_shortcut_action,
-    consume_detached_enter_press, font_zoom_action, keymap_press_consumes_key, keymap_press_for,
-    lair_lifecycle_command, pane_focus_action, pane_topology_action,
-    session_picker_shortcut_action, shortcut_action_for, shortcut_paused_during_handoff,
-    tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
+    consume_detached_enter_press, font_zoom_action, key_repeat_reaches_phase,
+    keymap_press_consumes_key, keymap_press_for, lair_lifecycle_command, pane_focus_action,
+    pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
+    shortcut_paused_during_handoff, tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard,
+    wl_surface,
 };
 
 impl KeyboardHandler for App {
@@ -75,6 +76,12 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
+        self.input.pressed_keys.insert(event.raw_code);
+        if self.scheduling.parked.is_some() {
+            // A parked Window takes no input: its phase has ended.
+            self.input.carried_keys.insert(event.raw_code);
+            return;
+        }
         if self.modal.input_modal_open() {
             self.input.prefix_state.clear();
         }
@@ -573,6 +580,10 @@ impl KeyboardHandler for App {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ordered modal, shortcut, and terminal repeat dispatch share one keyboard event boundary"
+    )]
     fn repeat_key(
         &mut self,
         _connection: &Connection,
@@ -581,6 +592,13 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
+        if !key_repeat_reaches_phase(
+            self.scheduling.parked.is_some(),
+            &self.input.carried_keys,
+            event.raw_code,
+        ) {
+            return;
+        }
         if self.modal.copy_mode.is_some() {
             if let Err(error) = self.handle_copy_mode_key(&event, queue_handle, serial) {
                 self.scheduling.fail(error);
@@ -692,6 +710,8 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
+        self.input.pressed_keys.remove(&event.raw_code);
+        self.input.carried_keys.remove(&event.raw_code);
         self.modal
             .session_picker_consumed_keys
             .remove(&event.raw_code);
