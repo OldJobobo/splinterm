@@ -11658,8 +11658,12 @@ impl App {
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
+        // The agent spinner moves only for a working row this draw shows.
+        self.tab_state.agent.explorer_working = false;
         if let Some(layout) = explorer_layout.as_ref() {
             let rows = self.explorer.rows();
+            self.tab_state.agent.explorer_working =
+                crate::renderer::lair_explorer_shows_working(layout, &rows);
             let status_message = self.explorer.status_message();
             paint_lair_explorer(
                 &mut self.presentation.explorer_text_cache,

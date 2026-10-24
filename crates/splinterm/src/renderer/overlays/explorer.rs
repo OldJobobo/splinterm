@@ -83,9 +83,10 @@ const fn explorer_hint_text(focused: bool) -> &'static str {
     }
 }
 
-/// The footer's context line: a navigation notice while rows are listed
-/// (with none, it takes the list's place), else the search field while a
-/// search is open or a query remains, else the input hint.
+/// The footer's context line: the search field while a search is open, so
+/// typing is never blind; else a navigation notice that the list does not
+/// show; else a query left behind after leaving the search; else the input
+/// hint.
 fn explorer_context_text(
     focused: bool,
     searching: bool,
@@ -93,10 +94,10 @@ fn explorer_context_text(
     notice: Option<&str>,
     maximum_cells: usize,
 ) -> String {
-    if let Some(notice) = notice {
-        notice.to_owned()
-    } else if focused && searching {
+    if focused && searching {
         editable_text("Search: ", query, maximum_cells)
+    } else if let Some(notice) = notice {
+        notice.to_owned()
     } else if !query.is_empty() {
         format!("Search: {query}")
     } else {
@@ -357,6 +358,19 @@ pub(crate) fn lair_explorer_hit_test(
             && position.1 < bottom)
             .then_some(row.id)
     })
+}
+
+/// Whether a row in view shows a fresh working status, whose spinner moves.
+/// Rows scrolled out of view do not count.
+#[must_use]
+pub(crate) fn lair_explorer_shows_working(
+    layout: &LairExplorerLayout,
+    rows: &[LairExplorerRow],
+) -> bool {
+    rows.iter()
+        .skip(layout.visible_start)
+        .take(layout.rows.len())
+        .any(|row| row.agent_working)
 }
 
 /// The logical width from a row's left edge that toggles its disclosure: the
@@ -857,9 +871,9 @@ pub(crate) fn paint_lair_explorer(
     let footer = buffer_rect(layout.footer, scale_120);
     let lines = footer_lines(footer, scale_120, inset);
     let line_cells = |line: &Rect| usize::try_from(line.width / cell_width).unwrap_or(0);
-    // With no rows the notice takes the list's place; otherwise the footer's
-    // context line carries it.
-    let notice = if layout.rows.is_empty() {
+    // With no rows the notice takes the list's place; with rows, or with no
+    // room for even one row, the footer's context line carries it.
+    let notice = if rows.is_empty() && layout.visible_capacity > 0 {
         if let Some(message) = status_message {
             let list = Rect {
                 x: panel.x.saturating_add(inset),
@@ -1387,11 +1401,26 @@ mod tests {
             explorer_context_text(true, false, "", None, 40),
             "↑↓ move · F filter · Esc terminal"
         );
-        // A navigation notice takes the line while rows are listed.
-        assert_eq!(
-            explorer_context_text(true, true, "abc", Some("Refreshing navigation…"), 40),
-            "Refreshing navigation…"
-        );
+        // A navigation notice takes the line while rows are listed, but never
+        // hides an open search: the field stays where the typing goes.
+        for notice in [
+            "Refreshing navigation…",
+            "Navigation is stale · R retry",
+            "Navigation unavailable · R retry",
+        ] {
+            assert_eq!(
+                explorer_context_text(true, true, "abc", Some(notice), 40),
+                "Search: abc_"
+            );
+            assert_eq!(
+                explorer_context_text(true, false, "", Some(notice), 40),
+                notice
+            );
+            assert_eq!(
+                explorer_context_text(true, false, "abc", Some(notice), 40),
+                notice
+            );
+        }
         assert_eq!(HEADER_TEXT, "LAIRS");
     }
 
@@ -2153,6 +2182,119 @@ mod tests {
                 in_lines[line] += 1;
             }
             assert!(in_lines[0] > 0, "scale {scale}");
+        }
+    }
+
+    /// The spinner moves only for a working row in view: one scrolled out
+    /// of the list, or a list with no room, does not count.
+    #[test]
+    fn only_working_rows_in_view_keep_the_spinner_moving() {
+        let mut rows = (0..30)
+            .map(|_| row(NavigationNodeId::Lair(LairId::new())))
+            .collect::<Vec<_>>();
+        rows[29].agent_working = true;
+        let content = |height| Rect {
+            x: 0,
+            y: 0,
+            width: 700,
+            height,
+        };
+        let top = lair_explorer_layout(content(400), 640, &rows, Some(rows[0].id), 0).unwrap();
+        assert_eq!(top.visible_start, 0);
+        assert!(!lair_explorer_shows_working(&top, &rows));
+        let bottom = lair_explorer_layout(content(400), 640, &rows, Some(rows[29].id), 0).unwrap();
+        assert!(lair_explorer_shows_working(&bottom, &rows));
+        let no_room = lair_explorer_layout(
+            content(HEADER_HEIGHT + FOOTER_HEIGHT),
+            640,
+            &rows,
+            Some(rows[29].id),
+            0,
+        )
+        .unwrap();
+        assert_eq!(no_room.visible_capacity, 0);
+        assert!(!lair_explorer_shows_working(&no_room, &rows));
+    }
+
+    /// A navigation notice is never lost: with no rows it takes the list's
+    /// place, and with no room for a row, whether or not rows exist, the
+    /// footer's context line carries it.
+    #[test]
+    fn notices_stay_visible_when_no_row_fits() {
+        use super::super::picker::session_picker_palette;
+        use crate::config::ResolvedTheme;
+
+        let context = RenderContext::new(u16::MAX);
+        let palette = session_picker_palette(ResolvedTheme::default());
+        let some = [row(NavigationNodeId::Lair(LairId::new()))];
+        for (rows, height) in [
+            (&[][..], HEADER_HEIGHT + FOOTER_HEIGHT),
+            (&some[..], HEADER_HEIGHT + FOOTER_HEIGHT),
+            (&[][..], HEADER_HEIGHT + FOOTER_HEIGHT + ROW_HEIGHT),
+        ] {
+            let surface = Rect {
+                x: 0,
+                y: 0,
+                width: 1000,
+                height,
+            };
+            let layout = lair_explorer_layout(surface, 640, rows, None, 0).unwrap();
+            let scale = 120;
+            let width = surface.width + 1;
+            let draw = |notice: Option<&str>| {
+                let mut canvas = vec![0; (width * (height + 1) * 4) as usize];
+                paint_lair_explorer(
+                    &mut SessionPickerTextCache::default(),
+                    &context,
+                    &mut canvas,
+                    width,
+                    height + 1,
+                    scale,
+                    1,
+                    &layout,
+                    palette,
+                    rows,
+                    None,
+                    "",
+                    notice,
+                    true,
+                    LairExplorerFilter::All,
+                    false,
+                )
+                .unwrap();
+                canvas
+            };
+            let noticed = draw(Some("Navigation is stale · R retry"));
+            let plain = draw(None);
+            let inset = LEVEL_INDENT.saturating_mul(scale).div_ceil(120);
+            let context_line =
+                footer_lines(buffer_rect(layout.footer, scale), scale, inset)[FOOTER_STATUS_LINES];
+            let list_top = layout.header.y + layout.header.height;
+            let (mut in_list, mut in_context) = (0, 0);
+            for (index, (a, b)) in noticed
+                .chunks_exact(4)
+                .zip(plain.chunks_exact(4))
+                .enumerate()
+            {
+                if a == b {
+                    continue;
+                }
+                let y = u32::try_from(index).unwrap() / width;
+                if (context_line.y..context_line.y + context_line.height).contains(&y) {
+                    in_context += 1;
+                } else {
+                    assert!((list_top..layout.footer.y).contains(&y), "notice at y {y}");
+                    in_list += 1;
+                }
+            }
+            let listed = rows.is_empty() && layout.visible_capacity > 0;
+            assert_eq!(
+                (in_list > 0, in_context > 0),
+                (listed, !listed),
+                "{} rows, capacity {}",
+                rows.len(),
+                layout.visible_capacity
+            );
         }
     }
 }

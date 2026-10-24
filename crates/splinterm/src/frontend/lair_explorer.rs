@@ -498,12 +498,6 @@ impl LairExplorerUi {
         changed
     }
 
-    /// Whether the visible Explorer has a row whose fresh working status
-    /// would show a moving spinner.
-    pub(crate) fn shows_working_status(&self) -> bool {
-        self.visible && self.rows().iter().any(|row| row.agent_working)
-    }
-
     pub(crate) fn set_search(&mut self, query: String) {
         self.query = BoundedTextEditor::new(query, 256, 64, false);
         self.begin_search();
@@ -2523,12 +2517,12 @@ pub(super) mod tests {
             Some(agent(AgentState::Working, false)),
             Some(agent(AgentState::Done, false)),
         ]));
+        let moving =
+            |explorer: &LairExplorerUi| explorer.rows().iter().any(|row| row.agent_working);
         let rows = expanded_rows(&mut explorer);
-        // Hidden, nothing moves; visible, the working Splint and its parents,
-        // whose most urgent state it is, show the spinner.
-        assert!(!explorer.shows_working_status());
-        explorer.toggle_visibility();
-        assert!(explorer.shows_working_status());
+        // The working Splint and its parents, whose most urgent state it is,
+        // show the spinner.
+        assert!(moving(&explorer));
         let working = rows
             .iter()
             .map(|row| (row.label.as_str(), row.agent_working))
@@ -2561,13 +2555,12 @@ pub(super) mod tests {
         ]));
         let rows = expanded_rows(&mut explorer);
         assert!(rows.iter().all(|row| !row.agent_working));
-        assert!(!explorer.shows_working_status());
         assert_eq!(column(&rows[2]).as_deref(), Some("⠋ [clock]"));
         // While status is unavailable nothing moves either.
         explorer.set_view(agent_view([Some(agent(AgentState::Working, false)), None]));
         expanded_rows(&mut explorer);
-        assert!(explorer.shows_working_status());
+        assert!(moving(&explorer));
         explorer.mark_disconnected();
-        assert!(!explorer.shows_working_status());
+        assert!(!moving(&explorer));
     }
 }

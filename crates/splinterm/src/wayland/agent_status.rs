@@ -23,6 +23,11 @@ pub(super) struct TabAgentStatus {
     /// The working spinner's frame, shared with the Explorer.
     spinner: AgentSpinner,
     last_spinner_step: Instant,
+    /// Whether the spinner moved at the last event-loop pass.
+    animating: bool,
+    /// Whether the last drawn Explorer had a row in view with a fresh
+    /// working status; recorded by each draw, `false` while it is hidden.
+    pub(super) explorer_working: bool,
 }
 
 impl TabAgentStatus {
@@ -33,6 +38,8 @@ impl TabAgentStatus {
             glyphs: AgentGlyphs::select(chrome_icons_available()),
             spinner: AgentSpinner::STATIC,
             last_spinner_step: Instant::now(),
+            animating: false,
+            explorer_working: false,
         }
     }
 
@@ -108,44 +115,46 @@ impl App {
     }
 
     /// Whether the working spinner moves now: in a focused Window, without
-    /// reduced motion, while a drawn tab badge or the visible Explorer shows
-    /// a fresh working status.
+    /// reduced motion, while a drawn tab badge or a row in view in the last
+    /// drawn Explorer shows a fresh working status. Cheap: it reads what the
+    /// last draw recorded and never builds Explorer rows.
     fn agent_spinner_animates(&self) -> bool {
-        let tabs = || {
-            self.tab_state
-                .tab_strip_layout
-                .as_ref()
-                .is_some_and(|layout| {
-                    layout
-                        .tabs
-                        .iter()
-                        .any(|tab| self.tab_state.agent.shows_working(tab.dojo_id))
-                })
-        };
-        // Focus and reduced motion first, so an unfocused Window never builds
-        // Explorer rows to find out.
+        let agent = &self.tab_state.agent;
         AgentSpinner::animates(self.input.reduced_motion, self.input.keyboard_focused, true)
-            && (tabs() || self.explorer.shows_working_status())
+            && (agent.explorer_working
+                || self
+                    .tab_state
+                    .tab_strip_layout
+                    .as_ref()
+                    .is_some_and(|layout| {
+                        layout
+                            .tabs
+                            .iter()
+                            .any(|tab| agent.shows_working(tab.dojo_id))
+                    }))
     }
 
     /// How long the event loop may sleep before the spinner's next frame;
-    /// `None` while it rests.
+    /// `None` while it rests. Reuses the state the last tick decided.
     pub(super) fn agent_spinner_timeout(&self) -> Option<Duration> {
         AgentSpinner::remaining(
-            self.agent_spinner_animates(),
+            self.tab_state.agent.animating,
             self.tab_state.agent.last_spinner_step.elapsed(),
         )
     }
 
-    /// Steps the spinner when its frame is due, or returns it to its first
-    /// frame once it stops, and redraws the chrome that shows it. Runs beside
-    /// the cursor blink on the same event-loop wakeup.
+    /// Decides once per event-loop pass whether the spinner moves, steps it
+    /// when its frame is due or returns it to its first frame once it stops,
+    /// and redraws the chrome that shows it. Runs beside the cursor blink on
+    /// the same event-loop wakeup.
     pub(super) fn tick_agent_spinner(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
+        let animating = self.agent_spinner_animates();
+        self.tab_state.agent.animating = animating;
         let agent = &self.tab_state.agent;
-        let Some(next) = agent.spinner.tick(
-            self.agent_spinner_animates(),
-            agent.last_spinner_step.elapsed(),
-        ) else {
+        let Some(next) = agent
+            .spinner
+            .tick(animating, agent.last_spinner_step.elapsed())
+        else {
             return Ok(());
         };
         self.tab_state.agent.spinner = next;
