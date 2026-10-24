@@ -429,9 +429,12 @@ struct Participation {
     hub: HandoffStatusHub,
     snapshot: (u64, u64),
     layout: WindowLayout,
+    /// Held until the test's last assertion on the process-wide spawn gate.
+    _gate: tokio::sync::MutexGuard<'static, ()>,
 }
 
 async fn participate_with(script: Script) -> Participation {
+    let gate = child_spawn::TEST_GATE.lock().await;
     let (client, mut daemon) = stream_pair();
     let snapshot = sealed_snapshot();
     let identity = {
@@ -517,6 +520,7 @@ async fn participate_with(script: Script) -> Participation {
         hub,
         snapshot: identity,
         layout,
+        _gate: gate,
     }
 }
 
@@ -765,6 +769,7 @@ async fn a_final_refusal_ends_the_anchor_after_one_attempt() {
 /// stream mid-frame; the anchor is then never read again.
 #[tokio::test]
 async fn an_unanswered_acknowledgement_leaves_the_anchor_unusable() {
+    let _gate = child_spawn::TEST_GATE.lock().await;
     let (client, mut daemon) = stream_pair();
     let snapshot = sealed_snapshot();
     let prepare = prepare_for(&snapshot, GENERATION);

@@ -1480,6 +1480,20 @@ fn parse_fontconfig_sources(label: &'static str, stdout: &[u8]) -> Result<Vec<Re
         .collect()
 }
 
+/// Runs `fc-match` through the client's spawn gate. Unit tests skip the gate:
+/// they share one process with the continuation tests that pause it, so a
+/// font test would otherwise be refused at random.
+fn spawn_fontconfig<T>(start: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    #[cfg(not(test))]
+    {
+        crate::child_spawn::spawn(start)
+    }
+    #[cfg(test)]
+    {
+        start()
+    }
+}
+
 fn run_fontconfig_sources(
     label: &'static str,
     pattern: &str,
@@ -1490,7 +1504,7 @@ fn run_fontconfig_sources(
         command.arg("-s");
     }
     command.args(["-f", FONTCONFIG_FACE_FORMAT, pattern]);
-    let output = crate::child_spawn::spawn(|| command.output())
+    let output = spawn_fontconfig(|| command.output())
         .with_context(|| format!("run fc-match for {label}"))?;
     if !output.status.success() {
         bail!(
