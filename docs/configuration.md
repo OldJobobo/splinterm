@@ -165,10 +165,12 @@ applies exactly these settings: the `[key-bindings]` keymap (profile, overlay
 file, and `prefix-timeout-ms`), `clipboard.image-directory` (an in-flight save
 is cancelled), `main.ui-font-pixelsize` and `multiplexer.tab-strip-border`
 (chrome is drawn again at once),
-`explorer.agent-status`, `multiplexer.pane-gap`, `multiplexer.close-unused`,
+`explorer.agent-status`, `multiplexer.divider-style`, `multiplexer.frame-title`,
+`multiplexer.pane-gap`, `multiplexer.close-unused`,
 `multiplexer.persist-on-tab-organization`, `multiplexer.new-dojo-directory`,
-and `multiplexer.new-splint-directory`. A changed `multiplexer.pane-gap` lays
-the visible Splints out again at once and resizes each one's PTY; a gap they
+and `multiplexer.new-splint-directory`. A changed `multiplexer.divider-style`,
+`multiplexer.frame-title`, or `multiplexer.pane-gap` lays the Splints out again
+at once and resizes each one's PTY; a gap they
 cannot fit shrinks for that layout, as described above, rather than being
 refused. The other four multiplexer settings take effect at the Window's next
 close, tab organization, or Dojo, Lair, or Splint creation; one already under

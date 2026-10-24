@@ -386,7 +386,9 @@ a hostile program running as your account.
   `multiplexer.new-dojo-directory` and `multiplexer.new-splint-directory`
   (`inherit`, `home`, or a path).
 - **Reload configuration** now also applies these settings, plus
-  `multiplexer.persist-on-tab-organization` and `explorer.agent-status`.
+  `multiplexer.persist-on-tab-organization`, `explorer.agent-status`,
+  `multiplexer.divider-style` and `multiplexer.frame-title`; a changed divider
+  style re-lays the Splints out at once.
 - `Ctrl+Shift+1` to `Ctrl+Shift+9` select the first nine tabs by default, also
   on layouts where Shift+digit produces a symbol.
 - Inactive tab labels are muted, with automatic contrast adjustment for native
