@@ -1254,6 +1254,7 @@ fn assemble_app(
             session_picker_requested: false,
             session_picker_retry_command: None,
             deferred_picker_theme: None,
+            remote_profiles: None,
         },
         scheduling: SchedulingState {
             signoff,
@@ -2337,6 +2338,9 @@ struct ModalState {
     session_picker_requested: bool,
     session_picker_retry_command: Option<WindowTopologyCommand>,
     deferred_picker_theme: Option<ThemeUpdate>,
+    /// The profile names behind the command palette's remote pop-up, while it
+    /// is the open inline picker.
+    remote_profiles: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -6313,9 +6317,7 @@ impl App {
                 ));
                 Ok(())
             }
-            BuiltInCommandDispatch::OpenRemoteChooser => {
-                crate::remote_launch::open_remote_chooser()
-            }
+            BuiltInCommandDispatch::OpenRemoteChooser => self.show_remote_profiles(),
             BuiltInCommandDispatch::RecentSessions => (|| -> Result<()> {
                 self.show_embedded_session_picker(
                     session_picker_status_catalog("Loading navigation…"),
@@ -6767,12 +6769,50 @@ impl App {
             creation_target,
             initial_row,
         } = catalog;
+        anyhow::ensure!(items.len() == targets.len(), "Dojo picker targets differ");
+        self.install_inline_picker(
+            SessionPickerUi::inline(items, creation_enabled, creation_blocker, initial_row),
+            selector_kind,
+            targets,
+            creation_target,
+        )?;
+        self.surface
+            .window
+            .set_title(session_picker_title(selector_kind));
+        Ok(())
+    }
+
+    /// Shows the remote profiles as a pop-up over this Window. Choosing one
+    /// opens it in exactly one new Window, which connects and shows that
+    /// host's Dojos; this Window only closes the pop-up. Its status and Dojo
+    /// list are never shown here: they could need a second SSH
+    /// authentication and a masked field inside a live terminal.
+    fn show_remote_profiles(&mut self) -> Result<()> {
+        let catalog = crate::remote::RemoteCatalog::load_default();
+        let (names, items, blocker) = crate::remote_launch::chooser_contents(&catalog);
+        self.install_inline_picker(
+            SessionPickerUi::inline_remote_profiles(items, blocker),
+            None,
+            Vec::new(),
+            None,
+        )?;
+        self.modal.remote_profiles = Some(names);
+        self.surface.window.set_title("Splinterm — Remotes");
+        Ok(())
+    }
+
+    fn install_inline_picker(
+        &mut self,
+        picker: SessionPickerUi,
+        selector_kind: Option<SelectorKind>,
+        targets: Vec<SessionPickerTarget>,
+        creation_target: Option<SessionPickerCreationTarget>,
+    ) -> Result<()> {
         self.input.prefix_state.clear();
         anyhow::ensure!(
             self.modal.session_picker.is_none(),
             "Dojo picker is already open"
         );
-        anyhow::ensure!(items.len() == targets.len(), "Dojo picker targets differ");
         self.settle_terminal_presses_for_picker();
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         self.modal.session_picker_wheel = WheelAccumulator::default();
@@ -6784,12 +6824,8 @@ impl App {
             self.commit_text_input();
         }
         self.clear_ime_preedit();
-        self.modal.session_picker = Some(SessionPickerUi::inline(
-            items,
-            creation_enabled,
-            creation_blocker,
-            initial_row,
-        ));
+        self.modal.session_picker = Some(picker);
+        self.modal.remote_profiles = None;
         self.modal.selector_kind = selector_kind;
         self.modal.session_picker_targets = targets;
         self.modal.session_picker_creation_target = creation_target;
@@ -6800,9 +6836,6 @@ impl App {
         self.modal.session_picker_reconcile_pending = false;
         self.modal.session_picker_open_focus = Some(self.input.keyboard_focused);
         self.modal.session_picker_requested = false;
-        self.surface
-            .window
-            .set_title(session_picker_title(selector_kind));
         self.presentation.full_redraw = true;
         Ok(())
     }
@@ -6812,6 +6845,7 @@ impl App {
             return false;
         }
         self.modal.session_picker = None;
+        self.modal.remote_profiles = None;
         self.modal.selector_kind = None;
         self.modal.session_picker_targets.clear();
         self.modal.session_picker_creation_target = None;
@@ -8119,6 +8153,20 @@ impl App {
     }
 
     fn decide_session_picker(&mut self, decision: SessionPickerDecision) {
+        if self.modal.inline_picker_open()
+            && let Some(names) = self.modal.remote_profiles.take()
+        {
+            self.close_inline_session_picker();
+            let SessionPickerDecision::Open(index) = decision else {
+                return;
+            };
+            if let Err(error) = crate::remote_launch::chosen_profile(&names, index)
+                .and_then(|profile| crate::remote_launch::open_remote_window(&profile))
+            {
+                eprintln!("splinterm remote launch failed: {error:#}");
+            }
+            return;
+        }
         if self.modal.inline_picker_open() {
             let selector_kind = self.modal.selector_kind;
             let command = match decision {

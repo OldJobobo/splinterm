@@ -8,53 +8,21 @@ use splinterm::{
     config::AppConfig,
     diagnostics::{DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global},
     endpoint::ConnectionFactory,
-    remote::{RemoteCatalog, RemoteProfile},
+    remote::RemoteCatalog,
+    remote_launch::{chooser_contents, chosen_profile},
     session_picker::{SessionEntry, collect_sessions},
 };
 use splinterm_core::{Dojo, DojoId, Lair};
 use splinterm_protocol::{Request, Response};
 
 use super::{
-    remote_status::{RemoteConnected, StatusEnd, connect_with_status, destination},
+    remote_status::{RemoteConnected, StatusEnd, connect_with_status},
     session_catalog::{recent_dojo_ids, remember_dojo, select_dojo_from, session_picker_item},
     sessions::{launch_new_terminal_on, run_staged_picker},
     window::run_live_multipane_window_with_app_id,
 };
 
 const REMOTE_DOJOS_TITLE: &str = "Remote Dojos…";
-const PROFILES_BLOCKER: &str = "Add profiles in remotes.toml";
-const EMPTY_BLOCKER: &str = "No remote profiles · add one to remotes.toml";
-const INVALID_BLOCKER: &str = "remotes.toml is invalid · run `splinterm remote list`";
-
-/// A profile row. Rows without panes render without a running status.
-fn remote_profile_item(profile: &RemoteProfile) -> SessionPickerItem {
-    SessionPickerItem {
-        display_title: profile.name().to_owned(),
-        breadcrumb: destination(profile),
-        working_directory: String::new(),
-        pane_count: 0,
-        running_pane_count: 0,
-    }
-}
-
-/// The chooser's profile names, rows, and creation-row explanation.
-fn chooser_contents(
-    catalog: &Result<RemoteCatalog>,
-) -> (Vec<String>, Vec<SessionPickerItem>, &'static str) {
-    match catalog {
-        Err(_) => (Vec::new(), Vec::new(), INVALID_BLOCKER),
-        Ok(catalog) if catalog.is_empty() => (Vec::new(), Vec::new(), EMPTY_BLOCKER),
-        Ok(catalog) => (
-            catalog
-                .iter()
-                .map(|profile| profile.name().to_owned())
-                .collect(),
-            catalog.iter().map(remote_profile_item).collect(),
-            PROFILES_BLOCKER,
-        ),
-    }
-}
-
 /// The Recent Dojos row that opens the remote chooser. It is offered when
 /// profiles exist, and also when `remotes.toml` is invalid so the chooser can
 /// say so; an absent or empty catalog adds no row.
@@ -87,14 +55,6 @@ fn report_invalid_catalog(error: &anyhow::Error) {
         );
     }
     eprintln!("splinterm remote profiles are invalid: {error:#}");
-}
-
-/// The remote profile a chooser row names. A row outside the list is refused.
-fn chosen_profile(names: &[String], index: usize) -> Result<String> {
-    names
-        .get(index)
-        .cloned()
-        .context("remote chooser returned an invalid selection")
 }
 
 /// Runs the remote launcher: one Window lists the profiles, shows the chosen
@@ -678,14 +638,6 @@ mod tests {
         assert_eq!(remote_dojo_entries(&[lair], &[]).len(), 1);
     }
 
-    #[test]
-    fn a_chooser_row_outside_the_profile_list_is_refused() {
-        let names = ["straylight".to_owned(), "wintermute".to_owned()];
-        assert_eq!(chosen_profile(&names, 1).unwrap(), "wintermute");
-        assert!(chosen_profile(&names, 2).is_err());
-        assert!(chosen_profile(&[], 0).is_err());
-    }
-
     fn catalog(text: &str) -> Result<RemoteCatalog> {
         RemoteCatalog::parse(text, None)
     }
@@ -699,41 +651,6 @@ port = 2222
 [remotes.straylight]
 host = "straylight"
 "#;
-
-    #[test]
-    fn chooser_lists_profiles_in_stable_order_with_destinations() {
-        let (names, items, blocker) = chooser_contents(&catalog(TWO_PROFILES));
-        assert_eq!(names, ["straylight", "wintermute"]);
-        assert_eq!(items[0].display_title, "straylight");
-        assert_eq!(items[0].breadcrumb, "straylight");
-        assert_eq!(items[1].display_title, "wintermute");
-        assert_eq!(items[1].breadcrumb, "case@wintermute.example:2222");
-        assert!(items.iter().all(|item| item.pane_count == 0));
-        assert_eq!(blocker, PROFILES_BLOCKER);
-    }
-
-    #[test]
-    fn chooser_explains_missing_empty_and_invalid_profiles() {
-        // `load_default` maps an absent default file to an empty catalog.
-        let (names, items, blocker) = chooser_contents(&Ok(RemoteCatalog::default()));
-        assert!(names.is_empty() && items.is_empty());
-        assert_eq!(blocker, EMPTY_BLOCKER);
-
-        let (names, items, blocker) = chooser_contents(&catalog("version = 1\n"));
-        assert!(names.is_empty() && items.is_empty());
-        assert_eq!(blocker, EMPTY_BLOCKER);
-
-        for invalid in [
-            "not toml",
-            "version = 2\n",
-            "version = 1\n[remotes.bad]\nhost = \"\"\n",
-            "version = 1\n[remotes.bad]\nhost = \"x\"\nextra = 1\n",
-        ] {
-            let (names, items, blocker) = chooser_contents(&catalog(invalid));
-            assert!(names.is_empty() && items.is_empty(), "{invalid:?}");
-            assert_eq!(blocker, INVALID_BLOCKER, "{invalid:?}");
-        }
-    }
 
     #[test]
     fn recent_dojos_offers_a_remote_row_only_when_it_can_help() {

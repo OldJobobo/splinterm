@@ -13,6 +13,7 @@ use splinterm::{
         self as askpass, AskpassKind, AskpassReply, AskpassRequest, FieldOutcome, NativePrompt,
         Secret, apply_secret_input, confirm_key,
     },
+    remote_launch::destination,
     remote_session::RemoteFailureKind,
     remote_status::{
         RemoteFailureCategory, RemoteProfileError, RemoteStatus, RemoteStatusEffect,
@@ -82,17 +83,6 @@ impl std::fmt::Display for RemoteNotConnected {
 }
 
 impl std::error::Error for RemoteNotConnected {}
-
-/// Formats the OpenSSH destination a profile connects to.
-pub(in crate::app) fn destination(profile: &RemoteProfile) -> String {
-    let user = profile
-        .user()
-        .map_or_else(String::new, |user| format!("{user}@"));
-    let port = profile
-        .port()
-        .map_or_else(String::new, |port| format!(":{port}"));
-    format!("{user}{}{port}", profile.host())
-}
 
 /// The status screen's channel to its Window.
 struct StatusWindow {
