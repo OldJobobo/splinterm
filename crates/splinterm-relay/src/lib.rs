@@ -152,7 +152,7 @@ async fn connect_validated_for(
         .context("cannot open daemon socket peer executable")?;
     let expected_executable = File::open(expected_peer)
         .context("cannot open the expected adjacent splinterd executable")?;
-    if !runs_adjacent_daemon(peer_executable, &expected_executable, verified)? {
+    if !runs_adjacent_daemon(peer_executable, expected_executable, verified)? {
         bail!("daemon socket peer is not the exact adjacent splinterd executable");
     }
     if peer_exited(&peer_pidfd)? {
@@ -181,11 +181,12 @@ async fn connect_validated(
 /// The one sealed daemon copy this relay process has already compared with
 /// the adjacent `splinterd`.
 ///
-/// A graphical relay validates the daemon again for every channel. Holding
-/// the verified copy open keeps its inode alive, so its device and inode
-/// cannot name another file while remembered, and its seals keep its bytes
-/// fixed. Each entry also names the adjacent file it matched, so a package
-/// that replaces `splinterd` mid-session is compared again.
+/// A graphical relay validates the daemon again for every channel. The entry
+/// holds both compared files open, so neither inode can be freed and name
+/// another file while remembered. The copy's seals keep its bytes fixed; the
+/// adjacent file's length and change time are part of the match, so a
+/// package that replaces or rewrites `splinterd` mid-session is compared
+/// again.
 #[derive(Debug, Default)]
 struct VerifiedDaemonCopy {
     entry: Mutex<Option<VerifiedEntry>>,
@@ -193,15 +194,37 @@ struct VerifiedDaemonCopy {
 
 #[derive(Debug)]
 struct VerifiedEntry {
-    _held: File,
+    #[cfg_attr(not(test), allow(dead_code, reason = "held open to pin the inode"))]
+    held_copy: File,
+    #[cfg_attr(not(test), allow(dead_code, reason = "held open to pin the inode"))]
+    held_expected: File,
     copy: SocketIdentity,
-    expected: SocketIdentity,
+    expected: ExpectedIdentity,
+}
+
+/// The adjacent `splinterd` as compared: its inode, and the length and
+/// change time that any write to that inode updates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExpectedIdentity {
+    file: SocketIdentity,
+    length: u64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
 }
 
 fn file_identity(metadata: &std::fs::Metadata) -> SocketIdentity {
     SocketIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
+    }
+}
+
+fn expected_identity(metadata: &std::fs::Metadata) -> ExpectedIdentity {
+    ExpectedIdentity {
+        file: file_identity(metadata),
+        length: metadata.len(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
     }
 }
 
@@ -212,11 +235,7 @@ fn file_identity(metadata: &std::fs::Metadata) -> SocketIdentity {
 /// The copy proves what the same-file check proves: the peer executes the
 /// installed daemon's code. Any other image, including an unsealed or partly
 /// sealed copy, or the previous build after a package upgrade, is refused.
-fn runs_adjacent_daemon(
-    peer: File,
-    expected: &File,
-    verified: &VerifiedDaemonCopy,
-) -> Result<bool> {
+fn runs_adjacent_daemon(peer: File, expected: File, verified: &VerifiedDaemonCopy) -> Result<bool> {
     let peer_metadata = peer
         .metadata()
         .context("cannot inspect daemon socket peer executable")?;
@@ -227,8 +246,8 @@ fn runs_adjacent_daemon(
         return Ok(false);
     }
     let copy = file_identity(&peer_metadata);
-    let expected_identity = file_identity(&expected_metadata);
-    if copy == expected_identity {
+    let expected_identity = expected_identity(&expected_metadata);
+    if copy == expected_identity.file {
         return Ok(true);
     }
     let mut remembered = verified
@@ -249,11 +268,12 @@ fn runs_adjacent_daemon(
     if !seals.contains(IMMUTABLE_SEALS) || peer_metadata.len() != expected_metadata.len() {
         return Ok(false);
     }
-    if !same_bytes(&peer, expected, expected_metadata.len())? {
+    if !same_bytes(&peer, &expected, expected_metadata.len())? {
         return Ok(false);
     }
     *remembered = Some(VerifiedEntry {
-        _held: peer,
+        held_copy: peer,
+        held_expected: expected,
         copy,
         expected: expected_identity,
     });
@@ -1248,10 +1268,22 @@ mod tests {
         let (directory, expected) = installed_daemon("sealed", &bytes);
         let copy = memfd_copy(&bytes, IMMUTABLE_SEALS);
         let verified = VerifiedDaemonCopy::default();
-        assert!(runs_adjacent_daemon(reopened(&copy), &expected, &verified).unwrap());
-        assert!(verified.entry.lock().unwrap().is_some());
+        assert!(runs_adjacent_daemon(reopened(&copy), reopened(&expected), &verified).unwrap());
+        {
+            let entry = verified.entry.lock().unwrap();
+            let entry = entry.as_ref().unwrap();
+            // Both compared files stay open, so neither inode can be reused.
+            assert_eq!(
+                file_identity(&entry.held_copy.metadata().unwrap()),
+                file_identity(&copy.metadata().unwrap())
+            );
+            assert_eq!(
+                file_identity(&entry.held_expected.metadata().unwrap()),
+                file_identity(&expected.metadata().unwrap())
+            );
+        }
         // Remembered: accepted again without comparing, while held open.
-        assert!(runs_adjacent_daemon(reopened(&copy), &expected, &verified).unwrap());
+        assert!(runs_adjacent_daemon(reopened(&copy), reopened(&expected), &verified).unwrap());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1260,7 +1292,7 @@ mod tests {
         let (directory, expected) = installed_daemon("same", &daemon_bytes());
         let verified = VerifiedDaemonCopy::default();
         let peer = File::open(directory.join("splinterd")).unwrap();
-        assert!(runs_adjacent_daemon(peer, &expected, &verified).unwrap());
+        assert!(runs_adjacent_daemon(peer, expected, &verified).unwrap());
         assert!(verified.entry.lock().unwrap().is_none());
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1278,7 +1310,7 @@ mod tests {
             let copy = memfd_copy(&bytes, seals);
             let verified = VerifiedDaemonCopy::default();
             assert!(
-                !runs_adjacent_daemon(reopened(&copy), &expected, &verified).unwrap(),
+                !runs_adjacent_daemon(reopened(&copy), reopened(&expected), &verified).unwrap(),
                 "{seals:?}"
             );
             assert!(verified.entry.lock().unwrap().is_none());
@@ -1295,13 +1327,15 @@ mod tests {
         let last = changed.len() - 1;
         changed[last] ^= 1;
         let different = memfd_copy(&changed, IMMUTABLE_SEALS);
-        assert!(!runs_adjacent_daemon(reopened(&different), &expected, &verified).unwrap());
+        assert!(
+            !runs_adjacent_daemon(reopened(&different), reopened(&expected), &verified).unwrap()
+        );
         let shorter = memfd_copy(&bytes[..last], IMMUTABLE_SEALS);
-        assert!(!runs_adjacent_daemon(reopened(&shorter), &expected, &verified).unwrap());
+        assert!(!runs_adjacent_daemon(reopened(&shorter), reopened(&expected), &verified).unwrap());
         let mut longer = bytes.clone();
         longer.push(0);
         let longer = memfd_copy(&longer, IMMUTABLE_SEALS);
-        assert!(!runs_adjacent_daemon(reopened(&longer), &expected, &verified).unwrap());
+        assert!(!runs_adjacent_daemon(reopened(&longer), reopened(&expected), &verified).unwrap());
         assert!(verified.entry.lock().unwrap().is_none());
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1314,7 +1348,7 @@ mod tests {
         fs::write(&copy_path, &bytes).unwrap();
         let verified = VerifiedDaemonCopy::default();
         assert!(
-            !runs_adjacent_daemon(File::open(&copy_path).unwrap(), &expected, &verified).unwrap()
+            !runs_adjacent_daemon(File::open(&copy_path).unwrap(), expected, &verified).unwrap()
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1325,7 +1359,7 @@ mod tests {
         let (directory, expected) = installed_daemon("replaced", &bytes);
         let copy = memfd_copy(&bytes, IMMUTABLE_SEALS);
         let verified = VerifiedDaemonCopy::default();
-        assert!(runs_adjacent_daemon(reopened(&copy), &expected, &verified).unwrap());
+        assert!(runs_adjacent_daemon(reopened(&copy), expected, &verified).unwrap());
         // A package upgrade installs a different splinterd at a new inode.
         let mut upgraded = bytes.clone();
         upgraded[0] ^= 1;
@@ -1333,7 +1367,43 @@ mod tests {
         fs::write(&replacement, &upgraded).unwrap();
         fs::rename(&replacement, directory.join("splinterd")).unwrap();
         let upgraded_file = File::open(directory.join("splinterd")).unwrap();
-        assert!(!runs_adjacent_daemon(reopened(&copy), &upgraded_file, &verified).unwrap());
+        assert!(!runs_adjacent_daemon(reopened(&copy), upgraded_file, &verified).unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_adjacent_daemon_rewritten_in_place_is_compared_again() {
+        use std::io::Write as _;
+        let bytes = daemon_bytes();
+        let (directory, expected) = installed_daemon("rewritten", &bytes);
+        let copy = memfd_copy(&bytes, IMMUTABLE_SEALS);
+        let verified = VerifiedDaemonCopy::default();
+        assert!(runs_adjacent_daemon(reopened(&copy), reopened(&expected), &verified).unwrap());
+        // The same inode is rewritten with other bytes of the same length.
+        let before = expected.metadata().unwrap();
+        let mut rewritten = bytes.clone();
+        rewritten[0] ^= 1;
+        let mut writer = fs::OpenOptions::new()
+            .write(true)
+            .open(directory.join("splinterd"))
+            .unwrap();
+        // Coarse timestamp clocks can leave the change time equal briefly.
+        let mut after = before.clone();
+        for _ in 0..200 {
+            writer.write_all_at(&rewritten, 0).unwrap();
+            after = expected.metadata().unwrap();
+            if (after.ctime(), after.ctime_nsec()) != (before.ctime(), before.ctime_nsec()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(after.ino(), before.ino());
+        assert_ne!(
+            (after.ctime(), after.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec())
+        );
+        writer.flush().unwrap();
+        assert!(!runs_adjacent_daemon(reopened(&copy), reopened(&expected), &verified).unwrap());
         fs::remove_dir_all(directory).unwrap();
     }
 

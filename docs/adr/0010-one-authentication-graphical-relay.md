@@ -38,9 +38,10 @@ and repeats the existing owner, mode, UID, pidfd, and exact adjacent
 `splinterd` executable validation before carrying opaque private-protocol bytes.
 The daemon passes as the adjacent file itself or, after a verified live upgrade
 (ADR 0011), as a memfd sealed against write, grow, shrink, and further sealing
-whose bytes equal that file. The relay holds the one copy it verified open for
-its lifetime, so later channels skip the comparison only while that exact
-inode is pinned; a replaced `splinterd` is compared again.
+whose bytes equal that file. The relay holds the one copy it verified and the
+file it matched open for its lifetime, so later channels skip the comparison
+only while both exact inodes are pinned and the file's length and change time
+are unchanged; a replaced or rewritten `splinterd` is compared again.
 The daemon sees the installed `splinterm-relay` executable and requires its
 exact `--graphical-stdio` mode before accepting `ClientRole::RemoteInteractive`.
 OpenSSH-authenticated native Windows therefore receive normal human terminal
