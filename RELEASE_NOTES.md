@@ -234,10 +234,13 @@ a hostile program running as your account.
 - While a request waits, the Explorer marks its workspace **Agent asking for
   access**, the Window title ends with **AGENT ACCESS REQUEST WAITING**, and
   **Agent access** in the palette shows how many wait.
-- The Explorer marks, in words, which workspaces, Dojos, and Splints an agent
-  can reach: **Agent can reach** (no covered agent connected) or **Agent
-  connected**. When only some of a workspace is covered, its row says **Agent
-  can reach part** or **Agent connected to part**.
+- The Explorer marks, with an icon and in words, which workspaces, Dojos, and
+  Splints an agent can reach: **Agent can reach** (no covered agent
+  connected) or **Agent connected**. When only some of a workspace is covered,
+  its row says **Agent can reach part** or **Agent connected to part**. The
+  words appear in the footer for the selected row and in every row's
+  accessible text; a waiting request has its own lock icon with a question
+  mark.
 - `splinterm access list` shows every grant of every duration, pending
   requests, and policy rules that match a connected agent (read-only there),
   with the agent's identity, the access, when it was created, last used or
@@ -307,9 +310,13 @@ a hostile program running as your account.
   an agent that fully detaches from the Splint, needs an `agent_status_report`
   grant from the policy file or from consent; every easy agent access level
   includes it.
-- The Explorer shows a static icon and the state in words for each Splint, and
-  the most urgent state for each Dojo and Lair. Dojo tabs show one badge with a
-  count. States differ by icon shape and text, never by colour or motion alone.
+- The Explorer shows an icon for each Splint and the most urgent state for each
+  Dojo and Lair, and spells the selected row's state out in its footer. Dojo
+  tabs show one badge with a count. A fresh `working` status is a Braille
+  spinner that steps at most four times a second, only in the focused Window,
+  and holds still with `SPLINTERM_REDUCED_MOTION=1`; every other state is a
+  static icon. States differ by shape and by text, never by colour or motion
+  alone.
 - Explorer search matches state words such as `needs input` or `stale`. The
   palette command **Clear agent status** clears the focused Splint's status.
 - `inspect` and `topology` machine output carry an optional `agent_status`.
@@ -357,6 +364,12 @@ a hostile program running as your account.
 
 ## Dojos, tabs, and the Explorer
 
+- The Lair Explorer shows one line per row: the disclosure chevron and the
+  name, then fixed icon columns on the right for agent access, agent status,
+  whether the row is live (a filled or hollow dot), and whether a Lair is saved
+  or pinned. The selected row's status is spelled out in words in a footer
+  that wraps between words. The breadcrumb line is gone; the title and the
+  filters share one header line.
 - The Lair Explorer opens on **Live**, and its filters read Live, Saved, All
   (`f` cycles them in that order). Search looks through every Lair whatever the
   filter, so a saved or stopped Lair is found from Live too.
@@ -389,9 +402,9 @@ a hostile program running as your account.
 - Splinterm reads Omarchy 4's theme location and colour names, and follows
   theme switches without a restart. Non-Omarchy desktops use the built-in
   palette quietly.
-- Glassy Windows: the terminal background, padding, and tab strip turn
-  translucent with blur when glass is on, while text stays opaque and crisp.
-  Toggling applies live.
+- Glassy Windows: the terminal background, padding, tab strip, and docked Lair
+  Explorer turn translucent with blur when glass is on, while text and icons
+  stay opaque and crisp. Toggling applies live.
 - Splinterm follows three settings from the Omarchy shell's `shell.toml`: panel
   alpha for menus and popups (raised as needed to keep text readable), the text
   size set by `omarchy-display-text-size`, and the top bar's height. Open

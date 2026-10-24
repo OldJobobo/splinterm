@@ -16,9 +16,9 @@ use super::{
     packed_rgb, round_to_i32, u32_to_f32,
 };
 
-/// The tightest fixed chrome text line, in logical pixels: an Explorer row's
-/// name and status lines and a saved-layout preview line are each this tall,
-/// and every other chrome row is taller.
+/// The tightest fixed chrome text line, in logical pixels: an Explorer footer
+/// line and a saved-layout preview line are each this tall, and every other
+/// chrome row, an Explorer row included, is taller.
 ///
 /// Chrome text uses the terminal font family at its own UI size (the
 /// context's chrome font size: `[main] ui-font-pixelsize`, otherwise
@@ -74,6 +74,11 @@ impl ChromeSource {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.text.is_empty()
+    }
+
+    /// Whether nothing would be drawn: no icon and only blank text.
+    pub(crate) fn is_blank(&self) -> bool {
+        self.icons.is_empty() && self.text.chars().all(char::is_whitespace)
     }
 
     /// Display cells, counting each icon as [`ChromeIcon::CELLS`].

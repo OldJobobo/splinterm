@@ -959,6 +959,7 @@ impl WaylandSession {
             app.apply_clipboard_reads()?;
             app.apply_clipboard_image_events();
             app.tick_cursor_blink(queue_handle)?;
+            app.tick_agent_spinner(queue_handle)?;
             let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
                 break;
             };
@@ -10950,6 +10951,12 @@ impl App {
         let command_retry_pending =
             !self.input.pending_terminal_input.is_empty() || self.has_deferred_pane_command();
         let timeout = command_retry_dispatch_timeout(timeout, command_retry_pending);
+        // The agent spinner's next frame is one more deadline on the timer
+        // that wakes the loop for the cursor blink.
+        let timeout = match (timeout, self.agent_spinner_timeout()) {
+            (Some(timeout), Some(spinner)) => Some(timeout.min(spinner)),
+            (timeout, _) => timeout,
+        };
         // Wake to clear an expired upgrade outcome notice.
         match (timeout, self.handoff.timeout(Instant::now())) {
             (Some(timeout), Some(notice)) => Some(timeout.min(notice)),
@@ -11651,9 +11658,12 @@ impl App {
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
+        // The agent spinner moves only for a working row this draw shows.
+        self.tab_state.agent.explorer_working = false;
         if let Some(layout) = explorer_layout.as_ref() {
             let rows = self.explorer.rows();
-            let breadcrumb = self.explorer.breadcrumb();
+            self.tab_state.agent.explorer_working =
+                crate::renderer::lair_explorer_shows_working(layout, &rows);
             let status_message = self.explorer.status_message();
             paint_lair_explorer(
                 &mut self.presentation.explorer_text_cache,
@@ -11664,10 +11674,9 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
+                crate::renderer::lair_explorer_palette(self.presentation.theme),
                 &rows,
                 self.explorer.selected(),
-                breadcrumb.as_deref(),
                 self.explorer.query(),
                 status_message,
                 self.explorer.focused(),
@@ -11878,6 +11887,8 @@ impl App {
             &self.panes.pane.scrollback_viewport,
             self.panes.pane.snapshot.as_ref(),
         );
+        // A spinner frame changes only chrome, which partial damage misses.
+        let spinner_damage = self.tab_state.agent.take_chrome_damage();
         let picker_damage_full_surface = std::mem::take(&mut self.modal.session_picker_redraw);
         let damage_full_surface = picker_damage_full_surface
             || take_full_surface_damage(
@@ -11911,6 +11922,23 @@ impl App {
                 }
             }
             for region in &inactive_damage_regions {
+                self.surface.window.wl_surface().damage_buffer(
+                    i32::try_from(region.x).unwrap_or(i32::MAX),
+                    i32::try_from(region.y).unwrap_or(i32::MAX),
+                    i32::try_from(region.width).unwrap_or(i32::MAX),
+                    i32::try_from(region.height).unwrap_or(i32::MAX),
+                );
+            }
+            let spinner_regions = [
+                tab_layout.as_ref().map(|layout| layout.rect),
+                explorer_layout.as_ref().map(|layout| layout.panel),
+            ];
+            for region in spinner_regions
+                .into_iter()
+                .flatten()
+                .filter(|_| spinner_damage)
+            {
+                let region = Self::buffer_rect(region, self.surface.scale_120)?;
                 self.surface.window.wl_surface().damage_buffer(
                     i32::try_from(region.x).unwrap_or(i32::MAX),
                     i32::try_from(region.y).unwrap_or(i32::MAX),

@@ -1,11 +1,14 @@
 //! Pure presentation of explicitly reported agent status.
 //!
 //! Status is display data from the daemon, never authority and never inferred
-//! from terminal content. Every state is distinguishable by icon shape and by
-//! text alone; nothing here animates. The free-text detail is Explorer-only
-//! and never reaches Dojo tabs.
+//! from terminal content. Every state is distinguishable by its glyph's shape
+//! and by text alone. Only a fresh working status moves: its Braille spinner
+//! steps at most four times a second, in a focused Window, without reduced
+//! motion, and otherwise holds its first frame. The free-text detail is
+//! Explorer-only and never reaches Dojo tabs.
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use splinterm_protocol::AgentState;
 use unicode_width::UnicodeWidthChar;
@@ -28,15 +31,80 @@ pub(crate) const ASCII_STALE_MARKER: &str = "~";
 /// Explorer and accessibility text when endpoint data is stale or disconnected.
 pub(crate) const UNAVAILABLE_TEXT: &str = "Agent status unavailable";
 
+/// The working state's Braille spinner frames, in order. The renderer draws
+/// Braille cells itself, so the spinner needs neither the embedded icon face
+/// nor a font and is the same in both glyph styles.
+pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// One frame of the working spinner. [`Self::STATIC`], the first frame, is
+/// what a stale, unfocused, or reduced-motion working status shows.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub(crate) struct AgentSpinner(usize);
+
+impl AgentSpinner {
+    pub(crate) const STATIC: Self = Self(0);
+
+    /// The shortest time between two frames: at most four frames a second.
+    pub(crate) const STEP: Duration = Duration::from_millis(250);
+
+    pub(crate) const fn glyph(self) -> char {
+        SPINNER_FRAMES[self.0 % SPINNER_FRAMES.len()]
+    }
+
+    #[must_use]
+    pub(crate) const fn next(self) -> Self {
+        Self((self.0 + 1) % SPINNER_FRAMES.len())
+    }
+
+    pub(crate) const fn is_static(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether the spinner moves: only in a focused Window, without reduced
+    /// motion, while a fresh working status is shown.
+    pub(crate) const fn animates(reduced_motion: bool, focused: bool, working_shown: bool) -> bool {
+        !reduced_motion && focused && working_shown
+    }
+
+    /// The frame to show after a timer tick, or `None` when it stays. A
+    /// moving spinner steps one frame once [`Self::STEP`] has passed since the
+    /// last step; a stopped one returns to its first frame.
+    #[must_use]
+    pub(crate) fn tick(self, animates: bool, since_last_step: Duration) -> Option<Self> {
+        if animates {
+            (since_last_step >= Self::STEP).then(|| self.next())
+        } else {
+            (!self.is_static()).then_some(Self::STATIC)
+        }
+    }
+
+    /// How long until the next frame is due while the spinner moves.
+    pub(crate) fn remaining(animates: bool, since_last_step: Duration) -> Option<Duration> {
+        animates.then(|| Self::STEP.saturating_sub(since_last_step))
+    }
+}
+
+/// Whether any of `statuses` is a fresh working status, the only one that
+/// shows a moving spinner.
+pub(crate) fn shows_working<'a>(
+    statuses: impl IntoIterator<Item = &'a NavigationAgentStatus>,
+) -> bool {
+    statuses
+        .into_iter()
+        .any(|status| status.state == AgentState::Working && !status.stale)
+}
+
 /// How status is drawn. Both styles are visual only: accessible text and
 /// search always use state words.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum AgentGlyphs {
-    /// Embedded Tabler icons, two cells each; a clock icon marks stale.
+    /// Embedded Tabler icons, two cells each; a clock icon marks stale. The
+    /// working spinner takes the first cell of its two-cell slot.
     #[default]
     Icons,
-    /// One ASCII character per state; `~` marks stale. Used when the
-    /// embedded icon face cannot be loaded, never a replacement glyph.
+    /// One character per state, ASCII except the Braille working spinner;
+    /// `~` marks stale. Used when the embedded icon face cannot be loaded,
+    /// never a replacement glyph.
     Ascii,
 }
 
@@ -49,23 +117,33 @@ impl AgentGlyphs {
         }
     }
 
-    pub(crate) const fn icon(state: AgentState) -> ChromeIcon {
+    /// The icon of every state but working, which is the spinner.
+    pub(crate) const fn icon(state: AgentState) -> Option<ChromeIcon> {
         match state {
-            AgentState::Working => ChromeIcon::Loader2,
-            AgentState::NeedsInput => ChromeIcon::MessageQuestion,
-            AgentState::Done => ChromeIcon::CircleCheck,
-            AgentState::Error => ChromeIcon::AlertCircle,
-            AgentState::Idle => ChromeIcon::Point,
+            AgentState::Working => None,
+            AgentState::NeedsInput => Some(ChromeIcon::MessageQuestion),
+            AgentState::Done => Some(ChromeIcon::CircleCheck),
+            AgentState::Error => Some(ChromeIcon::AlertCircle),
+            AgentState::Idle => Some(ChromeIcon::Point),
         }
     }
 
-    pub(crate) const fn ascii(state: AgentState) -> &'static str {
+    /// The ASCII glyph of every state but working, which is the spinner.
+    pub(crate) const fn ascii(state: AgentState) -> Option<&'static str> {
         match state {
-            AgentState::Working => ">",
-            AgentState::NeedsInput => "?",
-            AgentState::Done => "+",
-            AgentState::Error => "!",
-            AgentState::Idle => "-",
+            AgentState::Working => None,
+            AgentState::NeedsInput => Some("?"),
+            AgentState::Done => Some("+"),
+            AgentState::Error => Some("!"),
+            AgentState::Idle => Some("-"),
+        }
+    }
+
+    /// Cells of the glyph slot.
+    const fn glyph_cells(self) -> usize {
+        match self {
+            Self::Icons => ChromeIcon::CELLS as usize,
+            Self::Ascii => 1,
         }
     }
 
@@ -79,17 +157,22 @@ impl AgentGlyphs {
 
     /// Cells of the fixed Explorer column: the glyph and the stale slot.
     pub(crate) const fn column_cells(self) -> usize {
-        match self {
-            Self::Icons => 2 * ChromeIcon::CELLS as usize,
-            Self::Ascii => 2,
-        }
+        self.glyph_cells() + self.stale_cells()
     }
 
-    fn push_glyph(self, source: &mut ChromeSource, state: AgentState) {
-        match self {
-            Self::Icons => source.push_icon(Self::icon(state)),
-            Self::Ascii => source.push_str(Self::ascii(state)),
-        };
+    /// The glyph alone, without padding: a working spinner is one cell.
+    fn push_glyph(self, source: &mut ChromeSource, state: AgentState, spinner: AgentSpinner) {
+        match (Self::icon(state), Self::ascii(state), self) {
+            (Some(icon), _, Self::Icons) => {
+                source.push_icon(icon);
+            }
+            (_, Some(text), Self::Ascii) => {
+                source.push_str(text);
+            }
+            _ => {
+                source.push_str(spinner.glyph().encode_utf8(&mut [0; 4]));
+            }
+        }
     }
 
     fn push_stale(self, source: &mut ChromeSource) {
@@ -99,15 +182,23 @@ impl AgentGlyphs {
         };
     }
 
-    /// The fixed-width column for one state, or blank cells without one.
-    fn column(self, state: Option<(AgentState, bool)>) -> ChromeSource {
+    /// The fixed-width column for one state, or blank cells without one. A
+    /// stale working status holds the spinner's first frame.
+    fn column(self, state: Option<(AgentState, bool)>, spinner: AgentSpinner) -> ChromeSource {
         let mut column = ChromeSource::default();
         match state {
             None => {
                 column.push_str(&" ".repeat(self.column_cells()));
             }
             Some((state, is_stale)) => {
-                self.push_glyph(&mut column, state);
+                let spinner = if is_stale {
+                    AgentSpinner::STATIC
+                } else {
+                    spinner
+                };
+                self.push_glyph(&mut column, state, spinner);
+                let padding = self.glyph_cells().saturating_sub(column.cells());
+                column.push_str(&" ".repeat(padding));
                 if is_stale {
                     self.push_stale(&mut column);
                 } else {
@@ -169,12 +260,14 @@ pub(crate) fn search_terms(status: &NavigationAgentStatus) -> String {
     terms
 }
 
-/// Fixed-width Explorer glyph column: the glyph and a stale marker slot.
+/// Fixed-width Explorer glyph column: the glyph and a stale marker slot. A
+/// fresh working status shows `spinner`'s frame.
 pub(crate) fn glyph_column(
     status: Option<&NavigationAgentStatus>,
     glyphs: AgentGlyphs,
+    spinner: AgentSpinner,
 ) -> ChromeSource {
-    glyphs.column(status.map(|status| (status.state, status.stale)))
+    glyphs.column(status.map(|status| (status.state, status.stale)), spinner)
 }
 
 /// Status counts of a set of Splints, ordered by display priority.
@@ -217,11 +310,14 @@ impl AgentAggregate {
     }
 
     /// Explorer glyph column for a Dojo or Lair row: the most urgent state.
-    pub(crate) fn glyph_column(&self, glyphs: AgentGlyphs) -> ChromeSource {
-        glyphs.column(self.top().map(|(state, is_stale, _)| (state, is_stale)))
+    pub(crate) fn glyph_column(&self, glyphs: AgentGlyphs, spinner: AgentSpinner) -> ChromeSource {
+        glyphs.column(
+            self.top().map(|(state, is_stale, _)| (state, is_stale)),
+            spinner,
+        )
     }
 
-    /// Counts in words for the Explorer status line and accessibility, e.g.
+    /// Counts in words for the Explorer footer and accessibility, e.g.
     /// "1 needs input, 2 working".
     pub(crate) fn counts_words(&self) -> String {
         self.groups
@@ -239,11 +335,21 @@ impl AgentAggregate {
 
     /// One Dojo tab badge: the aggregate glyph, a count when more than one
     /// Splint shares the top state, and the stale marker, e.g.
-    /// `[message-question]2` or `[loader-2][clock]`; ASCII `?2` or `>~`.
-    pub(crate) fn tab_badge(&self, glyphs: AgentGlyphs) -> Option<ChromeSource> {
+    /// `[message-question]2` or `⠋[clock]`; ASCII `?2` or `⠋~`. A fresh
+    /// working badge shows `spinner`'s frame, a stale one the first frame.
+    pub(crate) fn tab_badge(
+        &self,
+        glyphs: AgentGlyphs,
+        spinner: AgentSpinner,
+    ) -> Option<ChromeSource> {
         let (top_state, is_stale, count) = self.top()?;
         let mut badge = ChromeSource::default();
-        glyphs.push_glyph(&mut badge, top_state);
+        let spinner = if is_stale {
+            AgentSpinner::STATIC
+        } else {
+            spinner
+        };
+        glyphs.push_glyph(&mut badge, top_state, spinner);
         if count > 1 {
             badge.push_str(&count.min(99).to_string());
         }
@@ -331,35 +437,159 @@ mod tests {
     #[test]
     fn icon_and_text_tables_cover_every_state_with_ascii_fallbacks() {
         let table = [
-            (AgentState::Working, ChromeIcon::Loader2, ">", "Working"),
+            (AgentState::Working, None, None, "Working"),
             (
                 AgentState::NeedsInput,
-                ChromeIcon::MessageQuestion,
-                "?",
+                Some(ChromeIcon::MessageQuestion),
+                Some("?"),
                 "Needs input",
             ),
-            (AgentState::Done, ChromeIcon::CircleCheck, "+", "Done"),
-            (AgentState::Error, ChromeIcon::AlertCircle, "!", "Error"),
-            (AgentState::Idle, ChromeIcon::Point, "-", "Idle"),
+            (
+                AgentState::Done,
+                Some(ChromeIcon::CircleCheck),
+                Some("+"),
+                "Done",
+            ),
+            (
+                AgentState::Error,
+                Some(ChromeIcon::AlertCircle),
+                Some("!"),
+                "Error",
+            ),
+            (AgentState::Idle, Some(ChromeIcon::Point), Some("-"), "Idle"),
         ];
         for (state, icon, ascii, text) in table {
             assert_eq!(AgentGlyphs::icon(state), icon);
             assert_eq!(AgentGlyphs::ascii(state), ascii);
-            assert!(ascii.is_ascii() && cells(ascii) == 1);
+            assert!(ascii.is_none_or(|ascii| ascii.is_ascii() && cells(ascii) == 1));
             assert_eq!(state_text(state), text);
         }
         // Shape alone distinguishes every state in both styles, and the stale
-        // marker is distinct from every state.
-        let mut icons = PRIORITY.map(AgentGlyphs::icon).to_vec();
-        icons.push(ChromeIcon::Clock);
-        icons.sort_unstable();
-        icons.dedup();
-        assert_eq!(icons.len(), PRIORITY.len() + 1);
-        let mut ascii = PRIORITY.map(AgentGlyphs::ascii).to_vec();
-        ascii.push(ASCII_STALE_MARKER);
-        ascii.sort_unstable();
-        ascii.dedup();
-        assert_eq!(ascii.len(), PRIORITY.len() + 1);
+        // marker is distinct from every state. Working is the spinner in
+        // both styles, which is neither an icon nor ASCII.
+        for glyphs in [AgentGlyphs::Icons, AgentGlyphs::Ascii] {
+            let mut drawn = PRIORITY
+                .map(|state| {
+                    let mut source = ChromeSource::default();
+                    glyphs.push_glyph(&mut source, state, AgentSpinner::STATIC);
+                    source.describe()
+                })
+                .to_vec();
+            assert_eq!(drawn[2], "⠋");
+            let mut stale = ChromeSource::default();
+            glyphs.push_stale(&mut stale);
+            drawn.push(stale.describe());
+            drawn.sort_unstable();
+            drawn.dedup();
+            assert_eq!(drawn.len(), PRIORITY.len() + 1, "{glyphs:?}");
+        }
+    }
+
+    #[test]
+    fn spinner_cycles_ten_braille_frames_from_the_first() {
+        assert_eq!(
+            SPINNER_FRAMES,
+            ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        );
+        assert_eq!(AgentSpinner::default(), AgentSpinner::STATIC);
+        assert!(AgentSpinner::STATIC.is_static());
+        let mut spinner = AgentSpinner::STATIC;
+        let mut seen = Vec::new();
+        for _ in 0..SPINNER_FRAMES.len() {
+            seen.push(spinner.glyph());
+            spinner = spinner.next();
+            assert_eq!(spinner.is_static(), spinner.glyph() == '⠋');
+        }
+        assert_eq!(seen, SPINNER_FRAMES);
+        assert_eq!(spinner, AgentSpinner::STATIC);
+        // Every frame is one Braille cell, which the renderer draws itself.
+        assert!(SPINNER_FRAMES.iter().all(|frame| {
+            ('\u{2800}'..='\u{28ff}').contains(frame) && frame.width() == Some(1)
+        }));
+    }
+
+    #[test]
+    fn spinner_steps_at_most_four_times_a_second_and_stops_static() {
+        let step = AgentSpinner::STEP;
+        assert!(step >= Duration::from_millis(250));
+        let moving = AgentSpinner::STATIC.next().next();
+        // Before a step is due nothing changes, however often the timer wakes.
+        for elapsed in [0, 1, 100, 249] {
+            assert_eq!(moving.tick(true, Duration::from_millis(elapsed)), None);
+        }
+        // Once due, exactly one frame per tick, never a catch-up jump.
+        assert_eq!(moving.tick(true, step), Some(moving.next()));
+        assert_eq!(
+            moving.tick(true, Duration::from_secs(10)),
+            Some(moving.next())
+        );
+        // A stopped spinner returns to its first frame once and then rests.
+        assert_eq!(
+            moving.tick(false, Duration::ZERO),
+            Some(AgentSpinner::STATIC)
+        );
+        assert_eq!(
+            AgentSpinner::STATIC.tick(false, Duration::from_secs(10)),
+            None
+        );
+        // Over one simulated second of 1 ms timer wakeups, at most four steps.
+        let (mut spinner, mut last, mut steps) = (AgentSpinner::STATIC, 0_u64, 0);
+        for now in 0..=1000_u64 {
+            if let Some(next) = spinner.tick(true, Duration::from_millis(now - last)) {
+                spinner = next;
+                last = now;
+                steps += 1;
+            }
+        }
+        assert_eq!(steps, 4);
+        assert_eq!(
+            AgentSpinner::remaining(true, Duration::from_millis(100)),
+            Some(Duration::from_millis(150))
+        );
+        assert_eq!(
+            AgentSpinner::remaining(true, step * 3),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(AgentSpinner::remaining(false, Duration::ZERO), None);
+    }
+
+    #[test]
+    fn spinner_moves_only_focused_without_reduced_motion_while_fresh_work_shows() {
+        assert!(AgentSpinner::animates(false, true, true));
+        assert!(!AgentSpinner::animates(true, true, true));
+        assert!(!AgentSpinner::animates(false, false, true));
+        assert!(!AgentSpinner::animates(false, true, false));
+        assert!(shows_working(&[status(AgentState::Working, false)]));
+        assert!(!shows_working(&[status(AgentState::Working, true)]));
+        assert!(!shows_working(&[
+            status(AgentState::NeedsInput, false),
+            status(AgentState::Done, false)
+        ]));
+        // A stale working status holds the first frame in columns and badges.
+        let frame = AgentSpinner::STATIC.next().next().next();
+        for glyphs in [AgentGlyphs::Icons, AgentGlyphs::Ascii] {
+            let fresh = status(AgentState::Working, false);
+            let stale = status(AgentState::Working, true);
+            assert!(
+                glyph_column(Some(&fresh), glyphs, frame)
+                    .text()
+                    .starts_with('⠸')
+            );
+            assert!(
+                glyph_column(Some(&stale), glyphs, frame)
+                    .text()
+                    .starts_with('⠋')
+            );
+            let badge = |statuses: &[NavigationAgentStatus]| {
+                AgentAggregate::from_statuses(statuses)
+                    .tab_badge(glyphs, frame)
+                    .unwrap()
+                    .text()
+                    .to_owned()
+            };
+            assert!(badge(&[fresh]).starts_with('⠸'));
+            assert!(badge(&[stale]).starts_with('⠋'));
+        }
     }
 
     #[test]
@@ -369,10 +599,12 @@ mod tests {
         assert_eq!(AgentGlyphs::select(false), AgentGlyphs::Ascii);
         let blocked = [status(AgentState::NeedsInput, true)];
         let aggregate = AgentAggregate::from_statuses(&blocked);
-        let ascii = aggregate.tab_badge(AgentGlyphs::Ascii).unwrap();
+        let ascii = aggregate
+            .tab_badge(AgentGlyphs::Ascii, AgentSpinner::STATIC)
+            .unwrap();
         assert_eq!(ascii.text(), "?~");
         assert!(ascii.icons().is_empty());
-        let column = glyph_column(Some(&blocked[0]), AgentGlyphs::Ascii);
+        let column = glyph_column(Some(&blocked[0]), AgentGlyphs::Ascii, AgentSpinner::STATIC);
         assert_eq!(column.text(), "?~");
         assert!(column.icons().is_empty());
     }
@@ -408,7 +640,7 @@ mod tests {
         }
         assert!(AgentAggregate::from_statuses(&[]).is_empty());
         assert_eq!(
-            AgentAggregate::default().tab_badge(AgentGlyphs::Icons),
+            AgentAggregate::default().tab_badge(AgentGlyphs::Icons, AgentSpinner::STATIC),
             None
         );
     }
@@ -418,7 +650,7 @@ mod tests {
         let badge = |statuses: &[NavigationAgentStatus], glyphs| {
             describe(
                 &AgentAggregate::from_statuses(statuses)
-                    .tab_badge(glyphs)
+                    .tab_badge(glyphs, AgentSpinner::STATIC)
                     .unwrap(),
             )
         };
@@ -433,12 +665,12 @@ mod tests {
         );
         assert_eq!(badge(&two_blocked, AgentGlyphs::Ascii), "?2");
         let stale = [status(AgentState::Working, true)];
-        assert_eq!(badge(&stale, AgentGlyphs::Icons), "[loader-2][clock]");
-        assert_eq!(badge(&stale, AgentGlyphs::Ascii), ">~");
+        assert_eq!(badge(&stale, AgentGlyphs::Icons), "⠋[clock]");
+        assert_eq!(badge(&stale, AgentGlyphs::Ascii), "⠋~");
         let many = vec![status(AgentState::Done, false); 120];
         assert_eq!(badge(&many, AgentGlyphs::Icons), "[circle-check]99");
         let source = AgentAggregate::from_statuses(&many)
-            .tab_badge(AgentGlyphs::Icons)
+            .tab_badge(AgentGlyphs::Icons, AgentSpinner::STATIC)
             .unwrap();
         assert_eq!(source.cells(), 4);
         assert_eq!(source.icons(), &[(0, ChromeIcon::CircleCheck)]);
@@ -465,12 +697,20 @@ mod tests {
     fn glyph_column_has_a_fixed_width_per_style() {
         for glyphs in [AgentGlyphs::Icons, AgentGlyphs::Ascii] {
             let columns = [
-                glyph_column(None, glyphs),
-                glyph_column(Some(&status(AgentState::Working, false)), glyphs),
-                glyph_column(Some(&status(AgentState::Done, true)), glyphs),
-                AgentAggregate::default().glyph_column(glyphs),
+                glyph_column(None, glyphs, AgentSpinner::STATIC),
+                glyph_column(
+                    Some(&status(AgentState::Working, false)),
+                    glyphs,
+                    AgentSpinner::STATIC,
+                ),
+                glyph_column(
+                    Some(&status(AgentState::Done, true)),
+                    glyphs,
+                    AgentSpinner::STATIC,
+                ),
+                AgentAggregate::default().glyph_column(glyphs, AgentSpinner::STATIC),
                 AgentAggregate::from_statuses(&[status(AgentState::Error, false)])
-                    .glyph_column(glyphs),
+                    .glyph_column(glyphs, AgentSpinner::STATIC),
             ];
             assert!(
                 columns
@@ -482,19 +722,44 @@ mod tests {
         assert_eq!(
             describe(&glyph_column(
                 Some(&status(AgentState::Done, true)),
-                AgentGlyphs::Icons
+                AgentGlyphs::Icons,
+                AgentSpinner::STATIC,
             )),
             "[circle-check][clock]"
         );
         assert_eq!(
             describe(&glyph_column(
                 Some(&status(AgentState::NeedsInput, false)),
-                AgentGlyphs::Icons
+                AgentGlyphs::Icons,
+                AgentSpinner::STATIC,
             )),
             "[message-question]  "
         );
+        // The working spinner takes the first cell of its two-cell slot.
         assert_eq!(
-            glyph_column(Some(&status(AgentState::Done, true)), AgentGlyphs::Ascii).text(),
+            describe(&glyph_column(
+                Some(&status(AgentState::Working, false)),
+                AgentGlyphs::Icons,
+                AgentSpinner::STATIC.next(),
+            )),
+            "⠙   "
+        );
+        assert_eq!(
+            glyph_column(
+                Some(&status(AgentState::Working, true)),
+                AgentGlyphs::Ascii,
+                AgentSpinner::STATIC.next(),
+            )
+            .text(),
+            "⠋~"
+        );
+        assert_eq!(
+            glyph_column(
+                Some(&status(AgentState::Done, true)),
+                AgentGlyphs::Ascii,
+                AgentSpinner::STATIC,
+            )
+            .text(),
             "+~"
         );
     }
@@ -554,7 +819,7 @@ mod tests {
         for statuses in [&counted[..], &stale_counted[..]] {
             for glyphs in [AgentGlyphs::Icons, AgentGlyphs::Ascii] {
                 let badge = AgentAggregate::from_statuses(statuses)
-                    .tab_badge(glyphs)
+                    .tab_badge(glyphs, AgentSpinner::STATIC)
                     .unwrap();
                 for name in ["Dojo 2", "2 builds", "editor"] {
                     let composed = badged_tab_label(Some(&badge), name, 40);
@@ -570,18 +835,18 @@ mod tests {
             }
         }
         let ascii = AgentAggregate::from_statuses(&counted)
-            .tab_badge(AgentGlyphs::Ascii)
+            .tab_badge(AgentGlyphs::Ascii, AgentSpinner::STATIC)
             .unwrap();
         assert_eq!(
             badged_tab_label(Some(&ascii), "Dojo 2", 40).text(),
             "?2  Dojo 2"
         );
         let icons = AgentAggregate::from_statuses(&stale_counted)
-            .tab_badge(AgentGlyphs::Icons)
+            .tab_badge(AgentGlyphs::Icons, AgentSpinner::STATIC)
             .unwrap();
         assert_eq!(
             badged_tab_label(Some(&icons), "2 builds", 40).describe(),
-            "[loader-2]2[clock]  2 builds"
+            "⠋2[clock]  2 builds"
         );
     }
 }

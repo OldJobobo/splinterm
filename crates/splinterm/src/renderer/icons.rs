@@ -33,24 +33,37 @@ const ICON_RASTER_BUDGET: usize = 256;
 pub(crate) enum ChromeIcon {
     MessageQuestion,
     AlertCircle,
-    Loader2,
     CircleCheck,
     Point,
     Clock,
     ChevronRight,
     ChevronDown,
+    /// A saved Lair.
+    Pin,
+    /// A pinned Lair.
+    Pinned,
+    /// An agent can reach the row.
+    Plug,
+    /// An agent is connected to the row.
+    PlugConnected,
+    /// An agent is asking for access.
+    LockQuestion,
 }
 
 impl ChromeIcon {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::MessageQuestion,
         Self::AlertCircle,
-        Self::Loader2,
         Self::CircleCheck,
         Self::Point,
         Self::Clock,
         Self::ChevronRight,
         Self::ChevronDown,
+        Self::Pin,
+        Self::Pinned,
+        Self::Plug,
+        Self::PlugConnected,
+        Self::LockQuestion,
     ];
 
     /// Chrome cells one icon occupies. Icons are square, so a two-cell slot
@@ -63,12 +76,16 @@ impl ChromeIcon {
         match self {
             Self::MessageQuestion => "message-question",
             Self::AlertCircle => "alert-circle",
-            Self::Loader2 => "loader-2",
             Self::CircleCheck => "circle-check",
             Self::Point => "point",
             Self::Clock => "clock",
             Self::ChevronRight => "chevron-right",
             Self::ChevronDown => "chevron-down",
+            Self::Pin => "pin",
+            Self::Pinned => "pinned",
+            Self::Plug => "plug",
+            Self::PlugConnected => "plug-connected",
+            Self::LockQuestion => "lock-question",
         }
     }
 
@@ -77,12 +94,16 @@ impl ChromeIcon {
         match self {
             Self::MessageQuestion => '\u{f98b}',
             Self::AlertCircle => '\u{ea05}',
-            Self::Loader2 => '\u{f226}',
             Self::CircleCheck => '\u{ea67}',
             Self::Point => '\u{eb0c}',
             Self::Clock => '\u{ea70}',
             Self::ChevronRight => '\u{ea61}',
             Self::ChevronDown => '\u{ea5f}',
+            Self::Pin => '\u{ec9c}',
+            Self::Pinned => '\u{ed60}',
+            Self::Plug => '\u{ebd9}',
+            Self::PlugConnected => '\u{f00a}',
+            Self::LockQuestion => '\u{f931}',
         }
     }
 }
@@ -208,7 +229,7 @@ fn rasterize_icon(icon: ChromeIcon, cell: IconCell) -> Option<CachedGlyph> {
     let slot_width = i32::try_from(slot_width).ok()?;
     let cell_height = i32::try_from(cell.height).ok()?;
     // Centre the whole em square, not the ink, so partial shapes such as the
-    // loader arc keep the same optical centre as the other icons.
+    // pin keep the same optical centre as the other icons.
     let pen_x = (slot_width - em).div_euclid(2);
     let baseline = (cell_height - em).div_euclid(2) + ascent;
     let left = pen_x + raster.left;

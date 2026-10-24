@@ -1533,9 +1533,7 @@ mod tests {
         let mut counted = ChromeSource::default();
         counted.push_icon(ChromeIcon::MessageQuestion).push_str("2");
         let mut stale = ChromeSource::default();
-        stale
-            .push_icon(ChromeIcon::Loader2)
-            .push_icon(ChromeIcon::Clock);
+        stale.push_str("⠋").push_icon(ChromeIcon::Clock);
         let ascii = ChromeSource::from("?2");
         let cases = [&counted, &stale, &ascii]
             .into_iter()

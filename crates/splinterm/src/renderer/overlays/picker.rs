@@ -492,7 +492,8 @@ const PANEL_TEXT_MIN_CONTRAST: f64 = 4.5;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChromeSurface {
     /// `[menu]`: list cards with rows and a selected row. The action
-    /// palette, the Dojo and session picker, and the docked Lair Explorer.
+    /// palette and the Dojo and session picker; the docked Lair Explorer takes
+    /// these colours but the Window's own background alpha.
     Menu,
     /// `[popups]`: flyouts, prompts and status cards. The tab context menu,
     /// the Dojo prompt, the search bar and the history overlay.
@@ -1123,6 +1124,33 @@ pub(super) fn paint_picker_source(
     text.paint(canvas, canvas_width, canvas_height, (x, y), clip, color);
     used.insert(key);
     Ok(())
+}
+
+/// The width, in buffer pixels, of one chrome cell as [`paint_picker_source`]
+/// lays out text in `style`, so fixed columns can be placed in whole cells.
+pub(super) fn picker_cell_width(
+    cache: &mut SessionPickerTextCache,
+    context: &RenderContext,
+    used: &mut HashSet<SessionPickerTextKey>,
+    style: ChromeTextStyle,
+    scale_120: u32,
+    renderer_generation: u64,
+) -> Result<u32> {
+    let key = SessionPickerTextKey {
+        source: ChromeSource::from(" "),
+        constrained_width: u32::MAX,
+        style,
+        scale_120,
+        renderer_generation,
+    };
+    if !cache.entries.contains_key(&key) {
+        let text =
+            ChromeText::load_source_styled_with_context(&key.source, scale_120, style, context)?;
+        cache.entries.insert(key.clone(), text);
+    }
+    let width = cache.entries[&key].frame.cell_width.max(1);
+    used.insert(key);
+    Ok(width)
 }
 
 /// Paint a bounded terminal search field inside the terminal side of any Explorer split.
