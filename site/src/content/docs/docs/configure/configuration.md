@@ -32,6 +32,7 @@ lines=1000
 [multiplexer]
 persistent-by-default=yes
 persist-on-tab-organization=yes
+tab-strip-border=yes
 close-unused=no
 divider-style=line
 frame-title=splint
@@ -71,6 +72,7 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `cursor.style` | `block`, `beam`, or `underline` | `block` |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical Lairs are persistent (`yes`) or Window-owned (`no`) | `yes` |
 | `multiplexer.persist-on-tab-organization` | create/name/rename a tab atomically promotes its transient Lair | `yes` |
+| `multiplexer.tab-strip-border` | a full-width line along the bottom of the tab strip, as thin as a `line` divider and under the active tab's thicker accent underline; configuration reload applies it | `yes` |
 | `multiplexer.new-dojo-directory` | where a new Dojo or Lair opened inside a Window starts: `inherit`, `home`, an absolute path, or `~/path` (resolved on the owning daemon) | `home` |
 | `multiplexer.new-splint-directory` | where a split inside a Dojo starts; same values | `inherit` |
 | `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used | `no` |

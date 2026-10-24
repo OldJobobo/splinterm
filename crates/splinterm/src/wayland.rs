@@ -1078,6 +1078,7 @@ fn assemble_app(
             ui_font_size: options.ui_font_size,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
+            tab_strip_border: options.tab_strip_border,
             title: TitleSettings {
                 text: options.title,
                 controller_label: options.controller_title,
@@ -2182,6 +2183,10 @@ struct TitleSettings {
     controller_label: bool,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent cursor-blink, tab-strip border, evidence-shortcut and redraw flags"
+)]
 struct PresentationState {
     render_context: RenderContext,
     text_row: Option<TextRow>,
@@ -2199,6 +2204,8 @@ struct PresentationState {
     ui_font_size: Option<FontSize>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
+    /// `[multiplexer] tab-strip-border`, which configuration reload replaces.
+    tab_strip_border: bool,
     title: TitleSettings,
     theme: ResolvedTheme,
     pane_divider_style: PaneDividerStyle,
@@ -5901,6 +5908,10 @@ impl App {
                     std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
                 self.input.prefix_state.clear();
                 if self.set_agent_status_presentation(loaded.config.explorer_agent_status) {
+                    self.presentation.full_redraw = true;
+                }
+                if self.presentation.tab_strip_border != loaded.config.tab_strip_border {
+                    self.presentation.tab_strip_border = loaded.config.tab_strip_border;
                     self.presentation.full_redraw = true;
                 }
                 self.presentation.ui_font_size = loaded.config.ui_font_size;
@@ -11655,6 +11666,9 @@ impl App {
                     .remote_host_clipped
                     .as_ref()
                     .map(|cached| &cached.text),
+                self.presentation
+                    .tab_strip_border
+                    .then_some((pane_cell_width, pane_cell_height)),
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }

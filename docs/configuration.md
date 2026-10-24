@@ -124,6 +124,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `cursor.blink` | permit cursor blink | yes |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical terminals create persistent (`yes`) or Window-owned transient (`no`) Lairs | yes |
 | `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned transient Lair atomically; configuration reload applies it | yes |
+| `multiplexer.tab-strip-border` | draw a full-width line along the bottom of a shown tab strip, in the colour and stroke thickness of a `line` Splint divider (always at least 1 buffer px thinner than the active tab's accent underline, which is drawn over it); configuration reload applies it | strict boolean; yes |
 | `multiplexer.new-dojo-directory` | where a Dojo or Lair created inside a Window starts: `inherit`, `home`, an absolute path, or `~/path`; configuration reload applies it | home |
 | `multiplexer.new-splint-directory` | where a Splint split inside a Dojo starts; same values; configuration reload applies it | inherit |
 | `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used instead of detaching from it; configuration reload applies it to the next Close Tab or Window close | no |
@@ -143,10 +144,10 @@ the pane instead of silently treating the residual as terminal cells.
 reads `config.ini` and its keymap file again for the Window it runs in and
 applies exactly these settings: the `[key-bindings]` keymap (profile, overlay
 file, and `prefix-timeout-ms`), `clipboard.image-directory` (an in-flight save
-is cancelled), `main.ui-font-pixelsize` (chrome is drawn again at once),
-`explorer.agent-status`, `multiplexer.close-unused`,
+is cancelled), `main.ui-font-pixelsize` and `multiplexer.tab-strip-border` (chrome
+is drawn again at once), `explorer.agent-status`, `multiplexer.close-unused`,
 `multiplexer.persist-on-tab-organization`, `multiplexer.new-dojo-directory`,
-and `multiplexer.new-splint-directory`. The four multiplexer settings take
+and `multiplexer.new-splint-directory`. The last four multiplexer settings take
 effect at the Window's next close, tab organization, or Dojo, Lair, or Splint
 creation; one already under way keeps the value it started with. A file with
 errors is rejected and changes nothing. Every other setting keeps the value
