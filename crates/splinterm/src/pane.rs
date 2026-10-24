@@ -17,7 +17,8 @@ pub struct PaneGeometry {
     /// Complete leaf allocation; frame chrome occupies its inset edges.
     pub allocation: Rect,
     /// The allocation grown across its share of each adjacent pane gap, up to
-    /// the divider line that bounds it (Line chrome) or the gap's middle.
+    /// the divider line that bounds it (Line chrome) or the gap's middle,
+    /// but never into the outer gap at the layout's edges.
     /// Equal to `allocation` when the gap is zero. Active line borders are
     /// measured against it so they keep reaching their junctions.
     pub extent: Rect,
@@ -71,8 +72,10 @@ pub struct PaneLayout {
     pub splits: Vec<PaneSplit>,
     pub chrome: PaneChrome,
     /// Empty logical pixels between the outer edges of adjacent leaves, in
-    /// addition to any divider line. Never applied at the area's edges.
+    /// addition to any divider line, and kept inside each edge of the area.
     pub gap: u32,
+    /// The complete area the layout was computed for, outer gap included.
+    pub area: Rect,
 }
 
 /// How far an area's edges are from the divider lines that bound it: each
@@ -146,9 +149,10 @@ impl PaneLayout {
     /// `gap`. With Line chrome the divider line sits in the middle of that
     /// lane, the leading half of the gap (rounded down) before it and the
     /// trailing half after, and perpendicular divider lines reach across the
-    /// gap to meet it. Frame and None chrome reserve only the gap. The area's
-    /// outer edges get no gap. A zero gap reproduces
-    /// [`Self::compute_with_chrome`] exactly.
+    /// gap to meet it. Frame and None chrome reserve only the gap. The same
+    /// gap is also kept inside every edge of `area`, around the panes, like a
+    /// tiling window manager's outer gap; no extent or divider reaches into
+    /// it. A zero gap reproduces [`Self::compute_with_chrome`] exactly.
     ///
     /// # Errors
     ///
@@ -174,8 +178,10 @@ impl PaneLayout {
             splits: Vec::with_capacity(root.splint_count().saturating_sub(1)),
             chrome,
             gap,
+            area,
         };
-        layout.visit(root, area, Reach::default(), minimum_width, minimum_height)?;
+        let inner = inset_by_gap(area, gap)?;
+        layout.visit(root, inner, Reach::default(), minimum_width, minimum_height)?;
         Ok(layout)
     }
 
@@ -590,7 +596,7 @@ pub fn directional_resize_ratio(
     if !apply_preview_ratio(&mut candidate, split.target, split.ancestor, ratio) {
         return None;
     }
-    let root_area = layout.splits.first()?.area;
+    let root_area = layout.area;
     // As for a divider drag, a ratio is accepted when the panes fit with some
     // gap; the gap shrinks before a resize is refused.
     PaneLayout::compute_with_preferred_gap(
@@ -628,7 +634,24 @@ fn gap_yielding_ratio(
         Axis::Vertical => (split.area.y, split.area.height),
     };
     let (start, extent) = span(&split);
-    let gapless = extent.checked_sub(split.separator.checked_sub(layout.gap)?)?;
+    let index = layout
+        .splits
+        .iter()
+        .position(|candidate| *candidate == split)?;
+    // The room both children could have between them with no gap anywhere,
+    // the outer gap included.
+    let gapless = PaneLayout::compute_with_gap(
+        root,
+        layout.area,
+        layout.chrome,
+        0,
+        metrics.minimum_width,
+        metrics.minimum_height,
+    )
+    .ok()?
+    .splits
+    .get(index)
+    .and_then(|gapless| span(gapless).1.checked_sub(gapless.separator))?;
     let available = extent.checked_sub(split.separator)?;
     let first = split.boundary.checked_sub(start)?;
     let second = available.checked_sub(first)?;
@@ -655,11 +678,7 @@ fn gap_yielding_ratio(
         return SplitRatio::new(base).ok();
     }
 
-    let index = layout
-        .splits
-        .iter()
-        .position(|candidate| *candidate == split)?;
-    let root_area = layout.splits.first()?.area;
+    let root_area = layout.area;
     // The size the growing child gets at `permille`, with the gap shrunk to
     // fit, or `None` when the panes do not fit with any gap.
     let grown_at = |permille: u16| -> Option<u32> {
@@ -819,6 +838,28 @@ fn divider_line(axis: Axis, lane: Rect, thickness: u32, lead: u32, reach: Reach)
                 },
             )?
         },
+    })
+}
+
+/// The area left for the panes inside a `gap` kept at every edge of `area`.
+fn inset_by_gap(area: Rect, gap: u32) -> Result<Rect> {
+    let margins = gap
+        .checked_mul(2)
+        .ok_or_else(|| anyhow::anyhow!("pane gap overflow"))?;
+    if area.width <= margins || area.height <= margins {
+        bail!("surface cannot fit the outer pane gap");
+    }
+    Ok(Rect {
+        x: area
+            .x
+            .checked_add(gap)
+            .ok_or_else(|| anyhow::anyhow!("pane gap x overflow"))?,
+        y: area
+            .y
+            .checked_add(gap)
+            .ok_or_else(|| anyhow::anyhow!("pane gap y overflow"))?,
+        width: area.width - margins,
+        height: area.height - margins,
     })
 }
 
@@ -1632,8 +1673,15 @@ mod tests {
                         width: 400,
                         height: 300,
                     };
+                    let inner = Rect {
+                        x: area.x + gap,
+                        y: area.y + gap,
+                        width: area.width - 2 * gap,
+                        height: area.height - 2 * gap,
+                    };
                     let layout =
                         PaneLayout::compute_with_gap(&root, area, chrome, gap, 10, 10).unwrap();
+                    assert_eq!(layout.area, area, "{label}");
                     let line = line_width(chrome, axis);
                     let lane_width = line + gap;
                     let first = layout.panes[0];
@@ -1641,34 +1689,34 @@ mod tests {
                     assert_eq!((first.splint_id, second.splint_id), (first_id, second_id));
                     let (first_end, second_start, extent, first_extent) = match axis {
                         Axis::Horizontal => {
-                            assert_eq!(first.allocation.y, area.y, "{label}");
-                            assert_eq!(first.allocation.height, area.height, "{label}");
-                            assert_eq!(second.allocation.height, area.height, "{label}");
+                            assert_eq!(first.allocation.y, inner.y, "{label}");
+                            assert_eq!(first.allocation.height, inner.height, "{label}");
+                            assert_eq!(second.allocation.height, inner.height, "{label}");
                             assert_eq!(
                                 first.allocation.width + lane_width + second.allocation.width,
-                                area.width,
+                                inner.width,
                                 "{label}"
                             );
                             (
                                 right(first.allocation),
                                 second.allocation.x,
-                                area.width,
+                                inner.width,
                                 first.allocation.width,
                             )
                         }
                         Axis::Vertical => {
-                            assert_eq!(first.allocation.x, area.x, "{label}");
-                            assert_eq!(first.allocation.width, area.width, "{label}");
-                            assert_eq!(second.allocation.width, area.width, "{label}");
+                            assert_eq!(first.allocation.x, inner.x, "{label}");
+                            assert_eq!(first.allocation.width, inner.width, "{label}");
+                            assert_eq!(second.allocation.width, inner.width, "{label}");
                             assert_eq!(
                                 first.allocation.height + lane_width + second.allocation.height,
-                                area.height,
+                                inner.height,
                                 "{label}"
                             );
                             (
                                 bottom(first.allocation),
                                 second.allocation.y,
-                                area.height,
+                                inner.height,
                                 first.allocation.height,
                             )
                         }
@@ -1680,7 +1728,7 @@ mod tests {
                     for pane in [first, second] {
                         assert!(within(pane.rect, pane.allocation), "{label}");
                         assert!(within(pane.allocation, pane.extent), "{label}");
-                        assert!(within(pane.extent, area), "{label}");
+                        assert!(within(pane.extent, inner), "{label}");
                         if chrome == FRAME {
                             // Each pane keeps its whole frame; the gap is outside it.
                             assert_eq!(
@@ -1710,14 +1758,14 @@ mod tests {
                         let expected = match axis {
                             Axis::Horizontal => Rect {
                                 x: divider_start,
-                                y: area.y,
+                                y: inner.y,
                                 width: line,
-                                height: area.height,
+                                height: inner.height,
                             },
                             Axis::Vertical => Rect {
-                                x: area.x,
+                                x: inner.x,
                                 y: divider_start,
-                                width: area.width,
+                                width: inner.width,
                                 height: line,
                             },
                         };
@@ -1749,12 +1797,28 @@ mod tests {
                         );
                     }
 
+                    // The outer gap belongs to no pane and is no drag handle.
+                    let half = f64::from(gap) / 2.0;
+                    let middle_x = f64::from(area.x) + f64::from(area.width) / 2.0;
+                    let middle_y = f64::from(area.y) + f64::from(area.height) / 2.0;
+                    for point in [
+                        (f64::from(area.x) + half, middle_y),
+                        (f64::from(right(area)) - half, middle_y),
+                        (middle_x, f64::from(area.y) + half),
+                        (middle_x, f64::from(bottom(area)) - half),
+                    ] {
+                        assert_eq!(layout.split_at(point, 6), None, "{label} {point:?}");
+                        assert!(
+                            layout
+                                .panes
+                                .iter()
+                                .all(|pane| !contains_point(pane.allocation, point)),
+                            "{label} {point:?}"
+                        );
+                    }
+
                     // Dragging puts the lane's middle under the pointer.
-                    let start = match axis {
-                        Axis::Horizontal => area.x,
-                        Axis::Vertical => area.y,
-                    };
-                    let target = start + 150;
+                    let target = layout.splits[0].boundary + lane_width / 2 + 10;
                     let point = match axis {
                         Axis::Horizontal => (f64::from(target), orthogonal),
                         Axis::Vertical => (orthogonal, f64::from(target)),
@@ -1791,6 +1855,13 @@ mod tests {
             for gap in [0, 3, 8, 64] {
                 for (tree_index, tree) in nested_trees().into_iter().enumerate() {
                     let label = format!("{chrome:?} gap {gap} tree {tree_index}");
+                    // The same gap is kept inside every edge of the area.
+                    let inner = Rect {
+                        x: area.x + gap,
+                        y: area.y + gap,
+                        width: area.width - 2 * gap,
+                        height: area.height - 2 * gap,
+                    };
                     let layout =
                         PaneLayout::compute_with_gap(&tree, area, chrome, gap, 16, 32).unwrap();
                     assert_eq!(layout.panes.len(), tree.splint_count(), "{label}");
@@ -1800,7 +1871,8 @@ mod tests {
                         .map(|divider| divider.rect)
                         .collect::<Vec<_>>();
 
-                    // Extents and divider lines tile the area exactly once.
+                    // Extents and divider lines tile the area inside the outer
+                    // gap exactly once.
                     let mut tiles = layout
                         .panes
                         .iter()
@@ -1813,11 +1885,11 @@ mod tests {
                         .sum();
                     assert_eq!(
                         covered,
-                        u64::from(area.width) * u64::from(area.height),
+                        u64::from(inner.width) * u64::from(inner.height),
                         "{label}"
                     );
                     while let Some(tile) = tiles.pop() {
-                        assert!(within(tile, area), "{label}");
+                        assert!(within(tile, inner), "{label}");
                         for other in &tiles {
                             assert!(!overlaps(tile, *other), "{label}: {tile:?} {other:?}");
                         }
@@ -1882,8 +1954,8 @@ mod tests {
                             })
                         };
                         let (start_edge, end_edge) = match divider.axis {
-                            Axis::Vertical => (rect.x == area.x, right(rect) == right(area)),
-                            Axis::Horizontal => (rect.y == area.y, bottom(rect) == bottom(area)),
+                            Axis::Vertical => (rect.x == inner.x, right(rect) == right(inner)),
+                            Axis::Horizontal => (rect.y == inner.y, bottom(rect) == bottom(inner)),
                         };
                         assert!(start_edge || meets(true), "{label}: {divider:?}");
                         assert!(end_edge || meets(false), "{label}: {divider:?}");
@@ -1956,8 +2028,11 @@ mod tests {
             height: 400,
         };
         let layout = PaneLayout::compute_with_gap(&root, area, PaneChrome::None, 8, 1, 1).unwrap();
-        assert_eq!(layout.panes[0].rect.width, 496);
+        // 8 px outside, 8 px between: 1000 = 8 + 488 + 8 + 488 + 8.
+        assert_eq!(layout.panes[0].rect.x, 8);
+        assert_eq!(layout.panes[0].rect.width, 488);
         assert_eq!(layout.panes[1].rect.x, 504);
+        assert_eq!(right(layout.panes[1].rect), 992);
         let metrics = PaneResizeMetrics {
             cell_width: 10,
             cell_height: 20,
@@ -1966,21 +2041,35 @@ mod tests {
         };
         assert_eq!(
             directional_resize_ratio(&root, &layout, left_id, FocusDirection::Right, 5, metrics),
-            Some((left_id, 0, SplitRatio::new(550).unwrap()))
+            Some((left_id, 0, SplitRatio::new(551).unwrap()))
         );
         assert_eq!(
             directional_resize_ratio(&root, &layout, right_id, FocusDirection::Left, 5, metrics),
-            Some((left_id, 0, SplitRatio::new(449).unwrap()))
+            Some((left_id, 0, SplitRatio::new(448).unwrap()))
         );
         // A gap the panes cannot spare is rejected rather than squeezed.
         assert!(PaneLayout::compute_with_gap(&root, area, FRAME, 64, 470, 10).is_err());
         assert!(PaneLayout::compute_with_gap(&root, area, FRAME, 0, 470, 10).is_ok());
-        // A single pane has no neighbour and so no gap: the gap is never
-        // applied at the area's outer edges.
+        // A single pane keeps the gap all around it, frame included.
         let (single, _) = leaf();
+        let inner = Rect {
+            x: 64,
+            y: 64,
+            width: 872,
+            height: 272,
+        };
         let alone = PaneLayout::compute_with_gap(&single, area, FRAME, 64, 10, 10).unwrap();
-        assert_eq!(alone.panes[0].allocation, area);
-        assert_eq!(alone.panes[0].extent, area);
+        assert_eq!(alone.area, area);
+        assert_eq!(alone.panes[0].allocation, inner);
+        assert_eq!(alone.panes[0].extent, inner);
+        assert_eq!(alone.panes[0].rect, inset_frame(inner, 8, 16).unwrap());
+        assert!(alone.splits.is_empty() && alone.separators.is_empty());
+        for point in [(32.0, 200.0), (968.0, 200.0), (500.0, 32.0), (500.0, 368.0)] {
+            assert!(!contains_point(alone.panes[0].allocation, point));
+        }
+        // An area no wider or taller than both outer gaps fits no pane.
+        assert!(PaneLayout::compute_with_gap(&single, area, PaneChrome::None, 200, 1, 1).is_err());
+        assert!(PaneLayout::compute_with_gap(&single, area, PaneChrome::None, 199, 1, 1).is_ok());
     }
 
     #[test]
@@ -2010,11 +2099,14 @@ mod tests {
             preferred(400).unwrap(),
             PaneLayout::compute_with_gap(&root, area(400), PaneChrome::None, 64, 100, 10).unwrap()
         );
-        // Two 100 px panes in 230 px leave room for a 30 px gap, not 31.
+        // Two 100 px panes in 230 px leave room for three 10 px gaps (both
+        // outer edges and the middle), not 11: the outer gap shrinks with it.
         let shrunk = preferred(230).unwrap();
-        assert_eq!(shrunk.gap, 30);
+        assert_eq!(shrunk.gap, 10);
+        assert_eq!(shrunk.panes[0].rect.x, 10);
         assert_eq!(shrunk.panes[0].rect.width, 100);
-        assert_eq!(shrunk.panes[1].rect.x, 130);
+        assert_eq!(shrunk.panes[1].rect.x, 120);
+        assert_eq!(right(shrunk.panes[1].rect), 220);
         // Only the gapless layout fits.
         let gapless = preferred(200).unwrap();
         assert_eq!(gapless.gap, 0);
@@ -2138,10 +2230,11 @@ mod tests {
             x: 0,
             y: 0,
             width: 100,
-            height: 50,
+            height: 100,
         };
-        // 60 fits exactly (two 20 px panes); 64 has fallen back to 60.
-        for preferred in [60, 64] {
+        // 20 fits exactly (20 + 20 + 20 + 20 + 20 px, outer gaps included);
+        // 24 has fallen back to 20.
+        for preferred in [20, 24] {
             let (left, left_id) = leaf();
             let (right_leaf, right_id) = leaf();
             let root = branch(Axis::Horizontal, 500, left, right_leaf);
@@ -2157,14 +2250,14 @@ mod tests {
                 .unwrap()
             };
             let layout = compute(&root);
-            assert_eq!(layout.gap, 60, "{preferred}");
+            assert_eq!(layout.gap, 20, "{preferred}");
             assert_eq!(layout.panes[0].rect.width, 20, "{preferred}");
             assert_eq!(layout.panes[1].rect.width, 20, "{preferred}");
             // The growing pane gets its one 10 px cell, the other stays at its
             // minimum, and the gap gives way.
             for (current, direction, ratio, gap, sizes) in [
-                (left_id, FocusDirection::Right, 613, 50, (30, 20)),
-                (right_id, FocusDirection::Left, 400, 50, (20, 30)),
+                (left_id, FocusDirection::Right, 613, 16, (31, 21)),
+                (right_id, FocusDirection::Left, 400, 16, (20, 32)),
             ] {
                 let (target, ancestor, resized) =
                     directional_resize_ratio(&root, &layout, current, direction, 1, metrics)
@@ -2217,7 +2310,7 @@ mod tests {
             x: 0,
             y: 0,
             width: 150,
-            height: 50,
+            height: 100,
         };
         let (left, left_id) = leaf();
         let root = branch(
@@ -2230,10 +2323,10 @@ mod tests {
             PaneLayout::compute_with_preferred_gap(tree, area, PaneChrome::None, 30, 20, 20)
         };
         // The split right side needs two 20 px panes and a gap of its own,
-        // so 30 has fallen back to 23.
+        // with outer gaps on both sides, so 30 has fallen back to 14.
         let layout = compute(&root).unwrap();
-        assert_eq!(layout.gap, 23);
-        assert_eq!(layout.panes[0].rect.width, 63);
+        assert_eq!(layout.gap, 14);
+        assert_eq!(layout.panes[0].rect.width, 54);
         let (target, ancestor, resized) =
             directional_resize_ratio(&root, &layout, left_id, FocusDirection::Right, 1, metrics)
                 .unwrap();
@@ -2247,7 +2340,7 @@ mod tests {
         ));
         let after = compute(&candidate).unwrap();
         assert!(after.gap < layout.gap, "{}", after.gap);
-        assert!(after.panes[0].rect.width >= 73, "{:?}", after.panes[0]);
+        assert!(after.panes[0].rect.width >= 64, "{:?}", after.panes[0]);
         for pane in &after.panes[1..] {
             assert!(pane.rect.width >= 20, "{pane:?}");
         }
