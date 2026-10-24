@@ -96,6 +96,16 @@ pub enum FocusDirection {
     Down,
 }
 
+/// Which Splints a [`PaneLayout::compute_fitting`] layout shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayoutFit {
+    /// Every Splint in the tree.
+    All,
+    /// Only the focused Splint, over the whole area: the tree cannot fit at
+    /// the minimum even without a gap.
+    FocusedOnly,
+}
+
 impl PaneLayout {
     /// Derives deterministic leaf and separator rectangles from one window tree.
     ///
@@ -225,6 +235,56 @@ impl PaneLayout {
             }
         }
         Ok(fits)
+    }
+
+    /// The layout a Window shows: it never fails merely because the Splints
+    /// do not fit. The rule, deterministic for one input:
+    ///
+    /// 1. Every Splint, with the largest gap up to `preferred_gap` that fits
+    ///    ([`Self::compute_with_preferred_gap`]), at the given minimum.
+    /// 2. Otherwise only `focused`, or the tree's first Splint when `focused`
+    ///    is `None` or not in the tree, as one leaf over the whole area, like
+    ///    a zoomed Splint, with the same gap preference. The other Splints
+    ///    are left out of the layout until there is room again.
+    ///
+    /// The minimum is never lowered: it is the smallest terminal grid a pane
+    /// can show, so a smaller pane would have nothing to draw.
+    ///
+    /// # Errors
+    ///
+    /// Returns the single leaf's error when even the focused Splint alone
+    /// cannot fit the area, and errors for empty areas, zero minimums, and
+    /// arithmetic overflow.
+    pub fn compute_fitting(
+        root: &LayoutNode,
+        area: Rect,
+        chrome: PaneChrome,
+        preferred_gap: u32,
+        minimum_width: u32,
+        minimum_height: u32,
+        focused: Option<SplintId>,
+    ) -> Result<(Self, LayoutFit)> {
+        let compute = |root: &LayoutNode| {
+            Self::compute_with_preferred_gap(
+                root,
+                area,
+                chrome,
+                preferred_gap,
+                minimum_width,
+                minimum_height,
+            )
+        };
+        let every = compute(root);
+        if every.is_ok() || matches!(root, LayoutNode::Leaf(_)) {
+            return every.map(|layout| (layout, LayoutFit::All));
+        }
+        let Some(shown) = focused
+            .and_then(|splint_id| root.find_splint(splint_id))
+            .or_else(|| root.find_splint(root.first_splint_id()))
+        else {
+            bail!("pane layout has no Splint to show");
+        };
+        compute(&LayoutNode::Leaf(shown.clone())).map(|layout| (layout, LayoutFit::FocusedOnly))
     }
 
     #[must_use]
@@ -742,6 +802,48 @@ fn gap_yielding_ratio(
         at_step(high)
     };
     SplitRatio::new(permille).ok()
+}
+
+/// Whether splitting `target` along `axis` leaves a tree that fits `area`
+/// without a gap at the given minimum. The client refuses a split that does
+/// not, before sending it, instead of showing a layout that cannot fit; the
+/// gap is not counted because it only shrinks to make room. The new Splint
+/// takes half of `target`'s allocation, as the daemon gives it. A `target`
+/// that is not in `root` is not judged here.
+#[must_use]
+pub fn split_fits(
+    root: &LayoutNode,
+    target: SplintId,
+    axis: Axis,
+    area: Rect,
+    chrome: PaneChrome,
+    minimum_width: u32,
+    minimum_height: u32,
+) -> bool {
+    fn split_leaf(node: &mut LayoutNode, target: SplintId, axis: Axis) -> bool {
+        match node {
+            LayoutNode::Leaf(splint) if splint.id == target => {
+                let current = LayoutNode::Leaf(splint.clone());
+                *node = LayoutNode::Branch {
+                    axis,
+                    ratio: SplitRatio::new(500).expect("an even split ratio is valid"),
+                    first: Box::new(current.clone()),
+                    second: Box::new(current),
+                };
+                true
+            }
+            LayoutNode::Leaf(_) => false,
+            LayoutNode::Branch { first, second, .. } => {
+                split_leaf(first, target, axis) || split_leaf(second, target, axis)
+            }
+        }
+    }
+
+    let mut candidate = root.clone();
+    if !split_leaf(&mut candidate, target, axis) {
+        return true;
+    }
+    PaneLayout::compute_with_chrome(&candidate, area, chrome, minimum_width, minimum_height).is_ok()
 }
 
 pub fn apply_preview_ratio(
@@ -2367,6 +2469,178 @@ mod tests {
         assert_eq!(
             directional_resize_ratio(&root, &layout, left_id, FocusDirection::Right, 10, metrics),
             None
+        );
+    }
+
+    #[test]
+    fn a_tree_that_cannot_fit_shows_only_the_focused_splint_and_never_fails_on_size() {
+        let (top, top_id) = leaf();
+        let (bottom_leaf, bottom_id) = leaf();
+        let root = branch(Axis::Vertical, 500, top, bottom_leaf);
+        let area = |height| Rect {
+            x: 0,
+            y: 0,
+            width: 300,
+            height,
+        };
+        let fitting = |height, focused| {
+            PaneLayout::compute_fitting(
+                &root,
+                area(height),
+                PaneChrome::None,
+                16,
+                100,
+                100,
+                focused,
+            )
+        };
+        // Room for every Splint: exactly the preferred-gap layout.
+        let (every, fit) = fitting(400, Some(bottom_id)).unwrap();
+        assert_eq!(fit, LayoutFit::All);
+        assert_eq!(
+            every,
+            PaneLayout::compute_with_preferred_gap(
+                &root,
+                area(400),
+                PaneChrome::None,
+                16,
+                100,
+                100
+            )
+            .unwrap()
+        );
+        // Two 100 px Splints cannot share 150 px even gapless: only the
+        // focused one is laid out, over the whole area, with the gap.
+        let (alone, fit) = fitting(150, Some(bottom_id)).unwrap();
+        assert_eq!(fit, LayoutFit::FocusedOnly);
+        assert_eq!(alone.panes.len(), 1);
+        assert_eq!(alone.panes[0].splint_id, bottom_id);
+        assert!(alone.splits.is_empty() && alone.separators.is_empty());
+        assert_eq!(alone.area, area(150));
+        assert_eq!(alone.gap, 16);
+        assert_eq!(
+            alone.panes[0].rect,
+            Rect {
+                x: 16,
+                y: 16,
+                width: 268,
+                height: 118,
+            }
+        );
+        // The same input always gives the same layout.
+        assert_eq!(fitting(150, Some(bottom_id)).unwrap(), (alone, fit));
+        // No focused Splint, or one outside the tree: the first Splint.
+        for focused in [None, Some(leaf().1)] {
+            let (first, fit) = fitting(150, focused).unwrap();
+            assert_eq!(fit, LayoutFit::FocusedOnly);
+            assert_eq!(first.panes.len(), 1);
+            assert_eq!(first.panes[0].splint_id, top_id);
+        }
+        // Every laid-out pane keeps at least the minimum, never a zero size.
+        for height in 100..=400 {
+            let (layout, _) = fitting(height, Some(top_id)).unwrap();
+            assert!(
+                layout
+                    .panes
+                    .iter()
+                    .all(|pane| pane.rect.width >= 100 && pane.rect.height >= 100)
+            );
+        }
+        // Not even one Splint fits: an error, which the client turns into
+        // no layout rather than an exit.
+        assert!(fitting(99, Some(top_id)).is_err());
+        let (single, _) = leaf();
+        assert!(
+            PaneLayout::compute_fitting(&single, area(99), PaneChrome::None, 0, 100, 100, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_split_is_admitted_only_when_the_split_tree_fits_gapless() {
+        // The VM report: a 941×1030 half-width tile with frame chrome and a
+        // 10×20 cell (a 20×40 minimum inside a one-cell frame), split below
+        // in the same Splint four times.
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 941,
+            height: 1030,
+        };
+        let chrome = PaneChrome::Frame {
+            vertical_width: 10,
+            horizontal_height: 20,
+        };
+        let (target, target_id) = leaf();
+        let below = |first: LayoutNode| branch(Axis::Vertical, 500, first, leaf().0);
+        let mut tree = target;
+        for _ in 0..3 {
+            assert!(split_fits(
+                &tree,
+                target_id,
+                Axis::Vertical,
+                area,
+                chrome,
+                20,
+                40
+            ));
+            tree = below(tree);
+        }
+        // The target is 128 px tall now; halves of 64 px cannot hold a
+        // 40 px minimum inside a 20 px frame edge on each side.
+        assert_eq!(
+            PaneLayout::compute_with_chrome(&tree, area, chrome, 20, 40)
+                .unwrap()
+                .rect(target_id)
+                .unwrap()
+                .height,
+            88
+        );
+        assert!(!split_fits(
+            &tree,
+            target_id,
+            Axis::Vertical,
+            area,
+            chrome,
+            20,
+            40
+        ));
+        // The other axis still has room, and a Splint outside the tree is
+        // left to the daemon.
+        assert!(split_fits(
+            &tree,
+            target_id,
+            Axis::Horizontal,
+            area,
+            chrome,
+            20,
+            40
+        ));
+        assert!(split_fits(
+            &tree,
+            leaf().1,
+            Axis::Vertical,
+            area,
+            chrome,
+            20,
+            40
+        ));
+        // Had the fourth split arrived anyway (from another client), the
+        // Window shows only the focused Splint, inside its frame.
+        let crowded = below(tree);
+        let (layout, fit) =
+            PaneLayout::compute_fitting(&crowded, area, chrome, 0, 20, 40, Some(target_id))
+                .unwrap();
+        assert_eq!(fit, LayoutFit::FocusedOnly);
+        assert_eq!(layout.panes.len(), 1);
+        assert_eq!(
+            layout.rect(target_id),
+            Some(Rect {
+                x: 10,
+                y: 20,
+                width: 921,
+                height: 990,
+            })
         );
     }
 }

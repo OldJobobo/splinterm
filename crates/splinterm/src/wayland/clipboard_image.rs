@@ -276,8 +276,7 @@ impl super::App {
     }
 
     pub(super) fn clipboard_image_notice(&self, text: &str) {
-        eprintln!("splinterm: {text}");
-        self.surface.window.set_title(format!("Splinterm — {text}"));
+        self.window_notice(text);
     }
 
     pub(super) fn cancel_clipboard_image(&mut self) {

@@ -345,6 +345,17 @@ Application-owned chords are consumed rather than forwarded to the PTY. In a
 legacy direct single-Splint attachment, `Ctrl+Shift+W` remains terminal input;
 it closes only a focused Splint in a managed multi-pane Window.
 
+A split needs room. Every Splint keeps at least two cells of terminal text across
+and down, inside its frame or beside its divider. A split that would leave less
+in the current Window is refused before it reaches the daemon: the Window title
+says so briefly, and nothing opens or takes focus. If a Window becomes too small
+for its Splints anyway, after a smaller tile, a larger scale or font, a docked
+Explorer, or a split made from another Window, the pane gap shrinks first. When
+the Splints cannot fit even without a gap, the Window shows only the focused
+Splint over the whole pane area, as if zoomed, until there is room again. Focus
+keys still move between the Splints, showing the one focused; the others keep
+running at their last size.
+
 The command palette is a curated trusted subset of the same typed action registry
 used by keyboard bindings and projects shortcut labels from the effective
 resolved keymap. It exposes keybinding help, configuration reload, copy mode,
@@ -539,8 +550,9 @@ more direct chords. Saving preserves the durable Lair/Dojo/Splint
 tree, split axes and proportional ratios, default focus, names, validated launch
 working directories, known structured argv, shell policy, scrollback policy, and
 bounded last-known rows and columns. Ratios—not prior pixel dimensions—are the
-saved size authority; a restored Window projects them into its current cell grid
-and fails clearly when minimum pane geometry cannot be satisfied.
+saved size authority; a restored Window projects them into its current cell grid,
+and shows only the focused Splint while they cannot all keep their minimum size
+([Panes and layouts](#panes-and-layouts)).
 
 Retention state has a narrow meaning:
 

@@ -494,6 +494,9 @@ impl KeyboardHandler for App {
                 let mut pending_started = false;
                 let command = match action {
                     PaneTopologyAction::Split(axis) => {
+                        if !self.admit_split(target, axis) {
+                            return;
+                        }
                         let pending = if self.input.optimistic_remote_splits {
                             match self.begin_pending_remote_split(target, axis) {
                                 Ok(Some(pending)) => {

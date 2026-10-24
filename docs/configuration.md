@@ -153,9 +153,9 @@ The gap is a preference, never a reason for a layout to fail. When the Splints
 cannot all keep their two-cell minimum with the configured gap, as in a small
 Window, a tightly split Dojo, or after leaving a zoomed Splint, the gap shrinks
 for that layout to the largest one that fits, down to none, between the Splints
-and at the edges alike, and grows back when there is room again. Only a layout
-that cannot fit even without a gap behaves as it did before the setting
-existed.
+and at the edges alike, and grows back when there is room again. When the
+Splints cannot fit even without a gap, the Window shows only the focused Splint
+until there is room again ([Panes and layouts](usage.md#panes-and-layouts)).
 
 The protocol grid is bounded at 480×128. The shipped 14 px output-scale profile
 uses the complete natural grid on validated 2560×1440 and 3840×2160 surfaces.
