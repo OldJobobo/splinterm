@@ -74,6 +74,17 @@ pub(super) fn tab_strip_border_thickness(
     Ok(stroke.min(indicator.saturating_sub(1)).max(1))
 }
 
+/// Whether the tab strip bottom border is drawn: the option is on and the tab
+/// strip itself is shown. A remote Window's host header, which stays when the
+/// strip is hidden, draws no border on its own.
+pub(super) const fn tab_strip_shows_border(
+    enabled: bool,
+    managed_tabs: bool,
+    strip_visible: bool,
+) -> bool {
+    enabled && managed_tabs && strip_visible
+}
+
 /// The horizontal label inset for a strip `strip_height` logical px tall,
 /// 10 px at the former 34 px strip and scaled with the strip from there.
 const fn tab_label_logical_inset(strip_height: u32) -> u32 {
@@ -1150,7 +1161,7 @@ mod tests {
         App, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, DojoId, ResolvedTheme, TabHitTarget,
         WindowDojoIdentity, ambiguous_tab_label, is_generated_lair_name, label_among_tabs,
         opaque_rgba, tab_context_target, tab_dojo_label, tab_foreground, tab_strip_hit_test,
-        tab_strip_layout,
+        tab_strip_layout, tab_strip_shows_border,
     };
 
     #[test]
@@ -1484,6 +1495,17 @@ mod tests {
             .collect::<Vec<_>>();
         let pixel = canvas[painted[0]..painted[0] + 4].try_into().unwrap();
         (u32::try_from(painted.len()).unwrap(), pixel)
+    }
+
+    #[test]
+    fn tab_strip_border_needs_a_shown_tab_strip() {
+        assert!(tab_strip_shows_border(true, true, true));
+        // Off, a hidden strip (a remote host header alone), or an unmanaged
+        // Window: no border.
+        assert!(!tab_strip_shows_border(false, true, true));
+        assert!(!tab_strip_shows_border(true, true, false));
+        assert!(!tab_strip_shows_border(true, false, true));
+        assert!(!tab_strip_shows_border(true, false, false));
     }
 
     #[test]

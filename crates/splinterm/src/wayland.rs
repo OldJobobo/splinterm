@@ -11666,9 +11666,12 @@ impl App {
                     .remote_host_clipped
                     .as_ref()
                     .map(|cached| &cached.text),
-                self.presentation
-                    .tab_strip_border
-                    .then_some((pane_cell_width, pane_cell_height)),
+                tabs::tab_strip_shows_border(
+                    self.presentation.tab_strip_border,
+                    self.tab_state.managed_tabs,
+                    self.tab_state.tab_strip_visible,
+                )
+                .then_some((pane_cell_width, pane_cell_height)),
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
