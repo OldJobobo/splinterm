@@ -4,7 +4,7 @@ use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    PerfTraceCorrelation, WindowCommand, WindowOptions, WindowUpdate,
+    PerfTraceCorrelation, PhaseEnd, WindowCommand, WindowOptions, WindowSurface, WindowUpdate,
     automation::{
         Connection, DaemonChange, DaemonIdentity, MAX_RENDERER_IMAGE_RESIDENT_BYTES,
         SharedImageContentCache, is_connection_loss, protocol_error, retry_until,
@@ -16,7 +16,7 @@ use splinterm::{
     },
     handoff_status::{RECONNECT_WINDOW, WindowHandoffPhase},
     renderer::{self, RendererOptions},
-    run_window,
+    run_window, run_window_on,
     window_continuation::{
         ContinuationContext, SystemExec, WindowLayoutLedger, installed_client_path,
         run_window_anchor,
@@ -494,12 +494,29 @@ pub(super) fn resolved_window_app_id(app_id: Option<String>) -> String {
     app_id.unwrap_or_else(|| splinterm::config::APP_ID.to_owned())
 }
 
+/// Runs one Window phase: on `surface` when given, or else in a new Window. It
+/// returns the parked Window when the phase kept its surface and the Window
+/// was not closed. A plain phase on a new Window runs exactly as before.
+pub(super) fn run_window_phase(
+    surface: Option<WindowSurface>,
+    options: WindowOptions,
+) -> Result<Option<WindowSurface>> {
+    if surface.is_none() && !options.keep_surface {
+        run_window(options)?;
+        return Ok(None);
+    }
+    Ok(match run_window_on(surface, options)? {
+        PhaseEnd::Kept(surface) => Some(surface),
+        PhaseEnd::Closed => None,
+    })
+}
+
 pub(super) async fn run_live_multipane_window(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
 ) -> Result<()> {
-    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true, None).await
+    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true, None, None).await
 }
 
 /// What a Window relaunched across a daemon upgrade restores after its first
@@ -528,6 +545,7 @@ pub(super) async fn run_resumed_multipane_window(
         app_id,
         true,
         Some(resume),
+        None,
     )
     .await
 }
@@ -538,6 +556,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
     factory: ConnectionFactory,
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
     run_live_multipane_window_inner(
         config,
@@ -547,6 +566,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
         app_id,
         initial_tab_strip_visible,
         None,
+        surface,
     )
     .await
 }
@@ -558,6 +578,7 @@ pub(super) async fn run_owned_live_multipane_window_with_app_id(
     owner: Connection,
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
     run_live_multipane_window_inner(
         config,
@@ -567,6 +588,7 @@ pub(super) async fn run_owned_live_multipane_window_with_app_id(
         app_id,
         initial_tab_strip_visible,
         None,
+        surface,
     )
     .await
 }
@@ -614,6 +636,7 @@ fn first_dojo_gone(owner_still_lists: Option<Result<bool>>) -> Result<()> {
 
 #[allow(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     reason = "multi-pane startup keeps renderer, topology, theme, and input authorities in one lifecycle"
 )]
 async fn run_live_multipane_window_inner(
@@ -624,6 +647,7 @@ async fn run_live_multipane_window_inner(
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
     resume: Option<WindowResume>,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
@@ -729,39 +753,44 @@ async fn run_live_multipane_window_inner(
         restore,
     ));
     let result = tokio::task::spawn_blocking(move || {
-        run_window(WindowOptions {
-            capture: pane_chrome_capture()?,
-            panes,
-            layout: Some(root),
-            active_splint: Some(active_splint),
-            topology_updates: Some(topology_updates),
-            topology_commands: Some(topology_commands),
-            topology_settings: Some(topology_settings),
-            graphical_focus,
-            forced_control_transfer,
-            remote_display_identity,
-            optimistic_remote_splits,
-            local_endpoint,
-            clipboard_image_directory: window_config.clipboard_image_directory,
-            initial_dojo: Some(initial_identity),
-            initial_tab_strip_visible,
-            initial_columns: window_config.initial_columns,
-            initial_rows: window_config.initial_rows,
-            cursor_style: window_config.cursor_style,
-            cursor_blink: window_config.cursor_blink,
-            title: window_config.title,
-            app_id: resolved_window_app_id(app_id),
-            theme,
-            ui_font_size: window_config.ui_font_size,
-            pane_divider_style: window_config.pane_divider_style,
-            frame_title_mode: window_config.frame_title_mode,
-            agent_status_presentation: window_config.explorer_agent_status,
-            keymap: window_config.keymap,
-            prefix_timeout_ms: window_config.prefix_timeout_ms,
-            handoff_status: Some(handoff_status),
-            layout_ledger,
-            ..WindowOptions::default()
-        })
+        // The terminal binds a staged Window's surface for good.
+        run_window_phase(
+            surface,
+            WindowOptions {
+                capture: pane_chrome_capture()?,
+                panes,
+                layout: Some(root),
+                active_splint: Some(active_splint),
+                topology_updates: Some(topology_updates),
+                topology_commands: Some(topology_commands),
+                topology_settings: Some(topology_settings),
+                graphical_focus,
+                forced_control_transfer,
+                remote_display_identity,
+                optimistic_remote_splits,
+                local_endpoint,
+                clipboard_image_directory: window_config.clipboard_image_directory,
+                initial_dojo: Some(initial_identity),
+                initial_tab_strip_visible,
+                initial_columns: window_config.initial_columns,
+                initial_rows: window_config.initial_rows,
+                cursor_style: window_config.cursor_style,
+                cursor_blink: window_config.cursor_blink,
+                title: window_config.title,
+                app_id: resolved_window_app_id(app_id),
+                theme,
+                ui_font_size: window_config.ui_font_size,
+                pane_divider_style: window_config.pane_divider_style,
+                frame_title_mode: window_config.frame_title_mode,
+                agent_status_presentation: window_config.explorer_agent_status,
+                keymap: window_config.keymap,
+                prefix_timeout_ms: window_config.prefix_timeout_ms,
+                handoff_status: Some(handoff_status),
+                layout_ledger,
+                ..WindowOptions::default()
+            },
+        )
+        .map(drop)
     })
     .await
     .context("Wayland window task failed")?;

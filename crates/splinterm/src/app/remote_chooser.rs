@@ -1,17 +1,25 @@
-//! Standalone remote-profile chooser (`splinterm remotes`) and its Recent Dojos entry.
+//! The remote launcher (`splinterm remotes`) and its Recent Dojos entry.
 
 use std::sync::mpsc as std_mpsc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use splinterm::{
-    SessionPickerDecision, SessionPickerItem, SessionPickerUi,
+    SessionPickerDecision, SessionPickerItem, SessionPickerUi, WindowSurface,
     config::AppConfig,
     diagnostics::{DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global},
+    endpoint::ConnectionFactory,
     remote::{RemoteCatalog, RemoteProfile},
-    remote_launch::hand_off_to_remote_window,
+    session_picker::{SessionEntry, collect_sessions},
 };
+use splinterm_core::{Dojo, DojoId, Lair};
+use splinterm_protocol::{Request, Response};
 
-use super::{remote_status::destination, sessions::run_standalone_picker};
+use super::{
+    remote_status::{RemoteConnected, StatusEnd, connect_with_status, destination},
+    session_catalog::{recent_dojo_ids, remember_dojo, select_dojo_from, session_picker_item},
+    sessions::{launch_new_terminal_on, run_staged_picker},
+    window::run_live_multipane_window_with_app_id,
+};
 
 const REMOTE_DOJOS_TITLE: &str = "Remote Dojos…";
 const PROFILES_BLOCKER: &str = "Add profiles in remotes.toml";
@@ -81,34 +89,602 @@ fn report_invalid_catalog(error: &anyhow::Error) {
     eprintln!("splinterm remote profiles are invalid: {error:#}");
 }
 
-/// Shows the remote chooser and opens the selected profile in a new Window.
+/// The remote profile a chooser row names. A row outside the list is refused.
+fn chosen_profile(names: &[String], index: usize) -> Result<String> {
+    names
+        .get(index)
+        .cloned()
+        .context("remote chooser returned an invalid selection")
+}
+
+/// Runs the remote launcher: one Window lists the profiles, shows the chosen
+/// profile's connection status and any SSH prompt, lists that host's Dojos,
+/// and then becomes the remote terminal. Escape steps back one stage; Escape
+/// at the profile list closes the Window.
 pub(in crate::app) async fn run_remotes(config: AppConfig) -> Result<()> {
-    let catalog = RemoteCatalog::load_default();
-    if let Err(error) = &catalog {
-        report_invalid_catalog(error);
-    }
-    let (names, items, blocker) = chooser_contents(&catalog);
-    let decision = tokio::task::spawn_blocking(move || {
-        let (decision, receiver) = std_mpsc::channel();
-        let picker = SessionPickerUi::remote_profiles(items, blocker, decision);
-        run_standalone_picker(&config, picker, &receiver, None)
-    })
-    .await
-    .context("remote chooser task failed")??;
-    match decision {
-        Some(SessionPickerDecision::Open(index)) => {
-            let name = names
-                .get(index)
-                .context("remote chooser returned an invalid selection")?;
-            hand_off_to_remote_window(name)
+    run_launcher(&mut WindowLauncher { config }).await
+}
+
+/// How one launcher phase ended.
+enum Phase<S, T> {
+    /// The compositor or user closed the Window: the launcher ends.
+    Closed,
+    /// The phase ended with `T` and left the Window parked as `S`.
+    Kept(S, T),
+}
+
+/// What the remote Dojo menu chose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DojoChoice {
+    /// Escape: back to the profiles, ending the SSH connection.
+    Back,
+    /// A new terminal on the remote.
+    New,
+    /// The Dojo in this row.
+    Open(usize),
+}
+
+/// The phases the remote launcher shows in its one Window. [`WindowLauncher`]
+/// runs them as Window phases; the tests drive [`run_launcher`] with a fake.
+trait LauncherSurface {
+    /// A parked Window. Dropping it unmaps the Window.
+    type Surface;
+    /// A connected remote. Dropping it ends its SSH connection.
+    type Remote;
+    /// A remote Dojo resolved for opening.
+    type Dojo;
+
+    /// Lists the profiles, on `surface` or else on a new Window. `Some` names
+    /// the chosen profile; `None` is Escape.
+    async fn remote_menu(
+        &mut self,
+        surface: Option<Self::Surface>,
+    ) -> Result<Phase<Self::Surface, Option<String>>>;
+
+    /// Shows the connection status and any SSH prompt while connecting to
+    /// `profile`. `None` means a status key ended the attempt.
+    async fn connect(
+        &mut self,
+        surface: Self::Surface,
+        profile: &str,
+    ) -> Result<Phase<Self::Surface, Option<Self::Remote>>>;
+
+    /// Lists the remote's Dojos, with a New terminal row.
+    async fn dojo_menu(
+        &mut self,
+        surface: Self::Surface,
+        remote: &mut Self::Remote,
+    ) -> Result<Phase<Self::Surface, DojoChoice>>;
+
+    /// Lists the remote's Lairs again and resolves menu row `index`; `None`
+    /// when that Dojo is gone, and the next menu shows the fresh list.
+    async fn resolve(
+        &mut self,
+        remote: &mut Self::Remote,
+        index: usize,
+    ) -> Result<Option<Self::Dojo>>;
+
+    /// Opens the remote terminal on the Window, a new one for `None`. The
+    /// terminal binds the Window to the remote for good.
+    async fn open_terminal(
+        &mut self,
+        surface: Self::Surface,
+        remote: Self::Remote,
+        dojo: Option<Self::Dojo>,
+    ) -> Result<()>;
+}
+
+/// The launcher's stages: profiles, status, Dojos, then the terminal.
+async fn run_launcher<L: LauncherSurface>(launcher: &mut L) -> Result<()> {
+    let mut surface = None;
+    'profiles: loop {
+        let (kept, profile) = match launcher.remote_menu(surface.take()).await? {
+            // Escape at the profile list drops the parked Window, unmapping it.
+            Phase::Closed | Phase::Kept(_, None) => return Ok(()),
+            Phase::Kept(kept, Some(profile)) => (kept, profile),
+        };
+        let (mut kept, mut remote) = match launcher.connect(kept, &profile).await? {
+            Phase::Closed => return Ok(()),
+            // Cancelled or failed: OpenSSH is already dead; back to the list.
+            Phase::Kept(kept, None) => {
+                surface = Some(kept);
+                continue 'profiles;
+            }
+            Phase::Kept(kept, Some(remote)) => (kept, remote),
+        };
+        loop {
+            match launcher.dojo_menu(kept, &mut remote).await? {
+                Phase::Closed => return Ok(()),
+                Phase::Kept(next, DojoChoice::Back) => {
+                    // End the SSH connection before the profiles show again.
+                    drop(remote);
+                    surface = Some(next);
+                    continue 'profiles;
+                }
+                Phase::Kept(next, DojoChoice::New) => {
+                    return launcher.open_terminal(next, remote, None).await;
+                }
+                Phase::Kept(next, DojoChoice::Open(index)) => {
+                    match launcher.resolve(&mut remote, index).await? {
+                        Some(dojo) => {
+                            return launcher.open_terminal(next, remote, Some(dojo)).await;
+                        }
+                        None => kept = next,
+                    }
+                }
+            }
         }
-        Some(SessionPickerDecision::New) | None => Ok(()),
+    }
+}
+
+/// A connected remote, its Lairs as last listed, and the Dojo menu's rows.
+struct ConnectedRemote {
+    factory: ConnectionFactory,
+    lairs: Vec<Lair>,
+    entries: Vec<SessionEntry>,
+}
+
+/// The remote's reopenable Dojos, most recent first.
+fn remote_dojo_entries(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> {
+    collect_sessions(lairs, recent)
+        .into_iter()
+        .filter(SessionEntry::reopenable)
+        .collect()
+}
+
+/// The launcher on real Window phases.
+struct WindowLauncher {
+    config: AppConfig,
+}
+
+impl LauncherSurface for WindowLauncher {
+    type Surface = WindowSurface;
+    type Remote = ConnectedRemote;
+    type Dojo = Dojo;
+
+    async fn remote_menu(
+        &mut self,
+        surface: Option<WindowSurface>,
+    ) -> Result<Phase<WindowSurface, Option<String>>> {
+        // Read again each time, so an edited remotes.toml applies on return.
+        let catalog = RemoteCatalog::load_default();
+        if let Err(error) = &catalog {
+            report_invalid_catalog(error);
+        }
+        let (names, items, blocker) = chooser_contents(&catalog);
+        let config = self.config.clone();
+        let (decision, surface) = tokio::task::spawn_blocking(move || {
+            let (decision, receiver) = std_mpsc::channel();
+            let picker = SessionPickerUi::remote_profiles(items, blocker, decision);
+            run_staged_picker(&config, picker, &receiver, None, surface)
+        })
+        .await
+        .context("remote chooser task failed")??;
+        let Some(surface) = surface else {
+            return Ok(Phase::Closed);
+        };
+        let profile = match decision {
+            Some(SessionPickerDecision::Open(index)) => Some(chosen_profile(&names, index)?),
+            Some(SessionPickerDecision::New) | None => None,
+        };
+        Ok(Phase::Kept(surface, profile))
+    }
+
+    async fn connect(
+        &mut self,
+        surface: WindowSurface,
+        profile: &str,
+    ) -> Result<Phase<WindowSurface, Option<ConnectedRemote>>> {
+        let StatusEnd { connected, surface } = Box::pin(connect_with_status(
+            profile.to_owned(),
+            &self.config,
+            Some(surface),
+            true,
+        ))
+        .await?;
+        let Some(surface) = surface else {
+            return Ok(Phase::Closed);
+        };
+        Ok(match connected {
+            Ok(RemoteConnected { factory, lairs }) => Phase::Kept(
+                surface,
+                Some(ConnectedRemote {
+                    factory,
+                    lairs,
+                    entries: Vec::new(),
+                }),
+            ),
+            Err(not_connected) if not_connected.window_closed => Phase::Closed,
+            Err(_) => Phase::Kept(surface, None),
+        })
+    }
+
+    async fn dojo_menu(
+        &mut self,
+        surface: WindowSurface,
+        remote: &mut ConnectedRemote,
+    ) -> Result<Phase<WindowSurface, DojoChoice>> {
+        remote.entries = remote_dojo_entries(&remote.lairs, &recent_dojo_ids(&remote.factory));
+        let items = remote
+            .entries
+            .iter()
+            .map(session_picker_item)
+            .collect::<Vec<_>>();
+        let config = self.config.clone();
+        let (decision, surface) = tokio::task::spawn_blocking(move || {
+            let empty = items.is_empty();
+            let (decision, receiver) = std_mpsc::channel();
+            let mut picker = SessionPickerUi::new(items, decision);
+            if empty {
+                // A host without Dojos offers only a new terminal.
+                picker.select_new_row();
+            }
+            run_staged_picker(&config, picker, &receiver, None, Some(surface))
+        })
+        .await
+        .context("remote Dojo picker task failed")??;
+        let Some(surface) = surface else {
+            return Ok(Phase::Closed);
+        };
+        let choice = match decision {
+            None => DojoChoice::Back,
+            Some(SessionPickerDecision::New) => DojoChoice::New,
+            Some(SessionPickerDecision::Open(index)) => DojoChoice::Open(index),
+        };
+        Ok(Phase::Kept(surface, choice))
+    }
+
+    async fn resolve(
+        &mut self,
+        remote: &mut ConnectedRemote,
+        index: usize,
+    ) -> Result<Option<Dojo>> {
+        let selected = remote
+            .entries
+            .get(index)
+            .context("remote Dojo picker returned an invalid selection")?;
+        let (lair_id, dojo_id) = (selected.lair_id, selected.dojo_id);
+        let mut connection = remote.factory.connect().await?;
+        let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+            bail!("remote splinterd did not return its session list");
+        };
+        remote.lairs = lairs;
+        let reopenable = remote_dojo_entries(&remote.lairs, &[])
+            .iter()
+            .any(|entry| entry.lair_id == lair_id && entry.dojo_id == dojo_id);
+        if !reopenable {
+            return Ok(None);
+        }
+        let dojo = select_dojo_from(&remote.lairs, (lair_id, dojo_id))?;
+        remember_dojo(&remote.factory, dojo.id);
+        Ok(Some(dojo))
+    }
+
+    async fn open_terminal(
+        &mut self,
+        surface: WindowSurface,
+        remote: ConnectedRemote,
+        dojo: Option<Dojo>,
+    ) -> Result<()> {
+        let config = self.config.clone();
+        match dojo {
+            Some(dojo) => {
+                Box::pin(run_live_multipane_window_with_app_id(
+                    config,
+                    dojo,
+                    remote.factory,
+                    None,
+                    true,
+                    Some(surface),
+                ))
+                .await
+            }
+            None => Box::pin(launch_new_terminal_on(config, remote.factory, surface)).await,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+
+    type Log = Rc<RefCell<Vec<String>>>;
+
+    /// A parked fake Window; dropping it records the unmap.
+    struct FakeSurface(Log);
+
+    impl Drop for FakeSurface {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("unmapped".to_owned());
+        }
+    }
+
+    /// A fake connected remote; dropping it records that SSH ended.
+    struct FakeRemote(Log, String);
+
+    impl Drop for FakeRemote {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push(format!("ssh to {} ended", self.1));
+        }
+    }
+
+    /// A scripted profile list outcome.
+    #[derive(Clone, Copy)]
+    enum Menu {
+        Closed,
+        Escape,
+        Pick(&'static str),
+    }
+
+    /// Scripted phase outcomes: `None` is a compositor close.
+    #[derive(Default)]
+    struct FakeLauncher {
+        log: Log,
+        menus: VecDeque<Menu>,
+        connects: VecDeque<Option<bool>>,
+        dojo_menus: VecDeque<Option<DojoChoice>>,
+        /// Whether each resolved Dojo still exists.
+        resolves: VecDeque<bool>,
+    }
+
+    impl FakeLauncher {
+        fn note(&self, event: impl Into<String>) {
+            self.log.borrow_mut().push(event.into());
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.log.borrow().clone()
+        }
+
+        fn kept<T>(
+            &self,
+            surface: Option<FakeSurface>,
+            outcome: Option<T>,
+        ) -> Phase<FakeSurface, T> {
+            if let Some(value) = outcome {
+                Phase::Kept(
+                    surface.unwrap_or_else(|| FakeSurface(self.log.clone())),
+                    value,
+                )
+            } else {
+                // The compositor closed the Window: it is already gone.
+                std::mem::forget(surface);
+                Phase::Closed
+            }
+        }
+    }
+
+    impl LauncherSurface for FakeLauncher {
+        type Surface = FakeSurface;
+        type Remote = FakeRemote;
+        type Dojo = usize;
+
+        async fn remote_menu(
+            &mut self,
+            surface: Option<FakeSurface>,
+        ) -> Result<Phase<FakeSurface, Option<String>>> {
+            self.note(if surface.is_some() {
+                "profiles"
+            } else {
+                "profiles in a new Window"
+            });
+            let outcome = match self.menus.pop_front().expect("scripted profile list") {
+                Menu::Closed => None,
+                Menu::Escape => Some(None),
+                Menu::Pick(profile) => Some(Some(profile.to_owned())),
+            };
+            Ok(self.kept(surface, outcome))
+        }
+
+        async fn connect(
+            &mut self,
+            surface: FakeSurface,
+            profile: &str,
+        ) -> Result<Phase<FakeSurface, Option<FakeRemote>>> {
+            self.note(format!("status for {profile}"));
+            let outcome = self.connects.pop_front().expect("scripted status");
+            let remote = outcome.map(|connected| {
+                connected.then(|| FakeRemote(self.log.clone(), profile.to_owned()))
+            });
+            Ok(self.kept(Some(surface), remote))
+        }
+
+        async fn dojo_menu(
+            &mut self,
+            surface: FakeSurface,
+            remote: &mut FakeRemote,
+        ) -> Result<Phase<FakeSurface, DojoChoice>> {
+            self.note(format!("Dojos on {}", remote.1));
+            let outcome = self.dojo_menus.pop_front().expect("scripted Dojo menu");
+            Ok(self.kept(Some(surface), outcome))
+        }
+
+        async fn resolve(
+            &mut self,
+            _remote: &mut FakeRemote,
+            index: usize,
+        ) -> Result<Option<usize>> {
+            let exists = self.resolves.pop_front().expect("scripted resolve");
+            self.note(format!(
+                "resolve row {index}: {}",
+                if exists { "found" } else { "gone" }
+            ));
+            Ok(exists.then_some(index))
+        }
+
+        async fn open_terminal(
+            &mut self,
+            surface: FakeSurface,
+            remote: FakeRemote,
+            dojo: Option<usize>,
+        ) -> Result<()> {
+            self.note(match dojo {
+                Some(index) => format!("terminal for row {index} on {}", remote.1),
+                None => format!("new terminal on {}", remote.1),
+            });
+            // The terminal phase owns both until the Window closes.
+            drop((surface, remote));
+            Ok(())
+        }
+    }
+
+    fn launch(launcher: &mut FakeLauncher) -> Vec<String> {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(run_launcher(launcher))
+            .unwrap();
+        launcher.events()
+    }
+
+    #[test]
+    fn escape_at_the_profile_list_closes_the_window() {
+        let mut launcher = FakeLauncher {
+            menus: VecDeque::from([Menu::Escape]),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(
+            launch(&mut launcher),
+            ["profiles in a new Window", "unmapped"]
+        );
+    }
+
+    #[test]
+    fn a_compositor_close_at_any_stage_ends_the_launcher_and_ssh() {
+        let mut at_profiles = FakeLauncher {
+            menus: VecDeque::from([Menu::Closed]),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(launch(&mut at_profiles), ["profiles in a new Window"]);
+
+        let mut at_status = FakeLauncher {
+            menus: VecDeque::from([Menu::Pick("wintermute")]),
+            connects: VecDeque::from([None]),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(
+            launch(&mut at_status),
+            ["profiles in a new Window", "status for wintermute"]
+        );
+
+        let mut at_dojos = FakeLauncher {
+            menus: VecDeque::from([Menu::Pick("wintermute")]),
+            connects: VecDeque::from([Some(true)]),
+            dojo_menus: VecDeque::from([None]),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(
+            launch(&mut at_dojos),
+            [
+                "profiles in a new Window",
+                "status for wintermute",
+                "Dojos on wintermute",
+                "ssh to wintermute ended"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_connection_returns_to_the_profiles() {
+        // Unreachable then Escape, or Escape in the masked field: the status
+        // flow has already killed OpenSSH and reports no connection.
+        let mut launcher = FakeLauncher {
+            menus: VecDeque::from([
+                Menu::Pick("wintermute"),
+                Menu::Pick("straylight"),
+                Menu::Escape,
+            ]),
+            connects: VecDeque::from([Some(false), Some(false)]),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(
+            launch(&mut launcher),
+            [
+                "profiles in a new Window",
+                "status for wintermute",
+                "profiles",
+                "status for straylight",
+                "profiles",
+                "unmapped"
+            ]
+        );
+    }
+
+    #[test]
+    fn escape_at_the_dojo_menu_ends_ssh_before_the_profiles_show() {
+        let mut launcher = FakeLauncher {
+            menus: VecDeque::from([Menu::Pick("wintermute"), Menu::Pick("straylight")]),
+            connects: VecDeque::from([Some(true), Some(true)]),
+            dojo_menus: VecDeque::from([Some(DojoChoice::Back), Some(DojoChoice::New)]),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(
+            launch(&mut launcher),
+            [
+                "profiles in a new Window",
+                "status for wintermute",
+                "Dojos on wintermute",
+                "ssh to wintermute ended",
+                "profiles",
+                "status for straylight",
+                "Dojos on straylight",
+                "new terminal on straylight",
+                "unmapped",
+                "ssh to straylight ended"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dojo_gone_before_it_opens_lists_the_dojos_again() {
+        let mut launcher = FakeLauncher {
+            menus: VecDeque::from([Menu::Pick("wintermute")]),
+            connects: VecDeque::from([Some(true)]),
+            dojo_menus: VecDeque::from([Some(DojoChoice::Open(0)), Some(DojoChoice::Open(1))]),
+            resolves: VecDeque::from([false, true]),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(
+            launch(&mut launcher),
+            [
+                "profiles in a new Window",
+                "status for wintermute",
+                "Dojos on wintermute",
+                "resolve row 0: gone",
+                "Dojos on wintermute",
+                "resolve row 1: found",
+                "terminal for row 1 on wintermute",
+                "unmapped",
+                "ssh to wintermute ended"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_host_without_dojos_offers_only_a_new_terminal() {
+        assert!(remote_dojo_entries(&[], &[]).is_empty());
+        let mut lair = Lair::new("work", std::path::PathBuf::from("/srv"));
+        // A Lair whose only Dojo has no running pane is not reopenable.
+        let splinterm_core::LayoutNode::Leaf(splint) = &mut lair.dojos[0].root else {
+            panic!("a new Lair has one Splint");
+        };
+        splint.state = splinterm_core::SplintState::Exited(0);
+        assert!(remote_dojo_entries(&[lair.clone()], &[]).is_empty());
+        let splinterm_core::LayoutNode::Leaf(splint) = &mut lair.dojos[0].root else {
+            panic!("a new Lair has one Splint");
+        };
+        splint.state = splinterm_core::SplintState::Running;
+        assert_eq!(remote_dojo_entries(&[lair], &[]).len(), 1);
+    }
+
+    #[test]
+    fn a_chooser_row_outside_the_profile_list_is_refused() {
+        let names = ["straylight".to_owned(), "wintermute".to_owned()];
+        assert_eq!(chosen_profile(&names, 1).unwrap(), "wintermute");
+        assert!(chosen_profile(&names, 2).is_err());
+        assert!(chosen_profile(&[], 0).is_err());
+    }
 
     fn catalog(text: &str) -> Result<RemoteCatalog> {
         RemoteCatalog::parse(text, None)

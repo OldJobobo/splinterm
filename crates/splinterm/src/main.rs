@@ -40,7 +40,7 @@ fn main() {
 async fn run_client(window_resume: Option<handoff_acquire::AcquiredWindowResume>) {
     let result = match window_resume {
         Some(window_resume) => app::run_resumed(window_resume).await,
-        None => app::run().await,
+        None => Box::pin(app::run()).await,
     };
     match result {
         Ok(()) => {
