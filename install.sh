@@ -447,6 +447,7 @@ prebuilt_install() {
     exit 1
   fi
   desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.desktop
+  desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.remotes.desktop
   if [[ $was_active == true ]]; then
     local daemon_pid daemon_dir
     daemon_pid=$(systemctl --user show splinterd.service -p MainPID --value)

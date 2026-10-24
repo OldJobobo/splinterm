@@ -99,6 +99,8 @@ package_splinterm() {
 
   install -Dm644 dist/applications/com.oldjobobo.splinterm.desktop \
     "$pkgdir/usr/share/applications/com.oldjobobo.splinterm.desktop"
+  install -Dm644 dist/applications/com.oldjobobo.splinterm.remotes.desktop \
+    "$pkgdir/usr/share/applications/com.oldjobobo.splinterm.remotes.desktop"
   install -Dm644 dist/metainfo/com.oldjobobo.splinterm.metainfo.xml \
     "$pkgdir/usr/share/metainfo/com.oldjobobo.splinterm.metainfo.xml"
   install -Dm644 dist/icons/com.oldjobobo.splinterm.svg \

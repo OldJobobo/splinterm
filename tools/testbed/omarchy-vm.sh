@@ -395,6 +395,7 @@ if [[ -e /usr/bin/splinterm || -L /usr/bin/splinterm ]]; then
   pacman -Qo /usr/bin/splinterm /usr/bin/splinterd
   stat -Lc 'identity: %d:%i %n' /usr/bin/splinterm /usr/bin/splinterd
   desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.desktop
+  desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.remotes.desktop
   # Plan 0061 M3.17: a TEST-ONLY VM acceptance build carries a marker.
   if pacman -Qi splinterm | grep -Fq 'TEST-ONLY' \
     || grep -aqF 'splinterm-vm-acceptance-live-handoff:' /usr/bin/splinterd; then
@@ -454,6 +455,7 @@ command -v splinterm | grep -Fx /usr/bin/splinterm
 pacman -Qo /usr/bin/splinterm /usr/bin/splinterd
 stat -Lc 'identity: %d:%i %n' /usr/bin/splinterm /usr/bin/splinterd
 desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.desktop
+desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.remotes.desktop
 mkdir -m 700 "$runtime" "$state"
 SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" \
   /usr/bin/splinterd >"$runtime/daemon.log" 2>&1 </dev/null &

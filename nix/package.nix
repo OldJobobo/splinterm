@@ -144,6 +144,10 @@ rustPlatform.buildRustPackage {
       "$out/share/applications/com.oldjobobo.splinterm.desktop"
     substituteInPlace "$out/share/applications/com.oldjobobo.splinterm.desktop" \
       --replace-fail 'Exec=splinterm' "Exec=$out/bin/splinterm"
+    install -Dm644 dist/applications/com.oldjobobo.splinterm.remotes.desktop \
+      "$out/share/applications/com.oldjobobo.splinterm.remotes.desktop"
+    substituteInPlace "$out/share/applications/com.oldjobobo.splinterm.remotes.desktop" \
+      --replace-fail 'Exec=splinterm' "Exec=$out/bin/splinterm"
     install -Dm644 dist/icons/com.oldjobobo.splinterm.svg \
       "$out/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg"
     install -Dm644 dist/metainfo/com.oldjobobo.splinterm.metainfo.xml \
@@ -203,6 +207,7 @@ rustPlatform.buildRustPackage {
         ''
     }
     desktop-file-validate "$out/share/applications/com.oldjobobo.splinterm.desktop"
+    desktop-file-validate "$out/share/applications/com.oldjobobo.splinterm.remotes.desktop"
     runHook postInstallCheck
   '';
 
