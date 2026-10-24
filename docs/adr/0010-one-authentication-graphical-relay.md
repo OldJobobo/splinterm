@@ -36,6 +36,11 @@ and eight fixed/transient Window service channels. Channel IDs are nonzero,
 monotonically allocated, and never reused. Every accepted channel opens
 and repeats the existing owner, mode, UID, pidfd, and exact adjacent
 `splinterd` executable validation before carrying opaque private-protocol bytes.
+The daemon passes as the adjacent file itself or, after a verified live upgrade
+(ADR 0011), as a memfd sealed against write, grow, shrink, and further sealing
+whose bytes equal that file. The relay holds the one copy it verified open for
+its lifetime, so later channels skip the comparison only while that exact
+inode is pinned; a replaced `splinterd` is compared again.
 The daemon sees the installed `splinterm-relay` executable and requires its
 exact `--graphical-stdio` mode before accepting `ClientRole::RemoteInteractive`.
 OpenSSH-authenticated native Windows therefore receive normal human terminal

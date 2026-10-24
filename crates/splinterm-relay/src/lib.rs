@@ -11,16 +11,17 @@ use std::{
     os::{
         fd::{AsFd, OwnedFd},
         unix::{
-            fs::{FileTypeExt, MetadataExt, PermissionsExt},
+            fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt},
             net::UnixStream as StdUnixStream,
         },
     },
     path::{Component, Path, PathBuf},
-    sync::mpsc as std_mpsc,
+    sync::{Mutex, mpsc as std_mpsc},
     thread,
 };
 
 use anyhow::{Context, Result, bail};
+use rustix::fs::{SealFlags, fcntl_get_seals};
 use splinterm_graphical_relay::{
     FairData, FairDataChannel, Frame as GraphicalFrame, MAX_CHANNEL_QUEUED_BYTES, MAX_DATA_BYTES,
     MAX_LOGICAL_CHANNELS, fair_data_queue, read_frame as read_graphical_frame,
@@ -34,6 +35,15 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const COPY_BUFFER_BYTES: usize = 16 * 1024;
+
+/// Seals that make a memfd's bytes immutable: the set splinterd applies to
+/// the sealed executable snapshots a live upgrade runs (ADR 0011).
+const IMMUTABLE_SEALS: SealFlags = SealFlags::WRITE
+    .union(SealFlags::GROW)
+    .union(SealFlags::SHRINK)
+    .union(SealFlags::SEAL);
+
+const COMPARE_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SocketIdentity {
@@ -114,7 +124,11 @@ fn peer_exited(pidfd: &OwnedFd) -> Result<bool> {
     Ok(descriptor[0].any().unwrap_or(true))
 }
 
-async fn connect_validated_for(path: &Path, expected_peer: &Path) -> Result<ValidatedConnection> {
+async fn connect_validated_for(
+    path: &Path,
+    expected_peer: &Path,
+    verified: &VerifiedDaemonCopy,
+) -> Result<ValidatedConnection> {
     let before = validate_socket_path(path)?;
     let stream = UnixStream::connect(path)
         .await
@@ -138,17 +152,7 @@ async fn connect_validated_for(path: &Path, expected_peer: &Path) -> Result<Vali
         .context("cannot open daemon socket peer executable")?;
     let expected_executable = File::open(expected_peer)
         .context("cannot open the expected adjacent splinterd executable")?;
-    let peer_metadata = peer_executable
-        .metadata()
-        .context("cannot inspect daemon socket peer executable")?;
-    let expected_metadata = expected_executable
-        .metadata()
-        .context("cannot inspect the expected splinterd executable")?;
-    if !peer_metadata.is_file()
-        || !expected_metadata.is_file()
-        || peer_metadata.dev() != expected_metadata.dev()
-        || peer_metadata.ino() != expected_metadata.ino()
-    {
+    if !runs_adjacent_daemon(peer_executable, &expected_executable, verified)? {
         bail!("daemon socket peer is not the exact adjacent splinterd executable");
     }
     if peer_exited(&peer_pidfd)? {
@@ -166,9 +170,115 @@ async fn connect_validated_for(path: &Path, expected_peer: &Path) -> Result<Vali
 ///
 /// Returns an error when path metadata, connected peer credentials/executable,
 /// or the post-connect endpoint identity does not match the owner-only contract.
-async fn connect_validated(path: &Path) -> Result<ValidatedConnection> {
+async fn connect_validated(
+    path: &Path,
+    verified: &VerifiedDaemonCopy,
+) -> Result<ValidatedConnection> {
     let current = env::current_exe().context("cannot resolve the relay executable")?;
-    connect_validated_for(path, &current.with_file_name("splinterd")).await
+    connect_validated_for(path, &current.with_file_name("splinterd"), verified).await
+}
+
+/// The one sealed daemon copy this relay process has already compared with
+/// the adjacent `splinterd`.
+///
+/// A graphical relay validates the daemon again for every channel. Holding
+/// the verified copy open keeps its inode alive, so its device and inode
+/// cannot name another file while remembered, and its seals keep its bytes
+/// fixed. Each entry also names the adjacent file it matched, so a package
+/// that replaces `splinterd` mid-session is compared again.
+#[derive(Debug, Default)]
+struct VerifiedDaemonCopy {
+    entry: Mutex<Option<VerifiedEntry>>,
+}
+
+#[derive(Debug)]
+struct VerifiedEntry {
+    _held: File,
+    copy: SocketIdentity,
+    expected: SocketIdentity,
+}
+
+fn file_identity(metadata: &std::fs::Metadata) -> SocketIdentity {
+    SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+/// Whether the daemon peer runs the adjacent `splinterd`: the same file, or a
+/// sealed in-memory copy of exactly its bytes. A verified live upgrade runs the
+/// latter (ADR 0011), so its `/proc/<pid>/exe` is never the package file.
+///
+/// The copy proves what the same-file check proves: the peer executes the
+/// installed daemon's code. Any other image, including an unsealed or partly
+/// sealed copy, or the previous build after a package upgrade, is refused.
+fn runs_adjacent_daemon(
+    peer: File,
+    expected: &File,
+    verified: &VerifiedDaemonCopy,
+) -> Result<bool> {
+    let peer_metadata = peer
+        .metadata()
+        .context("cannot inspect daemon socket peer executable")?;
+    let expected_metadata = expected
+        .metadata()
+        .context("cannot inspect the expected splinterd executable")?;
+    if !peer_metadata.is_file() || !expected_metadata.is_file() {
+        return Ok(false);
+    }
+    let copy = file_identity(&peer_metadata);
+    let expected_identity = file_identity(&expected_metadata);
+    if copy == expected_identity {
+        return Ok(true);
+    }
+    let mut remembered = verified
+        .entry
+        .lock()
+        .map_err(|_| anyhow::anyhow!("daemon identity cache is poisoned"))?;
+    if remembered
+        .as_ref()
+        .is_some_and(|entry| entry.copy == copy && entry.expected == expected_identity)
+    {
+        return Ok(true);
+    }
+    // Only a memfd carries seals; any other file answers with an error or
+    // without the immutable set.
+    let Ok(seals) = fcntl_get_seals(&peer) else {
+        return Ok(false);
+    };
+    if !seals.contains(IMMUTABLE_SEALS) || peer_metadata.len() != expected_metadata.len() {
+        return Ok(false);
+    }
+    if !same_bytes(&peer, expected, expected_metadata.len())? {
+        return Ok(false);
+    }
+    *remembered = Some(VerifiedEntry {
+        _held: peer,
+        copy,
+        expected: expected_identity,
+    });
+    Ok(true)
+}
+
+/// Compares two files of `length` bytes from offset zero.
+fn same_bytes(left: &File, right: &File, length: u64) -> Result<bool> {
+    let mut left_buffer = vec![0_u8; COMPARE_CHUNK_BYTES];
+    let mut right_buffer = vec![0_u8; COMPARE_CHUNK_BYTES];
+    let mut offset = 0_u64;
+    while offset < length {
+        let remaining = usize::try_from(length - offset).unwrap_or(usize::MAX);
+        let count = remaining.min(COMPARE_CHUNK_BYTES);
+        left.read_exact_at(&mut left_buffer[..count], offset)
+            .context("cannot read daemon socket peer executable")?;
+        right
+            .read_exact_at(&mut right_buffer[..count], offset)
+            .context("cannot read the expected splinterd executable")?;
+        if left_buffer[..count] != right_buffer[..count] {
+            return Ok(false);
+        }
+        offset += u64::try_from(count).unwrap_or(u64::MAX);
+    }
+    Ok(true)
 }
 
 async fn copy_bounded<R, W>(reader: &mut R, writer: &mut W) -> std::io::Result<u64>
@@ -303,7 +413,7 @@ fn relay_process_stdio(stream: StdUnixStream, peer_pidfd: OwnedFd) -> Result<()>
 /// Returns an error when socket validation, connection, or transport fails.
 pub async fn run_stdio() -> Result<()> {
     let path = socket_path()?;
-    let connection = connect_validated(&path).await?;
+    let connection = connect_validated(&path, &VerifiedDaemonCopy::default()).await?;
     let stream = connection
         .stream
         .into_std()
@@ -781,8 +891,9 @@ where
 /// death, or stdio transport failure.
 pub async fn run_graphical_stdio() -> Result<()> {
     let path = socket_path()?;
+    let verified = VerifiedDaemonCopy::default();
     run_graphical_streams_with_connector(tokio::io::stdin(), tokio::io::stdout(), || {
-        connect_validated(&path)
+        connect_validated(&path, &verified)
     })
     .await
 }
@@ -1053,7 +1164,10 @@ mod tests {
         let accepted = tokio::spawn(async move { listener.accept().await.unwrap().0 });
 
         let expected_peer = env::current_exe().unwrap();
-        let connection = connect_validated_for(&path, &expected_peer).await.unwrap();
+        let connection =
+            connect_validated_for(&path, &expected_peer, &VerifiedDaemonCopy::default())
+                .await
+                .unwrap();
         assert!(
             rustix::io::fcntl_getfd(&connection.stream)
                 .unwrap()
@@ -1063,7 +1177,11 @@ mod tests {
         drop(connection);
         drop(peer);
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(connect_validated_for(&path, &expected_peer).await.is_err());
+        assert!(
+            connect_validated_for(&path, &expected_peer, &VerifiedDaemonCopy::default())
+                .await
+                .is_err()
+        );
 
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
@@ -1077,13 +1195,146 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let accepted = tokio::spawn(async move { listener.accept().await.unwrap().0 });
 
-        let error = connect_validated_for(&path, Path::new("/bin/sh"))
-            .await
-            .unwrap_err();
+        let error =
+            connect_validated_for(&path, Path::new("/bin/sh"), &VerifiedDaemonCopy::default())
+                .await
+                .unwrap_err();
         assert!(error.to_string().contains("adjacent splinterd"));
         drop(accepted.await.unwrap());
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+
+    /// A memfd holding `bytes`, sealed with exactly `seals`.
+    fn memfd_copy(bytes: &[u8], seals: SealFlags) -> File {
+        use std::io::Write as _;
+        let descriptor = rustix::fs::memfd_create(
+            "splinterm-relay-test-daemon",
+            rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap();
+        let mut file = File::from(descriptor);
+        file.write_all(bytes).unwrap();
+        if !seals.is_empty() {
+            rustix::fs::fcntl_add_seals(&file, seals).unwrap();
+        }
+        file
+    }
+
+    /// Opens `file` again by path, as the relay opens `/proc/<pid>/exe`.
+    fn reopened(file: &File) -> File {
+        use std::os::fd::AsRawFd as _;
+        File::open(format!("/proc/self/fd/{}", file.as_raw_fd())).unwrap()
+    }
+
+    fn installed_daemon(label: &str, bytes: &[u8]) -> (PathBuf, File) {
+        let directory = test_directory(label);
+        let path = directory.join("splinterd");
+        fs::write(&path, bytes).unwrap();
+        let file = File::open(&path).unwrap();
+        (directory, file)
+    }
+
+    fn daemon_bytes() -> Vec<u8> {
+        // Spans several compare chunks and ends mid-chunk.
+        (0..(COMPARE_CHUNK_BYTES * 3 + 517))
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_sealed_copy_of_the_adjacent_daemon_is_the_daemon() {
+        let bytes = daemon_bytes();
+        let (directory, expected) = installed_daemon("sealed", &bytes);
+        let copy = memfd_copy(&bytes, IMMUTABLE_SEALS);
+        let verified = VerifiedDaemonCopy::default();
+        assert!(runs_adjacent_daemon(reopened(&copy), &expected, &verified).unwrap());
+        assert!(verified.entry.lock().unwrap().is_some());
+        // Remembered: accepted again without comparing, while held open.
+        assert!(runs_adjacent_daemon(reopened(&copy), &expected, &verified).unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_adjacent_file_itself_is_the_daemon() {
+        let (directory, expected) = installed_daemon("same", &daemon_bytes());
+        let verified = VerifiedDaemonCopy::default();
+        let peer = File::open(directory.join("splinterd")).unwrap();
+        assert!(runs_adjacent_daemon(peer, &expected, &verified).unwrap());
+        assert!(verified.entry.lock().unwrap().is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_unsealed_or_partly_sealed_copy_is_refused() {
+        let bytes = daemon_bytes();
+        let (directory, expected) = installed_daemon("unsealed", &bytes);
+        for seals in [
+            SealFlags::empty(),
+            SealFlags::WRITE,
+            SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK,
+            SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+        ] {
+            let copy = memfd_copy(&bytes, seals);
+            let verified = VerifiedDaemonCopy::default();
+            assert!(
+                !runs_adjacent_daemon(reopened(&copy), &expected, &verified).unwrap(),
+                "{seals:?}"
+            );
+            assert!(verified.entry.lock().unwrap().is_none());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_sealed_copy_of_other_bytes_is_refused() {
+        let bytes = daemon_bytes();
+        let (directory, expected) = installed_daemon("other", &bytes);
+        let verified = VerifiedDaemonCopy::default();
+        let mut changed = bytes.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        let different = memfd_copy(&changed, IMMUTABLE_SEALS);
+        assert!(!runs_adjacent_daemon(reopened(&different), &expected, &verified).unwrap());
+        let shorter = memfd_copy(&bytes[..last], IMMUTABLE_SEALS);
+        assert!(!runs_adjacent_daemon(reopened(&shorter), &expected, &verified).unwrap());
+        let mut longer = bytes.clone();
+        longer.push(0);
+        let longer = memfd_copy(&longer, IMMUTABLE_SEALS);
+        assert!(!runs_adjacent_daemon(reopened(&longer), &expected, &verified).unwrap());
+        assert!(verified.entry.lock().unwrap().is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_unsealed_regular_file_copy_is_refused() {
+        let bytes = daemon_bytes();
+        let (directory, expected) = installed_daemon("regular", &bytes);
+        let copy_path = directory.join("splinterd-copy");
+        fs::write(&copy_path, &bytes).unwrap();
+        let verified = VerifiedDaemonCopy::default();
+        assert!(
+            !runs_adjacent_daemon(File::open(&copy_path).unwrap(), &expected, &verified).unwrap()
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_adjacent_daemon_is_compared_again() {
+        let bytes = daemon_bytes();
+        let (directory, expected) = installed_daemon("replaced", &bytes);
+        let copy = memfd_copy(&bytes, IMMUTABLE_SEALS);
+        let verified = VerifiedDaemonCopy::default();
+        assert!(runs_adjacent_daemon(reopened(&copy), &expected, &verified).unwrap());
+        // A package upgrade installs a different splinterd at a new inode.
+        let mut upgraded = bytes.clone();
+        upgraded[0] ^= 1;
+        let replacement = directory.join("splinterd.new");
+        fs::write(&replacement, &upgraded).unwrap();
+        fs::rename(&replacement, directory.join("splinterd")).unwrap();
+        let upgraded_file = File::open(directory.join("splinterd")).unwrap();
+        assert!(!runs_adjacent_daemon(reopened(&copy), &upgraded_file, &verified).unwrap());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

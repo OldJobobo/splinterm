@@ -194,8 +194,8 @@ pub const fn failure_copy(category: RemoteFailureCategory) -> FailureCopy {
             Code::RemoteDaemon,
         ),
         Category::Remote(Kind::RelayIdentityRejected) => (
-            "The server's splinterd rejected its Splinterm relay.",
-            "Reinstall Splinterm on the server so the relay and daemon match.",
+            "The server's Splinterm could not verify the splinterd it reached.",
+            "On the server, run `splinterm upgrade --now`, or restart splinterd.",
             Code::RemoteInstallation,
         ),
         Category::Remote(Kind::MultiplexerIncompatible | Kind::DaemonProtocolIncompatible) => (
@@ -857,7 +857,7 @@ mod tests {
             (
                 RemoteFailureCategory::Remote(RemoteFailureKind::RelayIdentityRejected),
                 DiagnosticErrorCode::RemoteInstallation,
-                "Reinstall",
+                "splinterm upgrade --now",
             ),
             (
                 RemoteFailureCategory::Remote(RemoteFailureKind::MultiplexerIncompatible),
