@@ -545,6 +545,16 @@ pub struct WindowOptions {
     /// event-loop turn, for the resume record its handoff anchor seals
     /// (Plan 0061 M3.14). `None` for every other Window.
     pub layout_ledger: Option<crate::window_continuation::WindowLayoutLedger>,
+    /// Run as one phase of a staged Window ([`crate::wayland::run_window_on`]):
+    /// a session-picker decision, Escape in a standalone picker, or the end of
+    /// its own status Splint parks the Window for the next phase instead of
+    /// closing it. A compositor or user close still ends it. A phase that holds
+    /// a daemon endpoint, or turns the input method on, cannot keep it.
+    pub keep_surface: bool,
+    /// The Window is the remote connection status screen: an application-owned
+    /// snapshot that controls no terminal. Only that screen sets it; with a
+    /// session picker, it is the only content that may keep a staged surface.
+    pub connection_status_screen: bool,
 }
 
 impl Default for WindowOptions {
@@ -594,6 +604,8 @@ impl Default for WindowOptions {
             mapped: None,
             handoff_status: None,
             layout_ledger: None,
+            keep_surface: false,
+            connection_status_screen: false,
         }
     }
 }

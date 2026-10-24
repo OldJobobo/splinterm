@@ -1521,6 +1521,14 @@ fn resolve_face_source(
     Ok(source)
 }
 
+/// Whether `SPLINTERM_FONT_TRACE` asks for each resolved face on standard
+/// error. Off by default, so a graphical command started from a terminal
+/// prints nothing there about fonts.
+fn font_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SPLINTERM_FONT_TRACE").is_some())
+}
+
 fn stage_face(source: ResolvedFaceSource) -> Result<FontFace> {
     let snapshot = ReadOnlyFileMap::immutable_snapshot(&source.path, MAX_STAGED_FONT_BYTES)
         .with_context(|| format!("snapshot resolved {} font", source.label))?;
@@ -1546,14 +1554,16 @@ fn stage_face(source: ResolvedFaceSource) -> Result<FontFace> {
         normalized_coords: OnceLock::new(),
     };
     font_ref(&face).with_context(|| format!("parse resolved {} font", face.label))?;
-    eprintln!(
-        "Resolved {}: {} {} (face {}, {})",
-        face.label,
-        face.family,
-        face.style,
-        face.index.raw(),
-        face.path.display()
-    );
+    if font_trace_enabled() {
+        eprintln!(
+            "Resolved {}: {} {} (face {}, {})",
+            face.label,
+            face.family,
+            face.style,
+            face.index.raw(),
+            face.path.display()
+        );
+    }
     Ok(face)
 }
 
@@ -1884,10 +1894,12 @@ fn resolve_font_candidate(
             .filter(|source| !excluded.contains(&(source.path.clone(), source.index)))
             .map(unstaged_fallback_face),
     );
-    eprintln!(
-        "Resolved {} ordered Fontconfig fallback faces",
-        faces.len() - 6
-    );
+    if font_trace_enabled() {
+        eprintln!(
+            "Resolved {} ordered Fontconfig fallback faces",
+            faces.len() - 6
+        );
+    }
     for face in &mut faces {
         face.generation_id = id;
     }

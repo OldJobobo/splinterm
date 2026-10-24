@@ -153,8 +153,10 @@ and ordinary lifecycle actions all use logical channels on the same SSH child.
 New Lairs, Dojos, and Splints may be created, attached, controlled, and rendered
 immediately without policy publication or Window restart. Trusted forced control
 transfer remains visibly unavailable and is rejected before request construction.
-A Window remains bound to exactly one endpoint. Local and remote recency files
-are distinct, and profile names—not remote titles or CWDs—select the namespace.
+A Window remains bound to exactly one endpoint: it binds when its terminal
+opens and never changes, and the profile list, status screen, and Dojo list
+that may come first in the same Window hold no endpoint. Local and remote
+recency files are distinct, and profile names—not remote titles or CWDs—select the namespace.
 
 Remote creation uses the existing remote-safe launch envelope: absent CWD and
 argv cause the remote daemon to select its own home, shell, and defaults.
@@ -189,39 +191,64 @@ reachability.
 
 ### Open a remote without a terminal
 
-`splinterm remotes`, the **Remote Dojos** desktop action, the command palette's
-**Open Remote…**, and the **Remote Dojos…** row of the local Recent Dojos
-picker all open one chooser listing the profiles in `remotes.toml` by name and
-OpenSSH destination. Choosing a profile starts a separate
-`splinterm --remote PROFILE` process for the new Window, so every Window stays
-bound to one endpoint. That process inherits no stdin, stdout, or stderr and
-starts a new session without a controlling terminal, so OpenSSH cannot prompt on
-the terminal that started Splinterm. OpenSSH uses an ssh-agent key or your own
-`SSH_ASKPASS` first; when neither can answer, Splinterm asks in the connection
-status Window (see [Authentication and host keys](#authentication-and-host-keys)).
-The Recent Dojos row appears only when profiles exist or
-`remotes.toml` is invalid, and a picker already bound to a remote omits it. An
-absent, empty, or invalid `remotes.toml` leaves the chooser empty with a
-one-line explanation; `splinterm remote list` reports the parse error.
+Open a remote from the **Splinterm Remotes** entry in the app menu, the
+**Remote Dojos** desktop action, or `splinterm remotes`. One Window lists the
+profiles in `remotes.toml` by name and OpenSSH destination. Choosing a profile
+shows its connection status, and any SSH prompt, in the same Window; then that
+host's Dojos, with **New terminal** (the only row when the host has none); and
+then the same Window becomes the remote terminal. Nothing is printed on a
+terminal and no other Window opens.
+
+Escape steps back one stage. From the status screen or a failure it returns to
+the profiles, cancelling any connection in progress; from the Dojo list it
+returns to the profiles and ends that SSH connection; at the profiles it closes
+the Window. Closing the Window at any stage ends the launcher and its SSH
+connection. If the chosen Dojo has ended by the time it opens, the Dojo list
+shows again with the current Dojos. The profiles are read again each time the
+list shows, so an edited `remotes.toml` applies on return.
+
+`splinterm remotes` typed in a terminal returns at once with exit status 0 and
+prints nothing: it starts the launcher again with no stdin, stdout, or stderr
+and in a new session without a controlling terminal, so OpenSSH cannot prompt
+on the terminal that ran it. OpenSSH uses an ssh-agent key or your own
+`SSH_ASKPASS` first; when neither can answer, Splinterm asks on the status
+screen (see [Authentication and host keys](#authentication-and-host-keys)).
+
+**Open Remote…** in the command palette shows the profiles as a pop-up over the
+current Window. Choosing one opens exactly one new Window, which shows the
+connection status, that host's Dojos, and then the remote terminal; the local
+Window only closes the pop-up, and Escape just closes it. The status screen and
+its password field never appear inside a local terminal Window. The **Remote
+Dojos…** row of the local Recent Dojos picker opens the launcher. That row
+appears only when profiles exist or `remotes.toml` is invalid, and a picker
+already bound to a remote omits it. An absent, empty, or invalid `remotes.toml`
+leaves the profile list empty with a one-line explanation; `splinterm remote
+list` reports the parse error.
 
 ### Connection status
 
-Every graphical `--remote` launch, including those started from the app, first
-maps a status Window reading "Connecting to DESTINATION…" while OpenSSH
-authenticates and the remote daemon answers a ping. On success that Window
-closes and the remote's own picker or Window opens. On failure it shows the
+Every graphical `--remote` launch, and the launcher once a profile is chosen,
+first shows a status screen reading "Connecting to DESTINATION…" while OpenSSH
+authenticates and the remote daemon answers a ping and lists its Lairs. On
+success the same Window goes on to the remote's Dojo picker
+(`splinterm --remote PROFILE`, alone or with `dojos`) or the launcher's Dojo
+list; other `--remote` commands open their own Window. On failure it shows the
 categorized cause, a one-line remedy, the newest sanitized OpenSSH lines, and a
 reminder that an ssh-agent key or `SSH_ASKPASS` is the preferred way to
 authenticate without a terminal. Press R or Enter to retry once, or C, Q, or
-Escape to close; Escape also cancels a connection in progress. Each retry
-reloads the profile from `remotes.toml`. A `--remote` argument that breaks the
-profile-name rules is shown as "remote" rather than echoed.
+Escape to close (in the launcher, to go back to the profiles); Escape also
+cancels a connection in progress. Each retry reloads the profile from
+`remotes.toml`. A `--remote` argument that breaks the profile-name rules is
+shown as "remote" rather than echoed.
 
 When OpenSSH needs a password, passphrase, or PIN and has no terminal, agent
-key, or `SSH_ASKPASS` that can answer, the status Window shows OpenSSH's prompt
+key, or `SSH_ASKPASS` that can answer, the status screen shows OpenSSH's prompt
 text and a masked password field: Enter submits and Escape cancels the
 attempt. A yes/no question from OpenSSH takes Y or N instead, and a notice
-such as "confirm user presence" stays until OpenSSH continues.
+such as "confirm user presence" stays until OpenSSH continues. The status
+screen, the profile list, and the Dojo list never use the input method, so a
+typed password never reaches it as composing text; the input method turns on
+only when the terminal opens.
 
 OpenSSH's error output appears only in that Window, never on a terminal. When
 `splinterm --remote` is started from a terminal, stdin is a terminal, so
@@ -229,9 +256,11 @@ Splinterm does not set `SSH_ASKPASS_REQUIRE=force` and OpenSSH may still prompt
 for a password or passphrase on that terminal; the Connecting screen says so.
 Launches from the app have no terminal and never prompt there.
 
-If the status Window closes before a connection is made, whether after a
-failure, by cancelling with Escape, or by the compositor, `splinterm` exits
-with status 1, so a terminal caller can tell that no remote Window opened.
+If a direct `splinterm --remote PROFILE` closes before a connection is made,
+whether after a failure, by cancelling with Escape, or by the compositor,
+`splinterm` exits with status 1, so a terminal caller can tell that no remote
+Window opened. The launcher instead returns to its profiles, or exits 0 when
+its Window is closed.
 
 Each failure is also recorded in the client diagnostics log
 (`${XDG_STATE_HOME:-~/.local/state}/splinterm/logs/`) as a

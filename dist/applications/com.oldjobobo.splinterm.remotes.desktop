@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Splinterm Remotes
+GenericName=Remote Terminal
+Comment=Open a Dojo on a remote host over SSH
+TryExec=splinterm
+Exec=splinterm remotes
+Icon=com.oldjobobo.splinterm
+Terminal=false
+StartupNotify=false
+Categories=Network;RemoteAccess;
+Keywords=ssh;remote;server;host;dojo;terminal;

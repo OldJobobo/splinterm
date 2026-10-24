@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use splinterm::{
+    WindowSurface,
     automation::{Connection, DaemonIdentity},
     config::{AppConfig, ConfigLoad, StartupMode, load_default},
     diagnostics::{
@@ -62,7 +63,7 @@ use super::{
     presets::{materialize_preset, run_preset_command},
     remote_chooser::run_remotes,
     remote_cli::run_remote_command,
-    remote_status::connect_with_status,
+    remote_status::{StatusEnd, connect_with_status},
     session_catalog::{
         automation_launch, create_request, launch_parameters, new_dojo_request_for, remember_dojo,
     },
@@ -225,6 +226,13 @@ pub(crate) async fn run() -> Result<()> {
             "--remote cannot select local service, relay, policy, consent, or remote chooser commands",
         );
     }
+    // Typed in a terminal, the chooser starts itself again detached and this
+    // process returns at once with no output: the one Window it opens may run
+    // OpenSSH, which must never prompt on this terminal. The detached child
+    // (and the desktop entry, which runs through the same path) owns the Window.
+    if remotes_self_detaches(&command, detach_terminal) {
+        return splinterm::remote_launch::open_remote_chooser();
+    }
     if let Command::Upgrade { now } = command {
         return super::upgrade::run(now).await;
     }
@@ -302,27 +310,48 @@ pub(crate) async fn run() -> Result<()> {
     if config.omarchy_integration_hint && remote.is_none() && offers_omarchy_hint(&command) {
         super::omarchy_hint::offer();
     }
-    let factory = match remote {
+    let (factory, surface) = match remote {
         // Graphical remote launches connect inside a status Window that shows
         // progress and categorized failures instead of terminal output. A
         // Window closed before connecting returns `RemoteNotConnected`, which
         // `main` turns into exit status 1.
         Some(profile_name) if graphical => {
-            let factory = connect_with_status(profile_name, &config).await?;
-            // The status Window has ended and recorded its own clean exit; the
-            // remote Window that follows is a new diagnostic Window.
-            if let Some(client_diagnostics) = diagnostics_global() {
+            // `--remote PROFILE` alone opens that remote's Dojos: the picker
+            // and then the terminal follow in the status Window itself.
+            let staged = matches!(command, Command::Dojos);
+            let StatusEnd { connected, surface } =
+                connect_with_status(profile_name, &config, None, staged).await?;
+            let factory = match connected {
+                Ok(connected) => connected.factory,
+                Err(not_connected) => {
+                    // Unmap a parked status Window before the exit status.
+                    drop(surface);
+                    return Err(not_connected.into());
+                }
+            };
+            if surface.is_none()
+                && let Some(client_diagnostics) = diagnostics_global()
+            {
+                // The status Window has ended and recorded its own clean exit;
+                // the remote Window that follows is a new diagnostic Window.
                 client_diagnostics.begin_window(None, None);
             }
-            factory
+            if staged && surface.is_none() {
+                // The compositor closed the status Window as it connected.
+                return Ok(());
+            }
+            (factory, surface)
         }
         Some(profile_name) => {
             let catalog = RemoteCatalog::load_default()?;
-            ConnectionFactory::remote(catalog.get(&profile_name)?).await?
+            (
+                ConnectionFactory::remote(catalog.get(&profile_name)?).await?,
+                None,
+            )
         }
-        None => ConnectionFactory::local(),
+        None => (ConnectionFactory::local(), None),
     };
-    run_configured_command(command, config, factory).await
+    Box::pin(run_configured_command(command, config, factory, surface)).await
 }
 
 /// Resolves the agent status target before connecting, so a missing target is
@@ -411,6 +440,12 @@ async fn run_access_command(
     }
 }
 
+/// `splinterm remotes` started without the internal detach flag relaunches
+/// itself detached rather than opening a Window from this process.
+const fn remotes_self_detaches(command: &Command, detach_terminal: bool) -> bool {
+    matches!(command, Command::Remotes) && !detach_terminal
+}
+
 /// An explicit `--picker` or `--new` wins; otherwise only a commandless launch
 /// follows `main.startup`, so command-bearing XDG launches stay transient.
 const fn xdg_launch_opens_picker(
@@ -470,11 +505,20 @@ fn graphical_command(command: &Command) -> bool {
     )
 }
 
+/// Runs a command on `factory`. `surface` is the parked status Window of a
+/// graphical `--remote PROFILE` Dojos launch, which continues in it.
 async fn run_configured_command(
     command: Command,
     config: AppConfig,
     factory: ConnectionFactory,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
+    if surface.is_some() {
+        return match command {
+            Command::Dojos => run_dojos_from(None, None, config, factory, surface).await,
+            _ => bail!("only a remote Dojo picker continues in its status Window"),
+        };
+    }
     match command {
         Command::Dojos => run_dojos(config, factory).await,
         Command::Remotes => run_remotes(config).await,
@@ -497,7 +541,7 @@ async fn run_configured_command(
             let cwd =
                 cwd.unwrap_or(env::current_dir().context("failed to read current directory")?);
             if xdg_launch_opens_picker(picker, new, command.is_empty(), config.startup) {
-                run_dojos_from(Some(cwd), app_id, config, factory).await
+                run_dojos_from(Some(cwd), app_id, config, factory, None).await
             } else {
                 xdg_launch(cwd, app_id, command, config, factory).await
             }
@@ -518,7 +562,7 @@ async fn run_configured_command(
                 (None, false) => None,
             };
             if picker {
-                run_dojos_from(cwd, None, config, factory).await
+                run_dojos_from(cwd, None, config, factory, None).await
             } else {
                 launch(name, cwd, splint_id, new, command, config, factory).await
             }
@@ -1099,6 +1143,10 @@ mod tests {
         let remotes = Cli::try_parse_from(["splinterm", "remotes"]).unwrap();
         assert!(matches!(remotes.command, Some(Command::Remotes)));
         assert!(!remotes.detach_terminal);
+        assert!(remotes_self_detaches(
+            remotes.command.as_ref().unwrap(),
+            remotes.detach_terminal
+        ));
         assert!(graphical_command(remotes.command.as_ref().unwrap()));
         assert!(Cli::try_parse_from(["splinterm", "remotes", "extra"]).is_err());
 
@@ -1120,6 +1168,11 @@ mod tests {
                 .unwrap();
         assert!(chooser.detach_terminal);
         assert!(matches!(chooser.command, Some(Command::Remotes)));
+        assert!(
+            !remotes_self_detaches(chooser.command.as_ref().unwrap(), chooser.detach_terminal),
+            "the detached child opens the chooser itself"
+        );
+        assert!(!remotes_self_detaches(&Command::Dojos, false));
 
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("remotes"));

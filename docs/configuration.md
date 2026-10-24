@@ -170,6 +170,10 @@ and outline rasterization. When a styled face is missing, substituted to another
 family, or has incompatible terminal-cell metrics, Splinterm warns and
 reuses the regular face.
 
+Set `SPLINTERM_FONT_TRACE=1` to print each resolved face (family, style, face
+index, and path) and the fallback count on standard error; by default nothing
+about fonts is printed.
+
 A valid native family change preserves configured size and sizing policy,
 padding, output DPI, runtime zoom, topology, focus, history and copy-mode
 anchors, modal input, visible IME preedit, and running processes. Splinterm

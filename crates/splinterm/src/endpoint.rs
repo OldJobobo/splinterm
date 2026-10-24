@@ -204,6 +204,16 @@ impl ConnectionFactory {
     pub fn is_local(&self) -> bool {
         matches!(self.endpoint.as_ref(), EndpointKind::Local)
     }
+
+    /// A remote endpoint's profile connect timeout, which also bounds the
+    /// daemon requests made while a staged Window waits; `None` locally.
+    #[must_use]
+    pub fn remote_operation_timeout(&self) -> Option<std::time::Duration> {
+        match self.endpoint.as_ref() {
+            EndpointKind::Local => None,
+            EndpointKind::Remote(session) => Some(session.operation_timeout()),
+        }
+    }
 }
 
 fn remote_display_identity(local: bool, hostname: Option<&str>) -> Option<RemoteDisplayIdentity> {

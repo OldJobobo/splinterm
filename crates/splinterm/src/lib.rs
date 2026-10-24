@@ -48,4 +48,6 @@ pub use frontend::{
     WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
     WindowTopologyUpdate, WindowUpdate,
 };
-pub use wayland::{check_window_options, run as run_window};
+pub use wayland::{
+    CloseSignal, PhaseEnd, WindowSurface, check_window_options, run as run_window, run_window_on,
+};

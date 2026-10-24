@@ -95,7 +95,7 @@ splinterm --remote PROFILE
 splinterm --remote PROFILE reopen
 ```
 
-The first two commands are local-only. `splinterm remotes` opens a profile chooser and starts the chosen remote in its own Window. `remote check` performs bounded, read-only SSH, relay, and daemon probes without mapping a Window. See [Remote access](/docs/remote/).
+The first two commands are local-only. `splinterm remotes` returns at once and prints nothing; it opens one Window that lists the profiles, connects to the chosen one, lists its Dojos, and becomes the remote terminal. `remote check` performs bounded, read-only SSH, relay, and daemon probes without mapping a Window. See [Remote access](/docs/remote/).
 
 ## Machine output
 

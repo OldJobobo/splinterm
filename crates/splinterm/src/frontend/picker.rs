@@ -100,6 +100,15 @@ impl SessionPickerUi {
         }
     }
 
+    /// Selects the item at `index`, as on returning to a list after choosing
+    /// it; an index not listed leaves the selection as it was.
+    pub fn select_item(&mut self, index: usize) {
+        if let Some(position) = self.filtered_indices.iter().position(|item| *item == index) {
+            self.selected = position + 1;
+            self.ensure_selected_visible(SESSION_PICKER_PAGE_ITEMS);
+        }
+    }
+
     /// Selects the creation row, for a picker whose only items are navigation rows.
     pub fn select_new_row(&mut self) {
         if self.new_enabled {
@@ -142,6 +151,18 @@ impl SessionPickerUi {
             new_blocker,
             purpose: None,
             host: SessionPickerHost::Inline,
+        }
+    }
+
+    /// The command palette's remote-profile pop-up: the standalone chooser's
+    /// rows over a Window, with no creation row and the same explanation.
+    pub(crate) fn inline_remote_profiles(
+        items: Vec<SessionPickerItem>,
+        blocker: &'static str,
+    ) -> Self {
+        Self {
+            purpose: Some(SessionPickerPurpose::Remotes),
+            ..Self::inline(items, false, Some(blocker), Some(0))
         }
     }
 
@@ -388,7 +409,7 @@ impl SessionPickerUi {
         let mut lines = if remotes {
             vec![
                 "REMOTES".to_owned(),
-                "Open a remote profile in a new Window.".to_owned(),
+                "Connect to a remote profile.".to_owned(),
                 String::new(),
                 format!("{}+ Add a profile", marker(self.selected == 0)),
                 format!("    {}", self.new_blocker.unwrap_or("Edit remotes.toml")),
@@ -801,9 +822,69 @@ mod tests {
             .unwrap();
         assert!(footer.contains("Enter connect") && !footer.contains("Ctrl+N"));
 
+        // Back from a profile: that profile stays selected.
+        let (decision, _receiver) = std_mpsc::channel();
+        let mut returned = SessionPickerUi::remote_profiles(
+            (0..12)
+                .map(|index| navigation_item(&format!("host{index}"), "host"))
+                .collect(),
+            "Add profiles in remotes.toml",
+            decision,
+        );
+        returned.select_item(10);
+        assert_eq!(
+            returned.selected_decision(),
+            Some(SessionPickerDecision::Open(10))
+        );
+        assert!(
+            returned.visible_start > 0,
+            "the selection is scrolled into view"
+        );
+        returned.select_item(12);
+        assert_eq!(
+            returned.selected_decision(),
+            Some(SessionPickerDecision::Open(10)),
+            "an unlisted row changes nothing"
+        );
+
         let (decision, _receiver) = std_mpsc::channel();
         let empty = SessionPickerUi::remote_profiles(Vec::new(), "No remote profiles", decision);
         assert_eq!(empty.selected_decision(), None);
+    }
+
+    #[test]
+    fn the_palette_remote_pop_up_lists_profiles_inline_without_creation() {
+        let mut picker = SessionPickerUi::inline_remote_profiles(
+            vec![
+                navigation_item("straylight", "straylight"),
+                navigation_item("wintermute", "case@wintermute.example:2222"),
+            ],
+            "Add profiles in remotes.toml",
+        );
+        assert!(picker.is_inline());
+        assert_eq!(picker.purpose(), Some(SessionPickerPurpose::Remotes));
+        assert!(!picker.new_enabled());
+        assert_eq!(picker.new_blocker(), Some("Add profiles in remotes.toml"));
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(0))
+        );
+        assert_eq!(picker.decision_for_target(PickerHitTarget::New), None);
+        picker.select_first();
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(0))
+        );
+        picker.move_selection(1);
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(1))
+        );
+        assert!(picker.into_standalone_decision().is_none());
+
+        let empty = SessionPickerUi::inline_remote_profiles(Vec::new(), "No remote profiles");
+        assert_eq!(empty.selected_decision(), None);
+        assert_eq!(empty.new_blocker(), Some("No remote profiles"));
     }
 
     #[test]

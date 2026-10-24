@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     ffi::{OsStr, OsString},
     io::IsTerminal as _,
-    os::unix::fs::PermissionsExt as _,
+    os::{fd::OwnedFd, unix::fs::PermissionsExt as _},
     path::Path,
     pin::Pin,
     process::Stdio,
@@ -295,26 +295,19 @@ impl RemoteSession {
             provider,
             PromptProvider::UserAskpass | PromptProvider::NativePrompt
         );
-        let mut child = ssh_command(profile, program, provider, environment, broker.as_ref())
-            .spawn()
-            .map_err(|error| {
-                LocalSshFailure::new(
-                    LocalSshProblem::OpenSshUnavailable,
-                    &format!(
-                        "cannot launch OpenSSH executable {}: {error}",
-                        program.to_string_lossy()
-                    ),
-                )
-            })?;
+        let mut child = spawn_openssh(profile, program, provider, environment, broker.as_ref())?;
         let stdin = child
+            .child
             .stdin
             .take()
             .context("OpenSSH child stdin pipe is unavailable")?;
         let stdout = child
+            .child
             .stdout
             .take()
             .context("OpenSSH child stdout pipe is unavailable")?;
         let stderr = child
+            .child
             .stderr
             .take()
             .context("OpenSSH child stderr pipe is unavailable")?;
@@ -322,7 +315,8 @@ impl RemoteSession {
         // until negotiation ends. Dropping it unreleased (a failure, or the
         // status Window dropping this attempt) SIGKILLs OpenSSH before closing
         // any open prompt, so OpenSSH never reads a refusal as an empty password.
-        let askpass_service = broker.and_then(|broker| child.id().map(|pid| broker.serve(pid)));
+        let askpass_service =
+            broker.and_then(|broker| child.child.id().map(|pid| broker.serve(pid)));
         let diagnostics = Arc::new(Mutex::new(DiagnosticRing::default()));
         let stderr_diagnostics = diagnostics.clone();
         let stderr_task = tokio::spawn(async move {
@@ -345,7 +339,7 @@ impl RemoteSession {
         {
             Some(Ok(multiplexer)) => multiplexer,
             Some(Err(error)) => {
-                terminate_child(&mut child).await;
+                terminate_child(&mut child.child).await;
                 // Ends a helper still waiting on the socket, so it releases
                 // the inherited stderr pipe. OpenSSH is already dead.
                 drop(askpass_service);
@@ -361,7 +355,7 @@ impl RemoteSession {
                 }));
             }
             None => {
-                terminate_child(&mut child).await;
+                terminate_child(&mut child.child).await;
                 drop(askpass_service);
                 let _ = stderr_task.await;
                 return Err(anyhow::Error::new(RemoteFailure {
@@ -465,6 +459,12 @@ impl RemoteSession {
                 ),
             })),
         }
+    }
+
+    /// The profile's connect timeout, which bounds each channel admission.
+    #[must_use]
+    pub const fn operation_timeout(&self) -> Duration {
+        self.operation_timeout
     }
 
     /// Returns bounded sanitized SSH diagnostics retained for this session.
@@ -674,11 +674,122 @@ where
     }
 }
 
+/// Starts OpenSSH. OpenSSH may turn echo off on our controlling terminal to
+/// read a passphrase, and killed mid-read it never turns it back on, so the
+/// terminal's modes are saved before it starts and restored once it ends.
+fn spawn_openssh(
+    profile: &RemoteProfile,
+    program: &OsStr,
+    provider: PromptProvider,
+    environment: &AuthEnvironment,
+    broker: Option<&AskpassBroker>,
+) -> Result<OpenSsh> {
+    let terminal_modes = (provider == PromptProvider::Terminal)
+        .then(ControllingTerminal::open)
+        .flatten()
+        .and_then(TerminalModeGuard::capture);
+    let child = ssh_command(profile, program, provider, environment, broker)
+        .spawn()
+        .map_err(|error| {
+            LocalSshFailure::new(
+                LocalSshProblem::OpenSshUnavailable,
+                &format!(
+                    "cannot launch OpenSSH executable {}: {error}",
+                    program.to_string_lossy()
+                ),
+            )
+        })?;
+    Ok(OpenSsh {
+        child,
+        _terminal_modes: terminal_modes,
+    })
+}
+
+/// The OpenSSH child and the terminal modes to restore once it has ended.
+struct OpenSsh {
+    /// Dropped first: `kill_on_drop` SIGKILLs a still-running OpenSSH.
+    child: Child,
+    /// Dropped after the child (fields drop in declaration order), so a
+    /// cancelled attempt restores echo only once OpenSSH is killed.
+    _terminal_modes: Option<TerminalModeGuard>,
+}
+
+/// A terminal whose modes OpenSSH may change while it prompts.
+trait TerminalModes {
+    type Saved;
+    /// Whether this process's group is the terminal's foreground group, so it
+    /// may read or change the terminal's modes without being stopped.
+    fn in_foreground(&self) -> bool;
+    fn save(&self) -> Option<Self::Saved>;
+    fn restore(&self, saved: &Self::Saved);
+}
+
+/// This process's controlling terminal, opened as `/dev/tty`.
+struct ControllingTerminal(OwnedFd);
+
+impl ControllingTerminal {
+    /// Opens the controlling terminal; `None` without one.
+    fn open() -> Option<Self> {
+        use rustix::fs::{Mode, OFlags};
+        rustix::fs::open(
+            "/dev/tty",
+            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()
+        .map(Self)
+    }
+}
+
+impl TerminalModes for ControllingTerminal {
+    type Saved = rustix::termios::Termios;
+
+    fn in_foreground(&self) -> bool {
+        rustix::termios::tcgetpgrp(&self.0).is_ok_and(|group| group == rustix::process::getpgrp())
+    }
+
+    fn save(&self) -> Option<Self::Saved> {
+        rustix::termios::tcgetattr(&self.0).ok()
+    }
+
+    fn restore(&self, saved: &Self::Saved) {
+        let _ = rustix::termios::tcsetattr(&self.0, rustix::termios::OptionalActions::Now, saved);
+    }
+}
+
+/// Restores a terminal's saved modes when dropped, but only while this
+/// process is still in its foreground: a backgrounded launch leaves the
+/// terminal to whoever owns it now.
+struct TerminalModeGuard<T: TerminalModes = ControllingTerminal> {
+    terminal: T,
+    saved: T::Saved,
+}
+
+impl<T: TerminalModes> TerminalModeGuard<T> {
+    /// Saves `terminal`'s modes when this process is in its foreground.
+    fn capture(terminal: T) -> Option<Self> {
+        if !terminal.in_foreground() {
+            return None;
+        }
+        let saved = terminal.save()?;
+        Some(Self { terminal, saved })
+    }
+}
+
+impl<T: TerminalModes> Drop for TerminalModeGuard<T> {
+    fn drop(&mut self) {
+        if self.terminal.in_foreground() {
+            self.terminal.restore(&self.saved);
+        }
+    }
+}
+
 async fn supervise_child(
-    mut child: Child,
+    mut ssh: OpenSsh,
     cancellation: CancellationToken,
     mut stderr_task: tokio::task::JoinHandle<()>,
 ) {
+    let child = &mut ssh.child;
     tokio::select! {
         _ = child.wait() => {}
         () = cancellation.cancelled() => {
@@ -688,6 +799,8 @@ async fn supervise_child(
             }
         }
     }
+    // OpenSSH has exited: put back any terminal modes it left changed.
+    drop(ssh);
     if tokio::time::timeout(CHILD_GRACE_PERIOD, &mut stderr_task)
         .await
         .is_err()
@@ -829,6 +942,88 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::SystemTime};
 
     use super::*;
+
+    /// A fake terminal: whether this process is in its foreground, its
+    /// current mode, and every restore.
+    #[derive(Clone, Default)]
+    struct FakeTerminal {
+        foreground: std::rc::Rc<std::cell::Cell<bool>>,
+        echo: std::rc::Rc<std::cell::Cell<bool>>,
+        restores: std::rc::Rc<std::cell::Cell<u32>>,
+        unreadable: bool,
+    }
+
+    impl TerminalModes for FakeTerminal {
+        type Saved = bool;
+
+        fn in_foreground(&self) -> bool {
+            self.foreground.get()
+        }
+
+        fn save(&self) -> Option<bool> {
+            (!self.unreadable).then(|| self.echo.get())
+        }
+
+        fn restore(&self, saved: &bool) {
+            self.echo.set(*saved);
+            self.restores.set(self.restores.get() + 1);
+        }
+    }
+
+    fn foreground_terminal() -> FakeTerminal {
+        let terminal = FakeTerminal::default();
+        terminal.foreground.set(true);
+        terminal.echo.set(true);
+        terminal
+    }
+
+    #[test]
+    fn a_killed_openssh_leaves_echo_restored_on_a_foreground_terminal() {
+        let terminal = foreground_terminal();
+        let guard = TerminalModeGuard::capture(terminal.clone()).expect("foreground terminal");
+        // OpenSSH turns echo off to read a passphrase, then is killed.
+        terminal.echo.set(false);
+        drop(guard);
+        assert!(terminal.echo.get(), "echo is back on");
+        assert_eq!(terminal.restores.get(), 1);
+    }
+
+    #[test]
+    fn a_terminal_this_process_does_not_own_is_left_alone() {
+        // Started in the background: nothing is saved or restored.
+        let background = FakeTerminal::default();
+        assert!(TerminalModeGuard::capture(background.clone()).is_none());
+        assert_eq!(background.restores.get(), 0);
+
+        // Moved to the background meanwhile: the new owner keeps its modes.
+        let terminal = foreground_terminal();
+        let guard = TerminalModeGuard::capture(terminal.clone()).unwrap();
+        terminal.echo.set(false);
+        terminal.foreground.set(false);
+        drop(guard);
+        assert!(!terminal.echo.get());
+        assert_eq!(terminal.restores.get(), 0);
+
+        // Modes that cannot be read are never written.
+        let unreadable = FakeTerminal {
+            unreadable: true,
+            ..foreground_terminal()
+        };
+        assert!(TerminalModeGuard::capture(unreadable.clone()).is_none());
+        assert_eq!(unreadable.restores.get(), 0);
+    }
+
+    #[test]
+    fn openssh_is_dropped_before_its_terminal_modes_are_restored() {
+        // Field drop order is declaration order: the kill_on_drop child goes
+        // first. This pins the field order the restore depends on.
+        let source = include_str!("remote_session.rs");
+        let start = source.find("struct OpenSsh {").unwrap();
+        let body = &source[start..start + source[start..].find("\n}").unwrap()];
+        let child = body.find("    child: Child,").unwrap();
+        let modes = body.find("    _terminal_modes:").unwrap();
+        assert!(child < modes);
+    }
 
     #[test]
     fn failure_categories_are_specific_and_diagnostics_are_bounded() {

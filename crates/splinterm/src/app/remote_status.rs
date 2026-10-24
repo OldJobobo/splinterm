@@ -4,7 +4,7 @@ use std::{future::Future, io::IsTerminal as _, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    WindowCommand, WindowOptions, WindowUpdate,
+    WindowCommand, WindowOptions, WindowSurface, WindowUpdate,
     config::{AppConfig, ResolvedTheme},
     diagnostics::{DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global},
     endpoint::ConnectionFactory,
@@ -13,21 +13,22 @@ use splinterm::{
         self as askpass, AskpassKind, AskpassReply, AskpassRequest, FieldOutcome, NativePrompt,
         Secret, apply_secret_input, confirm_key,
     },
+    remote_launch::destination,
     remote_session::RemoteFailureKind,
     remote_status::{
         RemoteFailureCategory, RemoteProfileError, RemoteStatus, RemoteStatusEffect,
         RemoteStatusFailure, profile_label, status_key,
     },
-    run_window,
 };
 use splinterm_automation_client::ImageContentLeaseSet;
-use splinterm_core::SplintId;
+use splinterm_core::{Lair, SplintId};
 use splinterm_protocol::{Request, Response, TerminalSnapshot};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    sessions::configure_picker_renderer, theme_watch::load_startup_theme,
-    window::resolved_window_app_id,
+    sessions::configure_picker_renderer,
+    theme_watch::load_startup_theme,
+    window::{resolved_window_app_id, run_window_phase},
 };
 
 const STATUS_UPDATE_CAPACITY: usize = 8;
@@ -40,15 +41,37 @@ pub(in crate::app) const PROMPT_CANCELLED: &str = "The Splinterm password prompt
 pub(in crate::app) const PROMPT_TIMED_OUT: &str = "The Splinterm prompt was not answered in time.";
 
 /// The status Window closed before a connection was made: after a shown
-/// failure, by cancelling an attempt, or by the compositor. The process exits
-/// with status 1 so a terminal caller sees that no remote Window opened.
+/// failure, by cancelling an attempt, or by the compositor. A direct
+/// `splinterm --remote PROFILE` exits with status 1 so a terminal caller sees
+/// that no remote Window opened; the remote launcher returns to its profiles.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct RemoteNotConnected {
     /// The category of the last failure shown, if any.
     pub(crate) last_failure: Option<DiagnosticErrorCode>,
+    /// Whether the Window itself went away (the compositor or user closed
+    /// it, or it never mapped) rather than a status key ending the attempt.
+    pub(crate) window_closed: bool,
 }
 
 impl RemoteNotConnected {
+    /// A status key (C, Q, or Escape) ended the attempt.
+    #[cfg(test)]
+    pub(crate) const fn cancelled(last_failure: Option<DiagnosticErrorCode>) -> Self {
+        Self {
+            last_failure,
+            window_closed: false,
+        }
+    }
+
+    /// The Window went away before connecting.
+    #[cfg(test)]
+    pub(crate) const fn window_gone(last_failure: Option<DiagnosticErrorCode>) -> Self {
+        Self {
+            last_failure,
+            window_closed: true,
+        }
+    }
+
     /// The process exit status for a remote launch that never connected.
     pub(crate) const EXIT_CODE: i32 = 1;
 }
@@ -60,17 +83,6 @@ impl std::fmt::Display for RemoteNotConnected {
 }
 
 impl std::error::Error for RemoteNotConnected {}
-
-/// Formats the OpenSSH destination a profile connects to.
-pub(in crate::app) fn destination(profile: &RemoteProfile) -> String {
-    let user = profile
-        .user()
-        .map_or_else(String::new, |user| format!("{user}@"));
-    let port = profile
-        .port()
-        .map_or_else(String::new, |port| format!(":{port}"));
-    format!("{user}{}{port}", profile.host())
-}
 
 /// The status screen's channel to its Window.
 struct StatusWindow {
@@ -268,6 +280,10 @@ fn command_effect(
 /// question ends the attempt after `prompt_timeout`. Nothing here writes to
 /// stdout or stderr, and key input is wiped after use because it may be a
 /// password.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one select loop orders cancellation, prompts, attempts, and hand-over"
+)]
 async fn run_status_flow<T, F, Fut>(
     mut status: RemoteStatus,
     mut window: StatusWindow,
@@ -310,6 +326,7 @@ where
             // Escape, or a compositor close is never overtaken by hand-over.
             biased;
             command = commands.recv() => {
+                let window_closed = command.is_none();
                 let effect = match command_effect(command, &mut active, &mut status) {
                     CommandEffect::Status(effect) => effect,
                     CommandEffect::Prompt(PromptInput::None) => RemoteStatusEffect::None,
@@ -335,7 +352,10 @@ where
                         drop(attempt.take());
                         drop(active.take());
                         window.close().await;
-                        return Err(RemoteNotConnected { last_failure });
+                        return Err(RemoteNotConnected {
+                            last_failure,
+                            window_closed,
+                        });
                     }
                     RemoteStatusEffect::None
                     | RemoteStatusEffect::ShowFailure
@@ -402,7 +422,7 @@ fn start_attempt(
     prompt: Option<NativePrompt>,
 ) -> (
     String,
-    impl Future<Output = Result<ConnectionFactory>> + use<>,
+    impl Future<Output = Result<RemoteConnected>> + use<>,
 ) {
     let profile = load_profile(profile_name);
     let shown = profile
@@ -411,14 +431,21 @@ fn start_attempt(
     (shown, connect_profile(profile, prompt))
 }
 
+/// A connected remote endpoint and the Lairs it listed when it connected.
+pub(in crate::app) struct RemoteConnected {
+    pub(in crate::app) factory: ConnectionFactory,
+    pub(in crate::app) lairs: Vec<Lair>,
+}
+
 /// One attempt: authenticate with the loaded profile and prove the remote
-/// daemon answers, so daemon failures are reported here rather than after
-/// hand-over. Only catalog errors are marked as profile errors; every later
-/// error keeps its own category or is reported as a transport failure.
+/// daemon answers and lists its Lairs (as `splinterm remote check` does), so
+/// daemon and listing failures are reported here rather than after hand-over.
+/// Only catalog errors are marked as profile errors; every later error keeps
+/// its own category or is reported as a transport failure.
 async fn connect_profile(
     profile: Result<RemoteProfile>,
     prompt: Option<NativePrompt>,
-) -> Result<ConnectionFactory> {
+) -> Result<RemoteConnected> {
     let profile = profile.map_err(|error| RemoteProfileError::wrap(&error))?;
     let deadline = Duration::from_secs(u64::from(profile.connect_timeout_seconds()));
     let factory = match &prompt {
@@ -434,7 +461,13 @@ async fn connect_profile(
     ) {
         bail!("remote splinterd returned an invalid ping response");
     }
-    Ok(factory)
+    let Response::Lairs { lairs, .. } = connection
+        .request_with_deadline(Request::ListLairs, deadline)
+        .await?
+    else {
+        bail!("remote splinterd returned an invalid topology response");
+    };
+    Ok(RemoteConnected { factory, lairs })
 }
 
 fn report_failure(failure: &RemoteStatusFailure) {
@@ -475,22 +508,36 @@ fn status_window_options(
         prefix_timeout_ms: config.prefix_timeout_ms,
         // The status Window may hold a password field: no IME composition.
         input_method: false,
+        // The one non-picker content that may keep a staged Window.
+        connection_status_screen: true,
         mapped: Some(mapped),
         ..WindowOptions::default()
     }
 }
 
-/// Maps a status Window, connects to `profile_name`, and returns the connected
-/// endpoint once the Window has closed.
+/// What a status screen ended with, and the Window it left parked.
+pub(in crate::app) struct StatusEnd {
+    /// The connected endpoint, or why none was opened.
+    pub(in crate::app) connected: Result<RemoteConnected, RemoteNotConnected>,
+    /// The parked Window, when the phase kept its surface and the Window
+    /// was not closed.
+    pub(in crate::app) surface: Option<WindowSurface>,
+}
+
+/// Shows the status screen, on `surface` when given or else in a new Window,
+/// connects to `profile_name`, and returns once the screen has ended. With
+/// `keep_surface`, the Window is left parked for the next phase, both after
+/// connecting and after a status key cancelled.
 ///
 /// # Errors
 ///
-/// Returns [`RemoteNotConnected`] when the Window closed before connecting,
-/// or an error when the Window itself failed.
+/// Returns an error when the Window itself failed.
 pub(in crate::app) async fn connect_with_status(
     profile_name: String,
     config: &AppConfig,
-) -> Result<ConnectionFactory> {
+    surface: Option<WindowSurface>,
+    keep_surface: bool,
+) -> Result<StatusEnd> {
     let initial = load_profile(&profile_name).map_or_else(
         |_| profile_label(&profile_name).to_owned(),
         |profile| destination(&profile),
@@ -508,14 +555,18 @@ pub(in crate::app) async fn connect_with_status(
     let window_task = tokio::task::spawn_blocking(move || {
         let theme = load_startup_theme(&window_config);
         configure_picker_renderer(&window_config, theme)?;
-        run_window(status_window_options(
-            &window_config,
-            theme,
-            snapshot,
-            update_receiver,
-            command_sender,
-            mapped_sender,
-        ))
+        let options = WindowOptions {
+            keep_surface,
+            ..status_window_options(
+                &window_config,
+                theme,
+                snapshot,
+                update_receiver,
+                command_sender,
+                mapped_sender,
+            )
+        };
+        run_window_phase(surface, options)
     });
     // Without a usable executable path, OpenSSH cannot run the helper; the
     // sender then drops and the flow stops listening for prompts.
@@ -537,10 +588,10 @@ pub(in crate::app) async fn connect_with_status(
         report_failure,
     )
     .await;
-    window_task
+    let surface = window_task
         .await
         .context("remote status Window task failed")??;
-    connected.map_err(anyhow::Error::new)
+    Ok(StatusEnd { connected, surface })
 }
 
 #[cfg(test)]
@@ -575,6 +626,8 @@ mod tests {
         );
         assert!(options.commands.is_some());
         assert!(!options.input_method);
+        assert!(options.connection_status_screen);
+        assert!(!WindowOptions::default().connection_status_screen);
         assert!(WindowOptions::default().controller_title);
     }
 
@@ -834,7 +887,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             flow.await.unwrap(),
-            Err(RemoteNotConnected { last_failure: None })
+            Err(RemoteNotConnected::cancelled(None))
         );
         expect_closed(&mut harness).await;
     }
@@ -858,7 +911,7 @@ mod tests {
             fixed_destination,
         )
         .await;
-        assert_eq!(connected, Err(RemoteNotConnected { last_failure: None }));
+        assert_eq!(connected, Err(RemoteNotConnected::cancelled(None)));
         expect_closed(&mut harness).await;
     }
 
@@ -880,7 +933,7 @@ mod tests {
             fixed_destination,
         )
         .await;
-        assert_eq!(connected, Err(RemoteNotConnected { last_failure: None }));
+        assert_eq!(connected, Err(RemoteNotConnected::window_gone(None)));
     }
 
     #[tokio::test]
@@ -911,9 +964,9 @@ mod tests {
         let outcome = flow.await.unwrap();
         assert_eq!(
             outcome,
-            Err(RemoteNotConnected {
-                last_failure: Some(DiagnosticErrorCode::RemoteProfile)
-            })
+            Err(RemoteNotConnected::cancelled(Some(
+                DiagnosticErrorCode::RemoteProfile
+            )))
         );
         // `main` exits nonzero for this error, as before the status Window.
         let error = anyhow::Error::new(outcome.unwrap_err());
@@ -949,9 +1002,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             flow.await.unwrap(),
-            Err(RemoteNotConnected {
-                last_failure: Some(DiagnosticErrorCode::RemoteTransport)
-            })
+            Err(RemoteNotConnected::cancelled(Some(
+                DiagnosticErrorCode::RemoteTransport
+            )))
         );
     }
 
@@ -1153,9 +1206,9 @@ mod tests {
         input(&harness, b"c").await;
         assert_eq!(
             flow.await.unwrap(),
-            Err(RemoteNotConnected {
-                last_failure: Some(DiagnosticErrorCode::RemoteAuthentication)
-            })
+            Err(RemoteNotConnected::cancelled(Some(
+                DiagnosticErrorCode::RemoteAuthentication
+            )))
         );
     }
 
@@ -1267,7 +1320,7 @@ mod tests {
         input(&harness, b"\x1b").await;
         assert_eq!(
             flow.await.unwrap(),
-            Err(RemoteNotConnected { last_failure: None })
+            Err(RemoteNotConnected::cancelled(None))
         );
     }
 
@@ -1304,7 +1357,7 @@ mod tests {
         input(&harness, b"c").await;
         assert_eq!(
             flow.await.unwrap(),
-            Err(RemoteNotConnected { last_failure: None })
+            Err(RemoteNotConnected::cancelled(None))
         );
     }
 
@@ -1353,7 +1406,7 @@ mod tests {
         input(&harness, b"c").await;
         assert_eq!(
             flow.await.unwrap(),
-            Err(RemoteNotConnected { last_failure: None })
+            Err(RemoteNotConnected::cancelled(None))
         );
         assert!(
             reply.await.is_err(),
@@ -1449,7 +1502,7 @@ mod tests {
             fixed_destination,
         )
         .await;
-        assert_eq!(connected, Err(RemoteNotConnected { last_failure: None }));
+        assert_eq!(connected, Err(RemoteNotConnected::window_gone(None)));
     }
 
     #[tokio::test]

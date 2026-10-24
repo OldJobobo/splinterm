@@ -1,10 +1,10 @@
 //! Graphical window lifecycle orchestration.
 
-use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, env, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    PerfTraceCorrelation, WindowCommand, WindowOptions, WindowUpdate,
+    PerfTraceCorrelation, PhaseEnd, WindowCommand, WindowOptions, WindowSurface, WindowUpdate,
     automation::{
         Connection, DaemonChange, DaemonIdentity, MAX_RENDERER_IMAGE_RESIDENT_BYTES,
         SharedImageContentCache, is_connection_loss, protocol_error, retry_until,
@@ -16,7 +16,7 @@ use splinterm::{
     },
     handoff_status::{RECONNECT_WINDOW, WindowHandoffPhase},
     renderer::{self, RendererOptions},
-    run_window,
+    run_window, run_window_on,
     window_continuation::{
         ContinuationContext, SystemExec, WindowLayoutLedger, installed_client_path,
         run_window_anchor,
@@ -494,12 +494,84 @@ pub(super) fn resolved_window_app_id(app_id: Option<String>) -> String {
     app_id.unwrap_or_else(|| splinterm::config::APP_ID.to_owned())
 }
 
+/// Runs one Window phase: on `surface` when given, or else in a new Window. It
+/// returns the parked Window when the phase kept its surface and the Window
+/// was not closed. A plain phase on a new Window runs exactly as before.
+pub(super) fn run_window_phase(
+    surface: Option<WindowSurface>,
+    options: WindowOptions,
+) -> Result<Option<WindowSurface>> {
+    if surface.is_none() && !options.keep_surface {
+        run_window(options)?;
+        return Ok(None);
+    }
+    Ok(match run_window_on(surface, options)? {
+        PhaseEnd::Kept(surface) => Some(surface),
+        PhaseEnd::Closed => None,
+    })
+}
+
+/// What daemon work done while a staged Window is parked ended with.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WhileParked<T> {
+    Done(T),
+    /// The parked Window closed first; the work, and any SSH connection it
+    /// held, was dropped.
+    Closed,
+}
+
+/// The bound on parked work for an endpoint without a profile timeout.
+const PARKED_WORK_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long daemon work may take while a staged Window waits for it: the
+/// remote profile's connect timeout.
+pub(super) fn parked_deadline(factory: &ConnectionFactory) -> Duration {
+    factory
+        .remote_operation_timeout()
+        .unwrap_or(PARKED_WORK_DEADLINE)
+}
+
+/// Runs daemon `work` while a staged Window is parked, `closed` being that
+/// Window's close signal. A close ends the work at once, and it fails after
+/// `deadline`, so a stalled daemon never keeps an unmapped launcher and its
+/// SSH connection alive. Without a parked Window the work runs as before.
+///
+/// # Errors
+///
+/// Returns the work's error, or an error when the deadline passes first.
+pub(super) async fn while_parked<T>(
+    closed: Option<impl Future<Output = ()>>,
+    deadline: Duration,
+    work: impl Future<Output = Result<T>>,
+) -> Result<WhileParked<T>> {
+    // Boxed so a launch future that waits on daemon work stays small.
+    let work = Box::pin(work);
+    let Some(closed) = closed else {
+        return work.await.map(WhileParked::Done);
+    };
+    tokio::select! {
+        biased;
+        () = closed => Ok(WhileParked::Closed),
+        result = tokio::time::timeout(deadline, work) => match result {
+            Ok(result) => result.map(WhileParked::Done),
+            Err(_) => bail!("the daemon did not answer in time"),
+        },
+    }
+}
+
+/// The close signal of a parked staged Window, if there is one.
+pub(super) fn parked_close(
+    surface: Option<&WindowSurface>,
+) -> Option<impl Future<Output = ()> + use<>> {
+    surface.map(|surface| surface.close_signal().closed())
+}
+
 pub(super) async fn run_live_multipane_window(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
 ) -> Result<()> {
-    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true, None).await
+    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true, None, None).await
 }
 
 /// What a Window relaunched across a daemon upgrade restores after its first
@@ -528,6 +600,7 @@ pub(super) async fn run_resumed_multipane_window(
         app_id,
         true,
         Some(resume),
+        None,
     )
     .await
 }
@@ -538,6 +611,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
     factory: ConnectionFactory,
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
     run_live_multipane_window_inner(
         config,
@@ -547,6 +621,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
         app_id,
         initial_tab_strip_visible,
         None,
+        surface,
     )
     .await
 }
@@ -558,6 +633,7 @@ pub(super) async fn run_owned_live_multipane_window_with_app_id(
     owner: Connection,
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
     run_live_multipane_window_inner(
         config,
@@ -567,6 +643,7 @@ pub(super) async fn run_owned_live_multipane_window_with_app_id(
         app_id,
         initial_tab_strip_visible,
         None,
+        surface,
     )
     .await
 }
@@ -614,6 +691,7 @@ fn first_dojo_gone(owner_still_lists: Option<Result<bool>>) -> Result<()> {
 
 #[allow(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     reason = "multi-pane startup keeps renderer, topology, theme, and input authorities in one lifecycle"
 )]
 async fn run_live_multipane_window_inner(
@@ -624,6 +702,7 @@ async fn run_live_multipane_window_inner(
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
     resume: Option<WindowResume>,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
@@ -632,9 +711,17 @@ async fn run_live_multipane_window_inner(
         tabs: resume.tabs,
         active: resume.active,
     });
-    let Some((initial_identity, remote_display_identity)) =
-        initial_window_dojo_identity(&factory, dojo_model.id).await?
-    else {
+    let deadline = parked_deadline(&factory);
+    let identity = while_parked(
+        parked_close(surface.as_ref()),
+        deadline,
+        initial_window_dojo_identity(&factory, dojo_model.id),
+    )
+    .await?;
+    let WhileParked::Done(identity) = identity else {
+        return Ok(());
+    };
+    let Some((initial_identity, remote_display_identity)) = identity else {
         // The lookup used a new connection, which could have reached a
         // restarted daemon, so ask the connection that created the Dojo.
         let owner_still_lists = match initial_transient_owner {
@@ -661,19 +748,26 @@ async fn run_live_multipane_window_inner(
     layout_splint_ids(&dojo_model.root, &mut ids);
     let image_cache =
         SharedImageContentCache::with_maximum_bytes(MAX_RENDERER_IMAGE_RESIDENT_BYTES)?;
-    let mut prepared = Vec::with_capacity(ids.len());
-    for splint_id in ids {
-        prepared.push(
-            prepare_live_pane(
-                &factory,
-                &config,
-                splint_id,
-                image_cache.clone(),
-                pane_claims_initial_control(splint_id, dojo_model.default_focus),
-            )
-            .await?,
-        );
-    }
+    let prepared = while_parked(parked_close(surface.as_ref()), deadline, async {
+        let mut prepared = Vec::with_capacity(ids.len());
+        for splint_id in ids {
+            prepared.push(
+                prepare_live_pane(
+                    &factory,
+                    &config,
+                    splint_id,
+                    image_cache.clone(),
+                    pane_claims_initial_control(splint_id, dojo_model.default_focus),
+                )
+                .await?,
+            );
+        }
+        Ok(prepared)
+    })
+    .await?;
+    let WhileParked::Done(prepared) = prepared else {
+        return Ok(());
+    };
     let (topology_commands, topology_command_receiver) = mpsc::channel(8);
     let (topology_settings, topology_settings_receiver) =
         watch::channel(TopologyReloadSettings::from_config(&config));
@@ -729,39 +823,44 @@ async fn run_live_multipane_window_inner(
         restore,
     ));
     let result = tokio::task::spawn_blocking(move || {
-        run_window(WindowOptions {
-            capture: pane_chrome_capture()?,
-            panes,
-            layout: Some(root),
-            active_splint: Some(active_splint),
-            topology_updates: Some(topology_updates),
-            topology_commands: Some(topology_commands),
-            topology_settings: Some(topology_settings),
-            graphical_focus,
-            forced_control_transfer,
-            remote_display_identity,
-            optimistic_remote_splits,
-            local_endpoint,
-            clipboard_image_directory: window_config.clipboard_image_directory,
-            initial_dojo: Some(initial_identity),
-            initial_tab_strip_visible,
-            initial_columns: window_config.initial_columns,
-            initial_rows: window_config.initial_rows,
-            cursor_style: window_config.cursor_style,
-            cursor_blink: window_config.cursor_blink,
-            title: window_config.title,
-            app_id: resolved_window_app_id(app_id),
-            theme,
-            ui_font_size: window_config.ui_font_size,
-            pane_divider_style: window_config.pane_divider_style,
-            frame_title_mode: window_config.frame_title_mode,
-            agent_status_presentation: window_config.explorer_agent_status,
-            keymap: window_config.keymap,
-            prefix_timeout_ms: window_config.prefix_timeout_ms,
-            handoff_status: Some(handoff_status),
-            layout_ledger,
-            ..WindowOptions::default()
-        })
+        // The terminal binds a staged Window's surface for good.
+        run_window_phase(
+            surface,
+            WindowOptions {
+                capture: pane_chrome_capture()?,
+                panes,
+                layout: Some(root),
+                active_splint: Some(active_splint),
+                topology_updates: Some(topology_updates),
+                topology_commands: Some(topology_commands),
+                topology_settings: Some(topology_settings),
+                graphical_focus,
+                forced_control_transfer,
+                remote_display_identity,
+                optimistic_remote_splits,
+                local_endpoint,
+                clipboard_image_directory: window_config.clipboard_image_directory,
+                initial_dojo: Some(initial_identity),
+                initial_tab_strip_visible,
+                initial_columns: window_config.initial_columns,
+                initial_rows: window_config.initial_rows,
+                cursor_style: window_config.cursor_style,
+                cursor_blink: window_config.cursor_blink,
+                title: window_config.title,
+                app_id: resolved_window_app_id(app_id),
+                theme,
+                ui_font_size: window_config.ui_font_size,
+                pane_divider_style: window_config.pane_divider_style,
+                frame_title_mode: window_config.frame_title_mode,
+                agent_status_presentation: window_config.explorer_agent_status,
+                keymap: window_config.keymap,
+                prefix_timeout_ms: window_config.prefix_timeout_ms,
+                handoff_status: Some(handoff_status),
+                layout_ledger,
+                ..WindowOptions::default()
+            },
+        )
+        .map(drop)
     })
     .await
     .context("Wayland window task failed")?;
@@ -1263,7 +1362,61 @@ pub(super) async fn run_live_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{AbortOnDropTask, COMMAND_ENDED_LINE, first_dojo_gone, resolved_window_app_id};
+    use std::time::Duration;
+
+    use anyhow::Result;
+
+    use super::{
+        AbortOnDropTask, COMMAND_ENDED_LINE, WhileParked, first_dojo_gone, resolved_window_app_id,
+        while_parked,
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_work_ends_at_a_close_or_its_deadline_and_runs_unbounded_unparked() {
+        // A remote that never answers: a close ends the request at once.
+        let closed = while_parked(
+            Some(std::future::ready(())),
+            Duration::from_secs(3600),
+            std::future::pending::<Result<()>>(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(closed, WhileParked::Closed);
+
+        // Without a close, the deadline ends it.
+        let started = tokio::time::Instant::now();
+        let stalled = while_parked(
+            Some(std::future::pending::<()>()),
+            Duration::from_secs(7),
+            std::future::pending::<Result<()>>(),
+        )
+        .await;
+        assert!(stalled.is_err());
+        assert_eq!(started.elapsed(), Duration::from_secs(7));
+
+        // Work that answers in time is returned.
+        let answered = while_parked(
+            Some(std::future::pending::<()>()),
+            Duration::from_secs(7),
+            async { Ok(5) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(answered, WhileParked::Done(5));
+
+        // Not parked: no close and no deadline apply.
+        let unparked = while_parked(
+            None::<std::future::Pending<()>>,
+            Duration::from_secs(1),
+            async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok("slow but fine")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(unparked, WhileParked::Done("slow but fine"));
+    }
 
     #[test]
     fn a_first_dojo_gone_is_a_finished_command_only_when_its_own_daemon_says_so() {

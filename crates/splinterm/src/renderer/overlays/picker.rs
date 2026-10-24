@@ -49,7 +49,7 @@ impl SessionPickerPurpose {
             Self::RecentDojos => "Open a recent running Dojo.",
             Self::Dojos => "Switch to a Dojo in this Lair.",
             Self::Lairs => "Switch to a Lair.",
-            Self::Remotes => "Open a remote profile in a new Window.",
+            Self::Remotes => "Connect to a remote profile.",
         }
     }
 
@@ -2007,7 +2007,7 @@ mod tests {
                 SessionPickerPurpose::Remotes,
                 "REMOTES",
                 "REMOTES",
-                "Open a remote profile in a new Window.",
+                "Connect to a remote profile.",
                 "+ Add a profile",
                 "Edit remotes.toml",
                 "connect",

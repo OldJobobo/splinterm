@@ -39,6 +39,7 @@ REQUIRED = {
     "usr/lib/systemd/user/app-splinterm.slice",
     "usr/lib/systemd/user/splinterd.service",
     "usr/share/applications/com.oldjobobo.splinterm.desktop",
+    "usr/share/applications/com.oldjobobo.splinterm.remotes.desktop",
     "usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg",
     "usr/share/metainfo/com.oldjobobo.splinterm.metainfo.xml",
     "usr/share/splinterm/omarchy/screensaver.ini",
@@ -1366,6 +1367,22 @@ def main() -> int:
         assert desktop_config["Desktop Action Reopen"]["Exec"] == "splinterm-reopen"
         assert desktop_config["Desktop Action Remotes"]["Name"] == "Remote Dojos"
         assert desktop_config["Desktop Action Remotes"]["Exec"] == "splinterm remotes"
+        remotes_desktop = root / "usr/share/applications/com.oldjobobo.splinterm.remotes.desktop"
+        run(["desktop-file-validate", str(remotes_desktop)])
+        remotes_config = configparser.ConfigParser(interpolation=None, strict=True)
+        remotes_config.optionxform = str
+        with remotes_desktop.open(encoding="utf-8") as remotes_file:
+            remotes_config.read_file(remotes_file)
+        assert remotes_config.sections() == ["Desktop Entry"], "Splinterm Remotes has no actions"
+        remotes_entry = remotes_config["Desktop Entry"]
+        assert remotes_entry["Name"] == "Splinterm Remotes"
+        assert remotes_entry["Exec"] == "splinterm remotes"
+        assert remotes_entry["TryExec"] == "splinterm"
+        assert remotes_entry["Icon"] == "com.oldjobobo.splinterm"
+        assert remotes_entry["Terminal"] == "false"
+        assert "TerminalEmulator" not in remotes_entry["Categories"].split(";")
+        assert "Actions" not in remotes_entry
+        assert not any(key.startswith("X-TerminalArg") for key in remotes_entry)
 
         screensaver_profile = root / "usr/share/splinterm/omarchy/screensaver.ini"
         profile = configparser.ConfigParser(interpolation=None, strict=True)

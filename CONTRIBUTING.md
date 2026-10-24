@@ -149,6 +149,7 @@ Documentation or packaging changes also use:
 
 ```bash
 desktop-file-validate dist/applications/com.oldjobobo.splinterm.desktop
+desktop-file-validate dist/applications/com.oldjobobo.splinterm.remotes.desktop
 appstreamcli validate --no-net dist/metainfo/com.oldjobobo.splinterm.metainfo.xml
 (cd packaging && makepkg --printsrcinfo -p PKGBUILD >/dev/null)
 (

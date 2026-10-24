@@ -18,6 +18,9 @@ impl PointerHandler for App {
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
+        if self.scheduling.parked.is_some() {
+            return;
+        }
         let modal_frame = ModalPointerFrame::new(self.modal.input_modal_open());
         let mut picker_changed = false;
         let mut explorer_changed = false;

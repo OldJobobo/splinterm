@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    SessionPickerDecision, SessionPickerItem, SessionPickerUi, WindowOptions,
+    SessionPickerDecision, SessionPickerItem, SessionPickerUi, WindowOptions, WindowSurface,
     config::{AppConfig, ResolvedTheme},
     endpoint::ConnectionFactory,
     remote_launch::hand_off_to_remote_chooser,
@@ -26,8 +26,9 @@ use super::{
         remember_dojo, select_dojo_from, session_picker_item,
     },
     window::{
-        resolved_window_app_id, run_live_multipane_window, run_live_multipane_window_with_app_id,
-        run_live_window, run_owned_live_multipane_window_with_app_id,
+        WhileParked, parked_close, parked_deadline, resolved_window_app_id,
+        run_live_multipane_window, run_live_multipane_window_with_app_id, run_live_window,
+        run_owned_live_multipane_window_with_app_id, run_window_phase, while_parked,
     },
 };
 
@@ -149,13 +150,16 @@ pub(in crate::app) fn configure_picker_renderer(
     })
 }
 
-/// Shows Recent Dojos, with `remote_row` appended after the Dojo rows.
+/// Shows Recent Dojos, with `remote_row` appended after the Dojo rows: on the
+/// staged Window `surface` when given (returning it parked), or else in a new
+/// Window of its own.
 fn choose_recent_session(
     config: &AppConfig,
     entries: &[SessionEntry],
     remote_row: Option<SessionPickerItem>,
     app_id: Option<String>,
-) -> Result<Option<SessionPickerDecision>> {
+    surface: Option<WindowSurface>,
+) -> Result<(Option<SessionPickerDecision>, Option<WindowSurface>)> {
     let mut items = entries.iter().map(session_picker_item).collect::<Vec<_>>();
     items.extend(remote_row);
     let (decision, receiver) = std_mpsc::channel();
@@ -164,20 +168,55 @@ fn choose_recent_session(
         // A lone remote row must not displace New as the default choice.
         picker.select_new_row();
     }
-    run_standalone_picker(config, picker, &receiver, app_id)
+    if surface.is_some() {
+        return run_staged_picker(config, picker, &receiver, app_id, surface);
+    }
+    Ok((
+        run_standalone_picker(config, picker, &receiver, app_id)?,
+        None,
+    ))
 }
 
 /// Runs one standalone picker Window and returns its decision, if any.
 pub(in crate::app) fn run_standalone_picker(
     config: &AppConfig,
-    mut picker: SessionPickerUi,
+    picker: SessionPickerUi,
     receiver: &std_mpsc::Receiver<SessionPickerDecision>,
     app_id: Option<String>,
 ) -> Result<Option<SessionPickerDecision>> {
+    run_window(standalone_picker_options(config, picker, app_id)?)?;
+    Ok(receiver.try_recv().ok())
+}
+
+/// Runs a standalone picker as one phase of a staged Window, on `surface` or
+/// on a new Window, and returns its decision (none after Escape) and the
+/// parked Window. No Window comes back when it was closed.
+pub(in crate::app) fn run_staged_picker(
+    config: &AppConfig,
+    picker: SessionPickerUi,
+    receiver: &std_mpsc::Receiver<SessionPickerDecision>,
+    app_id: Option<String>,
+    surface: Option<WindowSurface>,
+) -> Result<(Option<SessionPickerDecision>, Option<WindowSurface>)> {
+    let options = WindowOptions {
+        keep_surface: true,
+        // Phases before the terminal never bind the input method.
+        input_method: false,
+        ..standalone_picker_options(config, picker, app_id)?
+    };
+    let surface = run_window_phase(surface, options)?;
+    Ok((receiver.try_recv().ok(), surface))
+}
+
+fn standalone_picker_options(
+    config: &AppConfig,
+    mut picker: SessionPickerUi,
+    app_id: Option<String>,
+) -> Result<WindowOptions> {
     let theme = load_startup_theme(config);
     configure_picker_renderer(config, theme)?;
     let snapshot = picker.snapshot();
-    run_window(WindowOptions {
+    Ok(WindowOptions {
         snapshot: Some(snapshot),
         session_picker: Some(picker),
         app_id: resolved_window_app_id(app_id),
@@ -190,8 +229,7 @@ pub(in crate::app) fn run_standalone_picker(
         keymap: config.keymap.clone(),
         prefix_timeout_ms: config.prefix_timeout_ms,
         ..WindowOptions::default()
-    })?;
-    Ok(receiver.try_recv().ok())
+    })
 }
 
 async fn select_reopenable_dojo(
@@ -216,26 +254,37 @@ async fn select_reopenable_dojo(
 }
 
 pub(in crate::app) async fn run_dojos(config: AppConfig, factory: ConnectionFactory) -> Result<()> {
-    run_dojos_from(None, None, config, factory).await
+    run_dojos_from(None, None, config, factory, None).await
 }
 
 /// Opens the Recent Dojos picker; **New** creates its terminal in `cwd`, or in
 /// the local current directory when absent, and every Window of the flow keeps
-/// the launcher-supplied `app_id`.
+/// the launcher-supplied `app_id`. With a staged Window `surface` (a remote
+/// connection status that kept its Window), the picker and then the terminal
+/// show in that same Window.
 pub(in crate::app) async fn run_dojos_from(
     cwd: Option<PathBuf>,
     app_id: Option<String>,
     config: AppConfig,
     factory: ConnectionFactory,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
-    let mut connection = factory
-        .connect()
-        .await
-        .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
-    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
-        bail!("splinterd did not return its session list");
+    let staged = surface.is_some();
+    let deadline = parked_deadline(&factory);
+    let listed = while_parked(parked_close(surface.as_ref()), deadline, async {
+        let mut connection = factory
+            .connect()
+            .await
+            .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
+        let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+            bail!("splinterd did not return its session list");
+        };
+        Ok(lairs)
+    })
+    .await?;
+    let WhileParked::Done(lairs) = listed else {
+        return Ok(());
     };
-    drop(connection);
     let entries = collect_sessions(&lairs, &recent_dojo_ids(&factory))
         .into_iter()
         .filter(SessionEntry::reopenable)
@@ -246,39 +295,75 @@ pub(in crate::app) async fn run_dojos_from(
     let picker_entries = entries.clone();
     let picker_config = config.clone();
     let picker_app_id = app_id.clone();
-    let decision = tokio::task::spawn_blocking(move || {
-        choose_recent_session(&picker_config, &picker_entries, remote_row, picker_app_id)
+    let (decision, surface) = tokio::task::spawn_blocking(move || {
+        choose_recent_session(
+            &picker_config,
+            &picker_entries,
+            remote_row,
+            picker_app_id,
+            surface,
+        )
     })
     .await
     .context("Dojo picker task failed")??;
+    if staged && surface.is_none() {
+        // The compositor closed the Window: nothing is left to continue in.
+        return Ok(());
+    }
     match decision {
+        // Escape. A parked Window unmaps when it is dropped here.
         None => Ok(()),
         Some(SessionPickerDecision::Open(index)) if Some(index) == remote_row_index => {
             hand_off_to_remote_chooser()
         }
         Some(SessionPickerDecision::New) => {
-            if let Some(diagnostics) = splinterm::diagnostics::global() {
-                diagnostics.begin_window(None, None);
-            }
+            begin_terminal_window(staged);
             let cwd = match cwd {
                 None if factory.is_local() => {
                     Some(env::current_dir().context("failed to read current directory")?)
                 }
                 cwd => cwd,
             };
-            launch_with_app_id(None, cwd, None, true, Vec::new(), config, factory, app_id).await
+            launch_with_app_id(
+                None,
+                cwd,
+                None,
+                true,
+                Vec::new(),
+                config,
+                factory,
+                app_id,
+                surface,
+            )
+            .await
         }
         Some(SessionPickerDecision::Open(index)) => {
-            if let Some(diagnostics) = splinterm::diagnostics::global() {
-                diagnostics.begin_window(None, None);
-            }
+            begin_terminal_window(staged);
             let selected = entries
                 .get(index)
                 .context("Dojo picker returned an invalid selection")?;
-            let dojo = select_reopenable_dojo(&factory, selected.lair_id, selected.dojo_id).await?;
+            let selected = while_parked(
+                parked_close(surface.as_ref()),
+                deadline,
+                select_reopenable_dojo(&factory, selected.lair_id, selected.dojo_id),
+            )
+            .await?;
+            let WhileParked::Done(dojo) = selected else {
+                return Ok(());
+            };
             remember_dojo(&factory, dojo.id);
-            run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true).await
+            run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true, surface)
+                .await
         }
+    }
+}
+
+/// A picker in a Window of its own recorded that Window's exit, so the
+/// terminal that follows is a new diagnostic Window. A staged Window is still
+/// the same Window.
+fn begin_terminal_window(staged: bool) {
+    if !staged && let Some(diagnostics) = splinterm::diagnostics::global() {
+        diagnostics.begin_window(None, None);
     }
 }
 
@@ -334,6 +419,7 @@ pub(in crate::app) async fn xdg_launch(
             config,
             factory,
             app_id,
+            None,
         )
         .await;
     }
@@ -365,7 +451,8 @@ pub(in crate::app) async fn xdg_launch(
     if !matches!(&dojo.root, splinterm_core::LayoutNode::Leaf(_)) {
         bail!("new transient Dojo did not contain exactly one Splint");
     }
-    run_owned_live_multipane_window_with_app_id(config, dojo, factory, owner, app_id, false).await
+    run_owned_live_multipane_window_with_app_id(config, dojo, factory, owner, app_id, false, None)
+        .await
 }
 
 pub(in crate::app) async fn launch(
@@ -378,7 +465,33 @@ pub(in crate::app) async fn launch(
     factory: ConnectionFactory,
 ) -> Result<()> {
     launch_with_app_id(
-        name, cwd, splint_id, create_new, command, config, factory, None,
+        name, cwd, splint_id, create_new, command, config, factory, None, None,
+    )
+    .await
+}
+
+/// Creates a new terminal on `factory`'s endpoint and opens it on the parked
+/// staged Window `surface`, as **New** in that endpoint's Dojo picker does.
+pub(in crate::app) async fn launch_new_terminal_on(
+    config: AppConfig,
+    factory: ConnectionFactory,
+    surface: WindowSurface,
+) -> Result<()> {
+    let cwd = if factory.is_local() {
+        Some(env::current_dir().context("failed to read current directory")?)
+    } else {
+        None
+    };
+    launch_with_app_id(
+        None,
+        cwd,
+        None,
+        true,
+        Vec::new(),
+        config,
+        factory,
+        None,
+        Some(surface),
     )
     .await
 }
@@ -396,15 +509,27 @@ async fn launch_with_app_id(
     config: AppConfig,
     factory: ConnectionFactory,
     app_id: Option<String>,
+    surface: Option<WindowSurface>,
 ) -> Result<()> {
-    let mut connection = factory
-        .connect()
-        .await
-        .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
-    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
-        bail!("splinterd did not return its session list");
+    let deadline = parked_deadline(&factory);
+    let listed = while_parked(parked_close(surface.as_ref()), deadline, async {
+        let mut connection = factory
+            .connect()
+            .await
+            .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
+        let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+            bail!("splinterd did not return its session list");
+        };
+        Ok((connection, lairs))
+    })
+    .await?;
+    let WhileParked::Done((mut connection, lairs)) = listed else {
+        return Ok(());
     };
     if let Some(splint_id) = splint_id {
+        // Attaching one Splint is never a staged launch; any parked Window
+        // unmaps here.
+        drop(surface);
         if !command.is_empty() {
             bail!("cannot execute a new command while attaching an existing Splint");
         }
@@ -417,18 +542,25 @@ async fn launch_with_app_id(
 
     let explicit_name = name.is_some();
     let name = name.unwrap_or_else(|| fresh_lair_name(SystemTime::now(), std::process::id()));
-    let expected = connection.topology_revision().await?;
-    let (request, lifetime) = graphical_create_request(
-        &factory,
-        expected,
-        name,
-        explicit_name,
-        cwd,
-        command,
-        &config,
-    )?;
-    let Response::LairCreated { lair: dojo, .. } = connection.request(request).await? else {
-        bail!("splinterd did not create the requested terminal");
+    let created = while_parked(parked_close(surface.as_ref()), deadline, async {
+        let expected = connection.topology_revision().await?;
+        let (request, lifetime) = graphical_create_request(
+            &factory,
+            expected,
+            name,
+            explicit_name,
+            cwd,
+            command,
+            &config,
+        )?;
+        let Response::LairCreated { lair, .. } = connection.request(request).await? else {
+            bail!("splinterd did not create the requested terminal");
+        };
+        Ok((lair, lifetime))
+    })
+    .await?;
+    let WhileParked::Done((dojo, lifetime)) = created else {
+        return Ok(());
     };
     let dojo = dojo
         .dojos
@@ -442,11 +574,12 @@ async fn launch_with_app_id(
         GraphicalLairLifetime::Persistent => {
             remember_dojo(&factory, dojo.id);
             drop(connection);
-            run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true).await
+            run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true, surface)
+                .await
         }
         GraphicalLairLifetime::ClientBound => {
             run_owned_live_multipane_window_with_app_id(
-                config, dojo, factory, connection, app_id, true,
+                config, dojo, factory, connection, app_id, true, surface,
             )
             .await
         }

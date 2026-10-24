@@ -41,9 +41,10 @@ impl DataDeviceHandler for App {
             return;
         };
         let mime = offer.with_mime_types(accepted_uri_list_mime);
-        let target = (surface == self.surface.window.wl_surface())
-            .then(|| self.file_drop_target_at((x, y)))
-            .flatten();
+        let target = (self.scheduling.parked.is_none()
+            && surface == self.surface.window.wl_surface())
+        .then(|| self.file_drop_target_at((x, y)))
+        .flatten();
         if mime.is_some() && target.is_some() {
             offer.accept_mime_type(offer.serial, mime);
             offer.set_actions(DndAction::Copy, DndAction::Copy);
