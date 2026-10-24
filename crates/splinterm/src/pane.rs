@@ -575,13 +575,17 @@ pub fn directional_resize_ratio(
     let delta = i64::from(cell_extent)
         .checked_mul(i64::from(cells))?
         .checked_mul(delta_sign)?;
-    let center = i64::from(split.boundary) + i64::from(split.separator) / 2;
-    let coordinate = i32::try_from(center.checked_add(delta)?).ok()?;
-    let position = match split.axis {
-        Axis::Horizontal => (f64::from(coordinate), f64::from(split.area.y)),
-        Axis::Vertical => (f64::from(split.area.x), f64::from(coordinate)),
+    let ratio = if layout.gap == 0 {
+        let center = i64::from(split.boundary) + i64::from(split.separator) / 2;
+        let coordinate = i32::try_from(center.checked_add(delta)?).ok()?;
+        let position = match split.axis {
+            Axis::Horizontal => (f64::from(coordinate), f64::from(split.area.y)),
+            Axis::Vertical => (f64::from(split.area.x), f64::from(coordinate)),
+        };
+        split_ratio_at(split, position, minimum_extent)?
+    } else {
+        gap_yielding_ratio(root, layout, split, delta, minimum_extent, metrics)?
     };
-    let ratio = split_ratio_at(split, position, minimum_extent)?;
     let mut candidate = root.clone();
     if !apply_preview_ratio(&mut candidate, split.target, split.ancestor, ratio) {
         return None;
@@ -599,6 +603,113 @@ pub fn directional_resize_ratio(
     )
     .ok()?;
     Some((split.target, split.ancestor, ratio))
+}
+
+/// The ratio that moves `split` by `delta` pixels when the layout has a
+/// `layout.gap` (the gap in effect). The growing child asks for `delta` more
+/// pixels; the other child shrinks by `delta` only down to `minimum_extent`,
+/// and the gap gives up the rest. Content minimums are not checked against
+/// the current gap: like a divider drag, the candidate only has to fit with
+/// some gap. Without a binding minimum this is the plain boundary move's
+/// ratio. When the gap has to give way, the ratio is nudged toward the
+/// growing child until the layout it produces, with the gap shrunk to fit,
+/// gives that child its request (or the panes stop fitting), because a gap
+/// shrunk to fit otherwise splits the room it frees by the ratio.
+fn gap_yielding_ratio(
+    root: &LayoutNode,
+    layout: &PaneLayout,
+    split: PaneSplit,
+    delta: i64,
+    minimum_extent: u32,
+    metrics: PaneResizeMetrics,
+) -> Option<SplitRatio> {
+    let span = |split: &PaneSplit| match split.axis {
+        Axis::Horizontal => (split.area.x, split.area.width),
+        Axis::Vertical => (split.area.y, split.area.height),
+    };
+    let (start, extent) = span(&split);
+    let gapless = extent.checked_sub(split.separator.checked_sub(layout.gap)?)?;
+    let available = extent.checked_sub(split.separator)?;
+    let first = split.boundary.checked_sub(start)?;
+    let second = available.checked_sub(first)?;
+    let step = u32::try_from(delta.unsigned_abs()).ok()?;
+    let first_grows = delta > 0;
+    let (growing, shrinking) = if first_grows {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let grown = growing
+        .checked_add(step)?
+        .min(gapless.checked_sub(minimum_extent)?);
+    let shrunk = shrinking.saturating_sub(step).max(minimum_extent);
+    let total = grown.checked_add(shrunk)?;
+    if total > gapless || total == 0 {
+        return None;
+    }
+    let first_size = if first_grows { grown } else { shrunk };
+    let base =
+        u16::try_from((u64::from(first_size) * 1000 / u64::from(total)).clamp(1, 999)).ok()?;
+    if shrinking.saturating_sub(step) >= minimum_extent {
+        // The current gap has room for the move: a plain boundary move.
+        return SplitRatio::new(base).ok();
+    }
+
+    let index = layout
+        .splits
+        .iter()
+        .position(|candidate| *candidate == split)?;
+    let root_area = layout.splits.first()?.area;
+    // The size the growing child gets at `permille`, with the gap shrunk to
+    // fit, or `None` when the panes do not fit with any gap.
+    let grown_at = |permille: u16| -> Option<u32> {
+        let mut candidate = root.clone();
+        let ratio = SplitRatio::new(permille).ok()?;
+        if !apply_preview_ratio(&mut candidate, split.target, split.ancestor, ratio) {
+            return None;
+        }
+        let resized = PaneLayout::compute_with_preferred_gap(
+            &candidate,
+            root_area,
+            layout.chrome,
+            layout.gap,
+            metrics.minimum_width,
+            metrics.minimum_height,
+        )
+        .ok()?;
+        let after = resized.splits.get(index)?;
+        let (start, extent) = span(after);
+        let first = after.boundary.checked_sub(start)?;
+        let second = extent.checked_sub(after.separator)?.checked_sub(first)?;
+        Some(if first_grows { first } else { second })
+    };
+    // `k` steps the ratio `k` permille toward the growing child. Find the
+    // first step that reaches the request or no longer fits.
+    let at_step = |k: u16| if first_grows { base + k } else { base - k };
+    let reached = |k: u16| grown_at(at_step(k)).is_none_or(|size| size >= grown);
+    let steps = if first_grows { 999 - base } else { base - 1 };
+    if !reached(steps) {
+        return SplitRatio::new(at_step(steps)).ok();
+    }
+    let (mut low, mut high) = (0, steps);
+    if reached(0) {
+        high = 0;
+    } else {
+        while high - low > 1 {
+            let middle = low + (high - low) / 2;
+            if reached(middle) {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+    }
+    let permille = if high > 0 && grown_at(at_step(high)).is_none() {
+        at_step(high - 1)
+    } else {
+        at_step(high)
+    };
+    SplitRatio::new(permille).ok()
 }
 
 pub fn apply_preview_ratio(
@@ -2013,5 +2124,143 @@ mod tests {
         }
         // The sweep reaches every outcome.
         assert!(whole > 0 && shrunk > 0 && gapless > 0 && failed > 0);
+    }
+
+    #[test]
+    fn keyboard_resize_takes_room_from_the_gap_when_a_pane_is_at_its_minimum() {
+        let metrics = PaneResizeMetrics {
+            cell_width: 10,
+            cell_height: 20,
+            minimum_width: 20,
+            minimum_height: 20,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 50,
+        };
+        // 60 fits exactly (two 20 px panes); 64 has fallen back to 60.
+        for preferred in [60, 64] {
+            let (left, left_id) = leaf();
+            let (right_leaf, right_id) = leaf();
+            let root = branch(Axis::Horizontal, 500, left, right_leaf);
+            let compute = |tree: &LayoutNode| {
+                PaneLayout::compute_with_preferred_gap(
+                    tree,
+                    area,
+                    PaneChrome::None,
+                    preferred,
+                    20,
+                    20,
+                )
+                .unwrap()
+            };
+            let layout = compute(&root);
+            assert_eq!(layout.gap, 60, "{preferred}");
+            assert_eq!(layout.panes[0].rect.width, 20, "{preferred}");
+            assert_eq!(layout.panes[1].rect.width, 20, "{preferred}");
+            // The growing pane gets its one 10 px cell, the other stays at its
+            // minimum, and the gap gives way.
+            for (current, direction, ratio, gap, sizes) in [
+                (left_id, FocusDirection::Right, 613, 50, (30, 20)),
+                (right_id, FocusDirection::Left, 400, 50, (20, 30)),
+            ] {
+                let (target, ancestor, resized) =
+                    directional_resize_ratio(&root, &layout, current, direction, 1, metrics)
+                        .unwrap();
+                assert_eq!((target, ancestor), (left_id, 0), "{preferred}");
+                assert_eq!(resized.get(), ratio, "{preferred} {direction:?}");
+                let mut candidate = root.clone();
+                assert!(apply_preview_ratio(
+                    &mut candidate,
+                    target,
+                    ancestor,
+                    resized
+                ));
+                let after = compute(&candidate);
+                assert_eq!(after.gap, gap, "{preferred} {direction:?}");
+                assert_eq!(
+                    (after.panes[0].rect.width, after.panes[1].rect.width),
+                    sizes,
+                    "{preferred} {direction:?}"
+                );
+            }
+            // A move larger than the whole gap stops where the gap is gone.
+            let (_, _, resized) = directional_resize_ratio(
+                &root,
+                &layout,
+                left_id,
+                FocusDirection::Right,
+                9,
+                metrics,
+            )
+            .unwrap();
+            let mut candidate = root.clone();
+            assert!(apply_preview_ratio(&mut candidate, left_id, 0, resized));
+            let after = compute(&candidate);
+            assert_eq!(after.gap, 0, "{preferred}");
+            assert_eq!(after.panes[0].rect.width, 80, "{preferred}");
+            assert_eq!(after.panes[1].rect.width, 20, "{preferred}");
+        }
+    }
+
+    #[test]
+    fn keyboard_resize_against_a_split_far_side_keeps_its_minimums() {
+        let metrics = PaneResizeMetrics {
+            cell_width: 10,
+            cell_height: 20,
+            minimum_width: 20,
+            minimum_height: 20,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 150,
+            height: 50,
+        };
+        let (left, left_id) = leaf();
+        let root = branch(
+            Axis::Horizontal,
+            500,
+            left,
+            branch(Axis::Horizontal, 500, leaf().0, leaf().0),
+        );
+        let compute = |tree: &LayoutNode| {
+            PaneLayout::compute_with_preferred_gap(tree, area, PaneChrome::None, 30, 20, 20)
+        };
+        // The split right side needs two 20 px panes and a gap of its own,
+        // so 30 has fallen back to 23.
+        let layout = compute(&root).unwrap();
+        assert_eq!(layout.gap, 23);
+        assert_eq!(layout.panes[0].rect.width, 63);
+        let (target, ancestor, resized) =
+            directional_resize_ratio(&root, &layout, left_id, FocusDirection::Right, 1, metrics)
+                .unwrap();
+        assert_eq!((target, ancestor), (left_id, 0));
+        let mut candidate = root.clone();
+        assert!(apply_preview_ratio(
+            &mut candidate,
+            target,
+            ancestor,
+            resized
+        ));
+        let after = compute(&candidate).unwrap();
+        assert!(after.gap < layout.gap, "{}", after.gap);
+        assert!(after.panes[0].rect.width >= 73, "{:?}", after.panes[0]);
+        for pane in &after.panes[1..] {
+            assert!(pane.rect.width >= 20, "{pane:?}");
+        }
+        for (index, first) in after.panes.iter().enumerate() {
+            for second in &after.panes[index + 1..] {
+                assert!(!overlaps(first.allocation, second.allocation));
+            }
+        }
+        // A move the far side cannot make room for even without a gap is
+        // refused, as it is in a gapless layout.
+        assert_eq!(
+            directional_resize_ratio(&root, &layout, left_id, FocusDirection::Right, 10, metrics),
+            None
+        );
     }
 }
