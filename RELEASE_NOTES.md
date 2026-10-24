@@ -330,13 +330,16 @@ a hostile program running as your account.
   `splinterm-xdg-terminal-exec --new` creates a terminal, whatever the setting
   says; `splinterm launch --picker` is the direct CLI form. The **New
   Terminal** desktop action always creates a terminal.
-- Open a remote without a terminal: `splinterm remotes`, the **Remote Dojos**
-  desktop action, **Open Remote…** in the command palette, or the **Remote
-  Dojos…** row in Recent Dojos all list your `remotes.toml` profiles. Each
-  remote opens in its own Window.
-- Every graphical remote launch first shows a connection-status Window. On
-  failure it names the cause, suggests a fix, and shows recent OpenSSH output;
-  press R or Enter to retry, or Escape to close.
+- Open a remote from the **Splinterm Remotes** app-menu entry (or the **Remote
+  Dojos** action, or `splinterm remotes`). One Window lists your profiles,
+  shows the connection and any SSH prompt, lists that host's Dojos, and then
+  becomes the remote terminal. **Open Remote…** in the command palette shows
+  the profiles as a pop-up and opens exactly one new Window. `splinterm
+  remotes` typed in a terminal returns at once and prints nothing.
+- Every graphical remote launch first shows the connection status. On failure
+  it names the cause, suggests a fix, and shows recent OpenSSH output; press R
+  or Enter to retry, or Escape to go back (a direct `splinterm --remote` closes
+  and exits 1).
 - For graphical remote launches with no controlling terminal and no configured
   external `SSH_ASKPASS`, the status Window asks in a masked field when OpenSSH
   needs a password, passphrase, or PIN that no ssh-agent key can answer. The answer

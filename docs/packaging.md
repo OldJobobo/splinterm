@@ -210,7 +210,10 @@ not submit the local-build recipe to the AUR.
   `/usr/bin/splinterm-dojo-picker` reference client and compatibility
   `/usr/bin/splinterm-session-picker` alias, and the optional
   `/usr/bin/generate-omarchy-theme.py` JSON exporter;
-- desktop entry, AppStream metadata, scalable icon, and user service;
+- the terminal desktop entry, the **Splinterm Remotes** app-menu entry
+  (`com.oldjobobo.splinterm.remotes.desktop`, which runs `splinterm remotes`
+  and is not a terminal emulator entry), AppStream metadata, scalable icon,
+  and user service;
 - the release README, CLI/usage/configuration/accessibility guides, built-in Omarchy keymap
   documentation, preset guide and example schema, optional shell-integration
   instructions, headless lifecycle/policy guidance, terminal-image matrix, and
@@ -270,8 +273,10 @@ whose complete pane layout is still running. `splinterm-sessions` remains a
 compatibility alias. These aliases
 also start the user daemon on demand and pass the same daemon check as the
 default launcher. They never restore exited processes. The
-**Remote Dojos** action runs `splinterm remotes`, which lists the profiles in
-`remotes.toml` and needs no local daemon. See
+**Remote Dojos** action and the separate **Splinterm Remotes** app-menu entry
+both run `splinterm remotes`: one Window that lists the profiles in
+`remotes.toml`, connects, lists that host's Dojos, and becomes the remote
+terminal. It needs no local daemon. See
 `configuration.md` for the suggested Omarchy shortcut split.
 
 ## Desktop launcher and the running daemon
