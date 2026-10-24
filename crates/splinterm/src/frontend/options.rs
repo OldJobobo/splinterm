@@ -530,6 +530,9 @@ pub struct WindowOptions {
     pub remote_display_identity: Option<crate::endpoint::RemoteDisplayIdentity>,
     /// `[explorer] agent-status`: show explicitly reported agent status.
     pub agent_status_presentation: bool,
+    /// `[multiplexer] tab-strip-border`: draw the light `line` divider stroke
+    /// along the bottom of the tab strip.
+    pub tab_strip_border: bool,
     /// Whether the Window binds the text-input (IME) protocol. The remote
     /// connection status Window turns it off so an input method never sees or
     /// draws a typed password as composing text.
@@ -600,6 +603,7 @@ impl Default for WindowOptions {
             initial_tab_strip_visible: true,
             remote_display_identity: None,
             agent_status_presentation: true,
+            tab_strip_border: true,
             input_method: true,
             mapped: None,
             handoff_status: None,

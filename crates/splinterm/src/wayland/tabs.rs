@@ -54,6 +54,37 @@ pub(super) const fn tab_indicator_logical_height(strip_height: u32) -> u32 {
     if thickness == 0 { 1 } else { thickness }
 }
 
+/// The tab strip's bottom border thickness in buffer px: the light `─`
+/// stroke a `line` Splint divider draws for the terminal `cell` (buffer px)
+/// at `scale_120`, kept at least 1 buffer px thinner than the active-tab
+/// indicator so the indicator painted over it always reads as the heavier
+/// line.
+pub(super) fn tab_strip_border_thickness(
+    strip_height: u32,
+    scale_120: u32,
+    cell: (u32, u32),
+) -> Result<u32> {
+    let indicator =
+        logical_extent_to_buffer(tab_indicator_logical_height(strip_height), scale_120)?.max(1);
+    let stroke = crate::box_drawing::default_thickness(
+        cell.0,
+        cell.1,
+        u16::try_from(scale_120).unwrap_or(u16::MAX),
+    );
+    Ok(stroke.min(indicator.saturating_sub(1)).max(1))
+}
+
+/// Whether the tab strip bottom border is drawn: the option is on and the tab
+/// strip itself is shown. A remote Window's host header, which stays when the
+/// strip is hidden, draws no border on its own.
+pub(super) const fn tab_strip_shows_border(
+    enabled: bool,
+    managed_tabs: bool,
+    strip_visible: bool,
+) -> bool {
+    enabled && managed_tabs && strip_visible
+}
+
 /// The horizontal label inset for a strip `strip_height` logical px tall,
 /// 10 px at the former 34 px strip and scaled with the strip from there.
 const fn tab_label_logical_inset(strip_height: u32) -> u32 {
@@ -929,6 +960,7 @@ impl App {
         close_text: Option<&ChromeText>,
         new_text: Option<&ChromeText>,
         host_text: Option<&ChromeText>,
+        border_cell: Option<(u32, u32)>,
     ) -> Result<()> {
         let position = |value| i32::try_from(value).unwrap_or(i32::MAX);
         let strip = Self::buffer_rect(layout.rect, scale_120)?;
@@ -946,9 +978,7 @@ impl App {
         );
         for tab in &layout.tabs {
             let rect = Self::buffer_rect(tab.rect, scale_120)?;
-            let active = tab.dojo_id == active_dojo;
-            let foreground = tab_foreground(theme, active);
-            if active {
+            if tab.dojo_id == active_dojo {
                 fill_rect(
                     canvas,
                     width,
@@ -956,6 +986,34 @@ impl App {
                     (position(rect.x), position(rect.y), rect.width, rect.height),
                     premultiplied_theme_rgba(theme.active_tab_background, theme.background_alpha),
                 );
+            } else {
+                paint_inactive_tab_divider(canvas, width, height, rect, scale_120, theme)?;
+            }
+        }
+        // `[multiplexer] tab-strip-border`: the light `line` divider stroke
+        // along the strip's bottom edge, across its full width and under the
+        // active tab's thicker underline.
+        if let Some(cell) = border_cell {
+            let border =
+                tab_strip_border_thickness(layout.rect.height, scale_120, cell)?.min(strip.height);
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    position(strip.x),
+                    position(strip.y.saturating_add(strip.height.saturating_sub(border))),
+                    strip.width,
+                    border,
+                ),
+                opaque_rgba(theme.pane_border),
+            );
+        }
+        for tab in &layout.tabs {
+            let rect = Self::buffer_rect(tab.rect, scale_120)?;
+            let active = tab.dojo_id == active_dojo;
+            let foreground = tab_foreground(theme, active);
+            if active {
                 let underline = logical_extent_to_buffer(
                     tab_indicator_logical_height(layout.rect.height),
                     scale_120,
@@ -973,8 +1031,6 @@ impl App {
                     ),
                     opaque_rgba(theme.ui_accent),
                 );
-            } else {
-                paint_inactive_tab_divider(canvas, width, height, rect, scale_120, theme)?;
             }
             let label_rect = Self::buffer_rect(tab.label_rect, scale_120)?;
             if let Some(label) = labels.get(&tab.dojo_id) {
@@ -1105,7 +1161,7 @@ mod tests {
         App, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, DojoId, ResolvedTheme, TabHitTarget,
         WindowDojoIdentity, ambiguous_tab_label, is_generated_lair_name, label_among_tabs,
         opaque_rgba, tab_context_target, tab_dojo_label, tab_foreground, tab_strip_hit_test,
-        tab_strip_layout,
+        tab_strip_layout, tab_strip_shows_border,
     };
 
     #[test]
@@ -1208,6 +1264,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .unwrap();
                 let mut tagged = vec![0x41; (width * height * 4) as usize];
@@ -1223,6 +1280,7 @@ mod tests {
                     None,
                     None,
                     Some(&label),
+                    None,
                 )
                 .unwrap();
                 let mut changed = 0;
@@ -1287,6 +1345,7 @@ mod tests {
             theme,
             active_dojo,
             &HashMap::new(),
+            None,
             None,
             None,
             None,
@@ -1395,6 +1454,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1407,6 +1467,146 @@ mod tests {
             &canvas[divider_offset..divider_offset + 4],
             &[0x66, 0x55, 0x44, 0xff]
         );
+    }
+
+    /// The rows and pixel a `line` Splint divider's light `─` paints in one
+    /// terminal `cell` at `scale`, drawn by the divider's own painter.
+    fn light_divider_stroke(cell: (u32, u32), scale: u32, color: u32) -> (u32, [u8; 4]) {
+        let mut canvas = vec![0; usize::try_from(cell.0 * cell.1 * 4).unwrap()];
+        let rect = super::Rect {
+            x: 0,
+            y: 0,
+            width: cell.0,
+            height: cell.1,
+        };
+        crate::renderer::paint_box_drawing_cell(
+            &mut canvas,
+            cell.0,
+            cell.1,
+            '─',
+            rect,
+            rect,
+            color,
+            u16::try_from(scale).unwrap(),
+        );
+        let painted = (0..cell.1)
+            .map(|y| usize::try_from(y * cell.0 * 4).unwrap())
+            .filter(|offset| canvas[offset + 3] != 0)
+            .collect::<Vec<_>>();
+        let pixel = canvas[painted[0]..painted[0] + 4].try_into().unwrap();
+        (u32::try_from(painted.len()).unwrap(), pixel)
+    }
+
+    #[test]
+    fn tab_strip_border_needs_a_shown_tab_strip() {
+        assert!(tab_strip_shows_border(true, true, true));
+        // Off, a hidden strip (a remote host header alone), or an unmanaged
+        // Window: no border.
+        assert!(!tab_strip_shows_border(false, true, true));
+        assert!(!tab_strip_shows_border(true, true, false));
+        assert!(!tab_strip_shows_border(true, false, true));
+        assert!(!tab_strip_shows_border(true, false, false));
+    }
+
+    #[test]
+    fn tab_strip_border_is_the_light_divider_stroke_under_the_active_underline() {
+        use super::{tab_indicator_logical_height, tab_strip_border_thickness};
+
+        let ids = [DojoId::new(), DojoId::new(), DojoId::new()];
+        let accent = [0x99, 0x88, 0x77, 0xff];
+        let mut clamped = 0;
+        for strip_height in [20, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, 34, 48] {
+            let layout = tab_strip_layout(420, strip_height, &ids, 1).unwrap();
+            // A hidden strip has no layout, so nothing paints a border.
+            assert!(tab_strip_layout(420, strip_height, &[], 0).is_none());
+            for scale in [120, 150, 180, 240] {
+                let buffer = |logical| super::logical_extent_to_buffer(logical, scale).unwrap();
+                let width = buffer(420);
+                let strip = buffer(strip_height);
+                let height = strip + 10;
+                let indicator = buffer(tab_indicator_logical_height(strip_height));
+                let active = App::buffer_rect(layout.tabs[1].rect, scale).unwrap();
+                let new_rect = App::buffer_rect(layout.new_rect, scale).unwrap();
+                // Common terminal cells, and one huge enough to need the clamp.
+                for (cell_width, cell_height) in [(7, 17), (9, 21), (14, 34), (48, 112)] {
+                    let cell = (buffer(cell_width), buffer(cell_height));
+                    let case = format!("strip {strip_height}, scale {scale}, cell {cell:?}");
+                    let border = tab_strip_border_thickness(strip_height, scale, cell).unwrap();
+                    let (stroke, stroke_pixel) = light_divider_stroke(cell, scale, 0x44_55_66);
+                    assert_eq!(stroke_pixel, [0x66, 0x55, 0x44, 0xff], "{case}");
+                    if stroke < indicator {
+                        assert_eq!(border, stroke, "{case}");
+                    } else {
+                        clamped += 1;
+                        assert_eq!(border, indicator - 1, "{case}");
+                    }
+                    assert!(border >= 1 && border < indicator, "{case}");
+                    for alpha in [u16::MAX, u16::MAX / 2] {
+                        let theme = ResolvedTheme {
+                            background: 0x10_20_30,
+                            background_alpha: alpha,
+                            pane_border: 0x44_55_66,
+                            ui_accent: 0x77_88_99,
+                            active_tab_background: 0x22_22_22,
+                            ..ResolvedTheme::default()
+                        };
+                        let paint = |border_cell| {
+                            let mut canvas =
+                                vec![0x41; usize::try_from(width * height * 4).unwrap()];
+                            App::paint_tab_strip(
+                                &mut canvas,
+                                width,
+                                height,
+                                &layout,
+                                scale,
+                                theme,
+                                ids[1],
+                                &HashMap::new(),
+                                None,
+                                None,
+                                None,
+                                border_cell,
+                            )
+                            .unwrap();
+                            canvas
+                        };
+                        let bordered_canvas = paint(Some(cell));
+                        let plain_canvas = paint(None);
+                        let pixel = |canvas: &[u8], x: u32, y: u32| -> [u8; 4] {
+                            let offset = usize::try_from((y * width + x) * 4).unwrap();
+                            canvas[offset..offset + 4].try_into().unwrap()
+                        };
+                        for y in 0..height {
+                            for x in 0..width {
+                                let bordered = pixel(&bordered_canvas, x, y);
+                                let plain = pixel(&plain_canvas, x, y);
+                                let in_active = x >= active.x && x < active.x + active.width;
+                                if y >= strip {
+                                    assert_eq!(bordered, [0x41; 4], "{case}: below at {x},{y}");
+                                } else if in_active && y >= strip - indicator {
+                                    // The thicker accent underline sits on top.
+                                    assert_eq!(bordered, accent, "{case}: underline {x},{y}");
+                                    assert_eq!(plain, accent, "{case}: underline {x},{y}");
+                                } else if y >= strip - border {
+                                    // Full Window width, the divider's opaque colour.
+                                    assert_eq!(bordered, stroke_pixel, "{case}: border {x},{y}");
+                                } else {
+                                    assert_eq!(bordered, plain, "{case}: above border {x},{y}");
+                                }
+                            }
+                        }
+                        // Off, the strip's bottom row is plain background.
+                        let background = super::tab_strip_background_rgba(theme);
+                        assert_eq!(
+                            pixel(&plain_canvas, new_rect.x + 1, strip - 1),
+                            [background[2], background[1], background[0], background[3]],
+                            "{case}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(clamped > 0, "the huge cell exercises the clamp");
     }
 
     #[test]
@@ -1587,6 +1787,7 @@ mod tests {
                             Some(&close),
                             None,
                             None,
+                            None,
                         )
                         .unwrap();
                         canvas
@@ -1712,6 +1913,12 @@ mod tests {
                     let top = (label.height - text.pixel_height()) / 2;
                     let bottom = strip.height - top - text.pixel_height();
                     assert!(top >= indicator && bottom >= indicator, "{case}");
+                    // The bottom border, at its thickest (clamped below the
+                    // indicator for any terminal cell), stays clear too.
+                    let border =
+                        super::tab_strip_border_thickness(strip_height, scale, (1_000, 2_000))
+                            .unwrap();
+                    assert!(border < indicator && bottom > border, "{case}");
                 }
             }
         }

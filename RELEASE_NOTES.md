@@ -373,6 +373,10 @@ a hostile program running as your account.
 - The Lair Explorer opens on **Live**, and its filters read Live, Saved, All
   (`f` cycles them in that order). Search looks through every Lair whatever the
   filter, so a saved or stopped Lair is found from Live too.
+- A thin line now runs the full width of the Window along the bottom of the tab
+  strip, in the colour and thickness of a `line` Splint divider; the active
+  tab's accent underline stays thicker and sits on top. Turn it off with
+  `multiplexer.tab-strip-border=no`; Reload configuration applies it.
 - `multiplexer.close-unused=yes` makes Close Tab and closing a Window end a
   Dojo that was never used, instead of leaving it running detached. Typing, a
   split, a rename, or a program in the foreground all count as use. Default

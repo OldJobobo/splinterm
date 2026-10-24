@@ -109,6 +109,10 @@ pub struct AppConfig {
     /// Whether explicitly reported agent status is shown in the Explorer, on
     /// Dojo tabs, and in navigation accessibility (`[explorer] agent-status`).
     pub explorer_agent_status: bool,
+    /// Whether a shown tab strip draws a full-width bottom border in the
+    /// light `line` Splint divider stroke and colour, under the active tab's
+    /// thicker underline (`[multiplexer] tab-strip-border`, default on).
+    pub tab_strip_border: bool,
     /// Whether a graphical client under Omarchy may show the one-time hint
     /// that recommends `splinterm integration omarchy enable`
     /// (`[main] omarchy-integration-hint`).
@@ -239,6 +243,7 @@ impl Default for AppConfig {
             preset_catalog: Some(PresetCatalog::bundled()),
             allow_unrestricted_commands: false,
             explorer_agent_status: true,
+            tab_strip_border: true,
             omarchy_integration_hint: true,
             dialog_shortcut: Some(DialogShortcut::default()),
         }
@@ -1232,6 +1237,10 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
             }
             "explorer.agent-status" => {
                 config.explorer_agent_status = parse_bool(value, index)?;
+                false
+            }
+            "multiplexer.tab-strip-border" => {
+                config.tab_strip_border = parse_bool(value, index)?;
                 false
             }
             "main.omarchy-integration-hint" | "omarchy-integration-hint" => {
@@ -2562,6 +2571,36 @@ mod tests {
         let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
         assert!(shipped.diagnostics.is_empty(), "{:?}", shipped.diagnostics);
         assert!(shipped.config.explorer_agent_status);
+    }
+
+    #[test]
+    fn tab_strip_border_defaults_on_and_can_be_turned_off() {
+        assert!(AppConfig::default().tab_strip_border);
+        assert!(parse("[multiplexer]\n").unwrap().config.tab_strip_border);
+        for (value, expected) in [
+            ("yes", true),
+            ("on", true),
+            ("true", true),
+            ("1", true),
+            ("no", false),
+            ("off", false),
+            ("false", false),
+            ("0", false),
+            ("No", false),
+        ] {
+            let loaded = parse(&format!("[multiplexer]\ntab-strip-border={value}\n")).unwrap();
+            assert_eq!(loaded.config.tab_strip_border, expected, "{value}");
+            assert!(loaded.diagnostics.is_empty());
+        }
+        for invalid in ["", "thin", "2", "line"] {
+            assert!(
+                parse(&format!("[multiplexer]\ntab-strip-border={invalid}\n")).is_err(),
+                "{invalid:?}"
+            );
+        }
+        let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
+        assert!(shipped.diagnostics.is_empty(), "{:?}", shipped.diagnostics);
+        assert!(shipped.config.tab_strip_border);
     }
 
     #[test]
