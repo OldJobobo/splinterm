@@ -864,7 +864,9 @@ pub(super) fn paint_pane_chrome(
     match layout.chrome {
         PaneChrome::None => {}
         PaneChrome::Line { .. } => {
-            let active_rect = active_splint.and_then(|id| layout.rect(id));
+            // The extent reaches across the pane gap to the divider lines, so
+            // the active border still meets its junctions when the gap is set.
+            let active_rect = active_splint.and_then(|id| layout.extent(id));
             let split_shared_border = layout.panes.len() == 2;
 
             // Establish the complete inactive network first. Active segments and
@@ -1702,6 +1704,7 @@ mod tests {
             splint_id,
             rect,
             allocation: rect,
+            extent: rect,
         })
         .to_vec();
         let separators = vec![
@@ -1733,6 +1736,7 @@ mod tests {
                     vertical_width: 8,
                     horizontal_height: 16,
                 },
+                gap: 0,
             },
             active_id,
         )
@@ -1798,5 +1802,151 @@ mod tests {
         assert!(rect_has_color(&canvas, width, bottom_arm, inactive));
         assert!(!rect_has_color(&canvas, width, bottom_arm, active));
         assert!(rect_has_color(&canvas, width, right_arm, active));
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one gapped layout checks junctions, active arms and every empty gap strip"
+    )]
+    fn gapped_line_dividers_meet_and_leave_the_gap_to_the_background() {
+        let leaf = || {
+            let splint = splinterm_core::Splint::shell(std::path::PathBuf::from("/tmp"));
+            let id = splint.id;
+            (splinterm_core::LayoutNode::Leaf(splint), id)
+        };
+        let (left, left_id) = leaf();
+        let (top, top_id) = leaf();
+        let (bottom, bottom_id) = leaf();
+        let root = splinterm_core::LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+            first: Box::new(left),
+            second: Box::new(splinterm_core::LayoutNode::Branch {
+                axis: Axis::Vertical,
+                ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                first: Box::new(top),
+                second: Box::new(bottom),
+            }),
+        };
+        let (width, height) = (200, 160);
+        let layout = PaneLayout::compute_with_gap(
+            &root,
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            PaneChrome::Line {
+                vertical_width: 8,
+                horizontal_height: 16,
+            },
+            8,
+            10,
+            10,
+        )
+        .unwrap();
+        let [vertical, horizontal] = [layout.separators[0], layout.separators[1]];
+        let (character, junction) = divider_junction(vertical, horizontal).unwrap();
+        assert_eq!(character, '├');
+        assert_eq!(junction.x, vertical.rect.x);
+        assert_eq!(junction.y, horizontal.rect.y);
+
+        // The active border runs along the whole pane, half gaps included, so
+        // it still reaches the junction.
+        let active = layout.extent(top_id).unwrap();
+        let vertical_segment = divider_active_segment(vertical, active, false).unwrap();
+        assert_eq!(vertical_segment.y, 0);
+        assert_eq!(
+            vertical_segment.y + vertical_segment.height,
+            horizontal.rect.y
+        );
+        assert_eq!(
+            divider_active_segment(horizontal, active, false),
+            Some(horizontal.rect)
+        );
+        let left_extent = layout.extent(left_id).unwrap();
+        assert!(divider_active_segment(horizontal, left_extent, false).is_none());
+
+        let mut canvas = vec![0; usize::try_from(width * height * 4).unwrap()];
+        let theme = ResolvedTheme {
+            pane_border: 0x11_22_33,
+            pane_border_active: 0xcc_88_44,
+            ..ResolvedTheme::default()
+        };
+        paint_pane_chrome(
+            &mut canvas,
+            width,
+            height,
+            &layout,
+            Some(top_id),
+            theme,
+            8,
+            16,
+            120,
+            &HashMap::new(),
+        )
+        .unwrap();
+        let empty = |rect: Rect| {
+            (rect.y..rect.y + rect.height).all(|y| {
+                (rect.x..rect.x + rect.width).all(|x| {
+                    let index = usize::try_from((y * width + x) * 4).unwrap();
+                    canvas[index..index + 4] == [0, 0, 0, 0]
+                })
+            })
+        };
+        let allocation = |id| {
+            layout
+                .panes
+                .iter()
+                .find(|pane| pane.splint_id == id)
+                .unwrap()
+                .allocation
+        };
+        let (left, top, bottom) = (
+            allocation(left_id),
+            allocation(top_id),
+            allocation(bottom_id),
+        );
+        // Nothing is painted in the gaps beside the vertical line, or between
+        // the horizontal line and the panes above and below it.
+        let vertical_right = vertical.rect.x + vertical.rect.width;
+        assert!(empty(Rect {
+            x: left.x + left.width,
+            width: vertical.rect.x - (left.x + left.width),
+            ..vertical.rect
+        }));
+        assert!(empty(Rect {
+            x: vertical_right,
+            y: 0,
+            width: top.x - vertical_right,
+            height: horizontal.rect.y,
+        }));
+        assert!(empty(Rect {
+            x: top.x,
+            y: top.y + top.height,
+            width: top.width,
+            height: horizontal.rect.y - (top.y + top.height),
+        }));
+        let horizontal_bottom = horizontal.rect.y + horizontal.rect.height;
+        assert!(empty(Rect {
+            x: bottom.x,
+            y: horizontal_bottom,
+            width: bottom.width,
+            height: bottom.y - horizontal_bottom,
+        }));
+        // The horizontal line crosses its half of the gap to the vertical line
+        // in the active colour.
+        assert!(rect_has_color(
+            &canvas,
+            width,
+            Rect {
+                x: vertical_right,
+                width: top.x - vertical_right,
+                ..horizontal.rect
+            },
+            [0x44, 0x88, 0xcc, 0xff],
+        ));
     }
 }

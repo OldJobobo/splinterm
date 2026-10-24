@@ -1085,6 +1085,7 @@ fn assemble_app(
             },
             theme: options.theme,
             pane_divider_style: options.pane_divider_style,
+            pane_gap: options.pane_gap,
             frame_title_mode: options.frame_title_mode,
             frame_titles: HashMap::new(),
             frame_title_cell: None,
@@ -2209,6 +2210,9 @@ struct PresentationState {
     title: TitleSettings,
     theme: ResolvedTheme,
     pane_divider_style: PaneDividerStyle,
+    /// `[multiplexer] pane-gap` in logical px, which configuration reload
+    /// replaces.
+    pane_gap: u32,
     frame_title_mode: FrameTitleMode,
     frame_titles: HashMap<SplintId, CachedFrameTitle>,
     /// The chrome cell (width, height) frame titles are drawn with, keyed by
@@ -4309,6 +4313,11 @@ impl App {
         Ok(())
     }
 
+    /// The one pane layout that drawing, PTY sizes, hit-testing, divider
+    /// drags, keyboard resize, and the IME rectangle all use. The configured
+    /// pane gap shrinks, down to none, when the panes cannot fit with it
+    /// ([`PaneLayout::compute_with_preferred_gap`]); the layout's `gap` is the
+    /// gap in effect.
     fn computed_pane_layout(&self) -> Result<Option<PaneLayout>> {
         let Some(topology) = self.panes.layout.as_ref() else {
             return Ok(None);
@@ -4344,10 +4353,11 @@ impl App {
         let minimum_height = cell_height
             .checked_mul(2)
             .context("minimum pane height overflow")?;
-        PaneLayout::compute_with_chrome(
+        PaneLayout::compute_with_preferred_gap(
             layout,
             self.content_rect(),
             chrome,
+            self.presentation.pane_gap,
             minimum_width,
             minimum_height,
         )
@@ -5916,12 +5926,30 @@ impl App {
                 }
                 self.presentation.ui_font_size = loaded.config.ui_font_size;
                 self.reconcile_chrome_font_size();
+                self.apply_pane_gap(loaded.config.pane_gap);
                 for _ in loaded.diagnostics {
                     eprintln!("splinterm configuration warning");
                 }
             }
             Err(_) => eprintln!("splinterm config reload rejected"),
         }
+    }
+
+    /// Applies a reloaded `[multiplexer] pane-gap`: the panes are laid out
+    /// again and every pane's PTY is resized on the next update pass. A gap
+    /// the panes cannot fit shrinks for that layout in
+    /// [`Self::computed_pane_layout`], so the new value is always accepted.
+    fn apply_pane_gap(&mut self, gap: u32) {
+        if gap == self.presentation.pane_gap {
+            return;
+        }
+        self.presentation.pane_gap = gap;
+        self.panes.restored_frontend_needs_resize = true;
+        self.presentation.full_redraw = true;
+        if self.surface.configured {
+            self.scheduling.redraw_pending = true;
+        }
+        self.update_ime_cursor_rectangle();
     }
 
     fn close_command_palette(&mut self) -> bool {
