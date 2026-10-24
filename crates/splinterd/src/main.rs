@@ -8549,7 +8549,11 @@ async fn append_request_audit(
     disposition: RequestAuditDisposition,
 ) {
     let Some(audit_peer) = peer.audit_peer() else {
-        warn!(operation = ?audit::operation_for_request(request), "audit record omitted because stable peer identity is unavailable");
+        // verify_peer already warned once for this connection. A Window
+        // continued by a live upgrade runs the sealed client snapshot, which
+        // has no path identity, and polls several times a second, so a
+        // warning per request would flood the journal.
+        debug!(operation = ?audit::operation_for_request(request), "audit record omitted because stable peer identity is unavailable");
         return;
     };
     let scopes = requested_operation_scopes(request).unwrap_or_default();
