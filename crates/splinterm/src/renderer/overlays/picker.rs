@@ -492,7 +492,8 @@ const PANEL_TEXT_MIN_CONTRAST: f64 = 4.5;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChromeSurface {
     /// `[menu]`: list cards with rows and a selected row. The action
-    /// palette, the Dojo and session picker, and the docked Lair Explorer.
+    /// palette and the Dojo and session picker; the docked Lair Explorer takes
+    /// these colours but the Window's own background alpha.
     Menu,
     /// `[popups]`: flyouts, prompts and status cards. The tab context menu,
     /// the Dojo prompt, the search bar and the history overlay.

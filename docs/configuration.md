@@ -875,14 +875,13 @@ Panels follow the shell's own card alpha:
 
 | Splinterm panel | Follows | Omarchy default |
 | --- | --- | --- |
-| Action palette, Dojo and session picker, Lair Explorer | `[menu] background-alpha` | 1.0 |
+| Action palette, Dojo and session picker | `[menu] background-alpha` | 1.0 |
 | Tab context menu, Dojo prompt, search bar, history overlay | `[popups] background-alpha` | 1.0 |
 
 The action palette and pickers are list cards with a selected row, like the
-shell's menus. The docked Lair Explorer is Splinterm's navigation menu and has
-the same rows and selected-row treatment, so it follows `[menu]` too. The tab
-context menu, the Dojo prompt, the search bar and the history overlay are
-small flyouts and status cards, which the shell draws with `[popups]`.
+shell's menus. The tab context menu, the Dojo prompt, the search bar and the
+history overlay are small flyouts and status cards, which the shell draws with
+`[popups]`.
 
 A panel uses the theme background, the same colour as the window's own glass,
 so Splinterm draws it as that glass with the shell alpha layered over it. Its
@@ -892,6 +891,13 @@ coverage is `1 - (1 - shell alpha) × (1 - terminal alpha)`:
   window never shows holes.
 * With Glassy Windows on, a panel shows the blurred backdrop no more than the
   terminal around it does. Omarchy's default of 1.0 keeps panels opaque.
+
+The docked Lair Explorer is not a floating panel but part of the Window, like
+the tab strip: its background, selected row and active filter are drawn at the
+terminal's own background alpha (foot.ini `alpha`, which Glassy Windows sets),
+so the backdrop shows through it exactly as through the terminal beside it.
+Its text, icons, divider, rules and selection rail stay opaque. Like terminal
+text, its text is not given the contrast floor below.
 
 Panel borders, dividers, selected rows and text stay opaque. Because the
 backdrop is an unknown wallpaper, Splinterm raises a panel's coverage to the

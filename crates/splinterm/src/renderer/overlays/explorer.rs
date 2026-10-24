@@ -12,6 +12,7 @@ use anyhow::Result;
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
+    config::ResolvedTheme,
     frontend::{LairExplorerAccess, LairExplorerFilter, LairExplorerRow},
     geometry::Rect,
     navigation_projection::NavigationNodeId,
@@ -20,11 +21,13 @@ use splinterm_core::LairRetention;
 
 use super::{
     super::{
-        ChromeIcon, ChromeSource, ChromeTextStyle, RenderContext, chrome_icons_available, fill_rect,
+        ChromeIcon, ChromeSource, ChromeTextStyle, RenderContext, chrome_icons_available,
+        fill_rect, premultiplied_theme_rgba, raster::premultiplied_rgba,
     },
     picker::{
-        PickerTextAlignment, SessionPickerPalette, SessionPickerTextCache, editable_text,
-        paint_picker_source, paint_picker_text, picker_cell_width, truncate_picker_text,
+        ChromeSurface, PickerTextAlignment, SessionPickerPalette, SessionPickerTextCache,
+        chrome_panel_palette, editable_text, paint_picker_source, paint_picker_text,
+        picker_cell_width, truncate_picker_text,
     },
 };
 
@@ -625,6 +628,25 @@ fn footer_lines(footer: Rect, scale_120: u32, inset: u32) -> Vec<Rect> {
         .collect()
 }
 
+/// The Explorer's palette: the menu palette's colours, with the panel drawn
+/// as the Window's own glass at the theme's background alpha (foot.ini
+/// `alpha`, which Omarchy's glassy mode sets), as the terminal and the tab
+/// strip are. The docked sidebar is part of the Window, not a floating menu,
+/// so it does not take the shell's menu alpha. Text and icons stay opaque.
+#[must_use]
+pub(crate) fn lair_explorer_palette(theme: ResolvedTheme) -> SessionPickerPalette {
+    let mut palette = chrome_panel_palette(theme, ChromeSurface::Menu);
+    palette.panel_fill = premultiplied_theme_rgba(palette.panel, theme.background_alpha);
+    palette
+}
+
+/// A fill on the panel, such as the selected row or the active filter, at
+/// the panel's own glass alpha, as the tab strip draws its active tab.
+fn glass_rgba(color: u32, panel_fill: [u8; 4]) -> [u8; 4] {
+    let [red, green, blue, _] = rgba(color);
+    premultiplied_rgba([red, green, blue], panel_fill[3])
+}
+
 fn tuple(rect: Rect) -> (i32, i32, u32, u32) {
     (
         i32::try_from(rect.x).unwrap_or(i32::MAX),
@@ -763,7 +785,7 @@ pub(crate) fn paint_lair_explorer(
                 canvas_width,
                 canvas_height,
                 tuple(rect),
-                rgba(palette.selected_fill),
+                glass_rgba(palette.selected_fill, palette.panel_fill),
             );
         }
         paint_picker_text(
@@ -812,7 +834,7 @@ pub(crate) fn paint_lair_explorer(
                 canvas_width,
                 canvas_height,
                 tuple(highlight),
-                rgba(palette.selected_fill),
+                glass_rgba(palette.selected_fill, palette.panel_fill),
             );
             fill_rect(
                 canvas,
@@ -2357,5 +2379,104 @@ mod tests {
             // The clip never reaches past the divider.
             assert_eq!(columns_paint_clip(columns, 0).width, 0);
         }
+    }
+
+    /// RC2 item 7: the docked sidebar follows the Window's background alpha
+    /// (foot.ini `alpha`, Omarchy glassy mode) as the terminal and the tab
+    /// strip do. Its panel and fills keep the theme alpha; text, icons, the
+    /// divider, the rules, and the selection rail stay opaque.
+    #[test]
+    fn explorer_respects_background_alpha_with_opaque_text_and_lines() {
+        let theme = ResolvedTheme {
+            background: 0x80_40_20,
+            background_alpha: u16::MAX / 2,
+            foreground: 0xee_ee_ee,
+            ..ResolvedTheme::default()
+        };
+        let palette = lair_explorer_palette(theme);
+        // The same premultiplied glass as the tab strip and the terminal.
+        assert_eq!(
+            palette.panel_fill,
+            premultiplied_theme_rgba(theme.background, theme.background_alpha)
+        );
+        assert_eq!(palette.panel_fill, [0x40, 0x20, 0x10, 0x7f]);
+        let opaque = lair_explorer_palette(ResolvedTheme::default());
+        assert_eq!(opaque.panel_fill[3], 0xff);
+
+        let id = NavigationNodeId::Lair(LairId::new());
+        let mut selected = row(id);
+        selected.live = true;
+        let other = row(NavigationNodeId::Lair(LairId::new()));
+        let rows = [selected, other];
+        let surface = Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: HEADER_HEIGHT + FOOTER_HEIGHT + ROW_HEIGHT * 3,
+        };
+        let layout = lair_explorer_layout(surface, 640, &rows, Some(id), 0).unwrap();
+        let (width, height) = (surface.width, surface.height);
+        let mut canvas = vec![0; (width * height * 4) as usize];
+        paint(
+            &RenderContext::new(u16::MAX),
+            &mut canvas,
+            width,
+            height,
+            120,
+            &layout,
+            palette,
+            &rows,
+            Some(id),
+            false,
+            LairExplorerFilter::Live,
+        );
+        let pixel = |x: u32, y: u32| {
+            let offset = ((y * width + x) * 4) as usize;
+            <[u8; 4]>::try_from(&canvas[offset..offset + 4]).unwrap()
+        };
+        let bgra = |[r, g, b, a]: [u8; 4]| [b, g, r, a];
+        // An empty row area, below the two rows: the panel's glass.
+        let empty_y = layout.rows[1].rect.y + ROW_HEIGHT + ROW_HEIGHT / 2;
+        assert_eq!(pixel(150, empty_y), bgra(palette.panel_fill));
+        // The selected row's fill at the same alpha, inside the rail.
+        let selected_y = layout.rows[0].rect.y + 1;
+        assert_eq!(
+            pixel(layout.panel.width - 4, selected_y),
+            bgra(glass_rgba(palette.selected_fill, palette.panel_fill))
+        );
+        assert_eq!(
+            glass_rgba(palette.selected_fill, palette.panel_fill)[3],
+            0x7f
+        );
+        // The active filter tab too.
+        let (_, live) = layout.filters[0];
+        assert_eq!(
+            pixel(live.x + 1, live.y + 1),
+            bgra(glass_rgba(palette.selected_fill, palette.panel_fill))
+        );
+        // The rail, divider, and header rule are opaque.
+        assert_eq!(pixel(0, selected_y)[3], 0xff);
+        assert_eq!(pixel(layout.panel.width - 1, empty_y)[3], 0xff);
+        assert_eq!(pixel(150, layout.header.y + HEADER_HEIGHT - 1)[3], 0xff);
+        // Nothing in the panel is more transparent than the glass, and the
+        // text's full-coverage pixels are opaque.
+        let mut opaque_ink = 0;
+        for y in 0..height {
+            for x in 0..layout.panel.width {
+                let [_, _, _, alpha] = pixel(x, y);
+                assert!(alpha >= 0x7f, "{x},{y} alpha {alpha}");
+                if alpha == 0xff && pixel(x, y) != bgra(rgba(palette.frame)) {
+                    opaque_ink += 1;
+                }
+            }
+        }
+        assert!(opaque_ink > 0);
+        // The name's ink in the second, unselected row is opaque.
+        let name_y = layout.rows[1].rect.y..layout.rows[1].rect.y + ROW_HEIGHT;
+        assert!(
+            name_y
+                .flat_map(|y| (24..120).map(move |x| (x, y)))
+                .any(|(x, y)| pixel(x, y)[3] == 0xff)
+        );
     }
 }

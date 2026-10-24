@@ -402,9 +402,9 @@ a hostile program running as your account.
 - Splinterm reads Omarchy 4's theme location and colour names, and follows
   theme switches without a restart. Non-Omarchy desktops use the built-in
   palette quietly.
-- Glassy Windows: the terminal background, padding, and tab strip turn
-  translucent with blur when glass is on, while text stays opaque and crisp.
-  Toggling applies live.
+- Glassy Windows: the terminal background, padding, tab strip, and docked Lair
+  Explorer turn translucent with blur when glass is on, while text and icons
+  stay opaque and crisp. Toggling applies live.
 - Splinterm follows three settings from the Omarchy shell's `shell.toml`: panel
   alpha for menus and popups (raised as needed to keep text readable), the text
   size set by `omarchy-display-text-size`, and the top bar's height. Open

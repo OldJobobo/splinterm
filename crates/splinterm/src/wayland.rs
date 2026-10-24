@@ -11674,7 +11674,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
+                crate::renderer::lair_explorer_palette(self.presentation.theme),
                 &rows,
                 self.explorer.selected(),
                 self.explorer.query(),
