@@ -179,6 +179,48 @@ impl PaneLayout {
         Ok(layout)
     }
 
+    /// Computes the layout with `preferred_gap` when every pane fits with it,
+    /// and otherwise with the largest smaller gap that fits, down to none.
+    /// The gap is a preference, never a reason for a layout to fail: the
+    /// result's [`Self::gap`] is the gap actually used, and only a tree that
+    /// cannot fit even without a gap fails, with the gapless layout's error.
+    ///
+    /// A larger gap never gives any pane more room, so the fitting gaps are
+    /// one range from zero and a binary search finds its end. The search
+    /// runs only when the preferred gap does not fit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error [`Self::compute_with_gap`] returns with a zero gap.
+    pub fn compute_with_preferred_gap(
+        root: &LayoutNode,
+        area: Rect,
+        chrome: PaneChrome,
+        preferred_gap: u32,
+        minimum_width: u32,
+        minimum_height: u32,
+    ) -> Result<Self> {
+        let compute =
+            |gap| Self::compute_with_gap(root, area, chrome, gap, minimum_width, minimum_height);
+        let preferred = compute(preferred_gap);
+        if preferred.is_ok() || preferred_gap == 0 {
+            return preferred;
+        }
+        // `fits` holds a layout for `low`; `high` is known not to fit.
+        let mut fits = compute(0)?;
+        let (mut low, mut high) = (0, preferred_gap);
+        while high - low > 1 {
+            let middle = low + (high - low) / 2;
+            if let Ok(layout) = compute(middle) {
+                fits = layout;
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        Ok(fits)
+    }
+
     #[must_use]
     pub fn rect(&self, splint_id: SplintId) -> Option<Rect> {
         self.panes
@@ -545,7 +587,9 @@ pub fn directional_resize_ratio(
         return None;
     }
     let root_area = layout.splits.first()?.area;
-    PaneLayout::compute_with_gap(
+    // As for a divider drag, a ratio is accepted when the panes fit with some
+    // gap; the gap shrinks before a resize is refused.
+    PaneLayout::compute_with_preferred_gap(
         &candidate,
         root_area,
         layout.chrome,
@@ -1826,5 +1870,148 @@ mod tests {
         let alone = PaneLayout::compute_with_gap(&single, area, FRAME, 64, 10, 10).unwrap();
         assert_eq!(alone.panes[0].allocation, area);
         assert_eq!(alone.panes[0].extent, area);
+    }
+
+    #[test]
+    fn preferred_gap_shrinks_to_the_largest_gap_that_fits_and_then_fails_as_gapless() {
+        let (left, _) = leaf();
+        let (right_leaf, _) = leaf();
+        let root = branch(Axis::Horizontal, 500, left, right_leaf);
+        let area = |width| Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 300,
+        };
+        let preferred = |width| {
+            PaneLayout::compute_with_preferred_gap(
+                &root,
+                area(width),
+                PaneChrome::None,
+                64,
+                100,
+                10,
+            )
+        };
+        // Room for the whole gap: it is used as configured.
+        assert_eq!(preferred(400).unwrap().gap, 64);
+        assert_eq!(
+            preferred(400).unwrap(),
+            PaneLayout::compute_with_gap(&root, area(400), PaneChrome::None, 64, 100, 10).unwrap()
+        );
+        // Two 100 px panes in 230 px leave room for a 30 px gap, not 31.
+        let shrunk = preferred(230).unwrap();
+        assert_eq!(shrunk.gap, 30);
+        assert_eq!(shrunk.panes[0].rect.width, 100);
+        assert_eq!(shrunk.panes[1].rect.x, 130);
+        // Only the gapless layout fits.
+        let gapless = preferred(200).unwrap();
+        assert_eq!(gapless.gap, 0);
+        assert_eq!(
+            gapless,
+            PaneLayout::compute_with_gap(&root, area(200), PaneChrome::None, 0, 100, 10).unwrap()
+        );
+        // Nothing fits: the gapless layout's own error, as before the gap.
+        let error = preferred(199).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            PaneLayout::compute_with_gap(&root, area(199), PaneChrome::None, 0, 100, 10)
+                .unwrap_err()
+                .to_string()
+        );
+        // A zero preference is the plain gapless computation.
+        assert!(
+            PaneLayout::compute_with_preferred_gap(&root, area(199), PaneChrome::None, 0, 100, 10)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn preferred_gap_in_tight_nested_layouts_is_the_largest_fit_at_any_output_scale() {
+        let (mut whole, mut shrunk, mut gapless, mut failed) = (0, 0, 0, 0);
+        for scale in SCALES {
+            // A 17×34 buffer-px cell in logical px at this scale, as
+            // `computed_pane_layout` derives the chrome and the minimums.
+            let cell_width = crate::geometry::buffer_to_logical_ceil(17, scale).unwrap();
+            let cell_height = crate::geometry::buffer_to_logical_ceil(34, scale).unwrap();
+            let chromes = [
+                PaneChrome::None,
+                PaneChrome::Line {
+                    vertical_width: cell_width,
+                    horizontal_height: cell_height,
+                },
+                PaneChrome::Frame {
+                    vertical_width: cell_width,
+                    horizontal_height: cell_height,
+                },
+            ];
+            for chrome in chromes {
+                for (tree_index, tree) in nested_trees().into_iter().enumerate() {
+                    for width in (80..=520).step_by(20) {
+                        let height = width * 3 / 4;
+                        let label =
+                            format!("{chrome:?} tree {tree_index} {width}×{height} @{scale}");
+                        let area = Rect {
+                            x: 0,
+                            y: 24,
+                            width,
+                            height,
+                        };
+                        let (minimum_width, minimum_height) = (cell_width * 2, cell_height * 2);
+                        let at = |gap| {
+                            PaneLayout::compute_with_gap(
+                                &tree,
+                                area,
+                                chrome,
+                                gap,
+                                minimum_width,
+                                minimum_height,
+                            )
+                        };
+                        let Ok(layout) = PaneLayout::compute_with_preferred_gap(
+                            &tree,
+                            area,
+                            chrome,
+                            64,
+                            minimum_width,
+                            minimum_height,
+                        ) else {
+                            assert!(at(0).is_err(), "{label}");
+                            failed += 1;
+                            continue;
+                        };
+                        // The largest gap that fits: every smaller gap fits too,
+                        // and no larger one does.
+                        assert_eq!(layout, at(layout.gap).unwrap(), "{label}");
+                        for gap in 0..=64 {
+                            assert_eq!(at(gap).is_ok(), gap <= layout.gap, "{label} gap {gap}");
+                        }
+                        match layout.gap {
+                            64 => whole += 1,
+                            0 => gapless += 1,
+                            _ => shrunk += 1,
+                        }
+                        let rects = layout
+                            .panes
+                            .iter()
+                            .map(|pane| pane.allocation)
+                            .chain(layout.separators.iter().map(|divider| divider.rect))
+                            .collect::<Vec<_>>();
+                        for (index, first) in rects.iter().enumerate() {
+                            assert!(within(*first, area), "{label}");
+                            for second in &rects[index + 1..] {
+                                assert!(!overlaps(*first, *second), "{label}");
+                                assert!(
+                                    !overlaps(buffer(*first, scale), buffer(*second, scale)),
+                                    "{label}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The sweep reaches every outcome.
+        assert!(whole > 0 && shrunk > 0 && gapless > 0 && failed > 0);
     }
 }

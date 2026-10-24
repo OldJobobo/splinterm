@@ -4313,12 +4313,12 @@ impl App {
         Ok(())
     }
 
+    /// The one pane layout that drawing, PTY sizes, hit-testing, divider
+    /// drags, keyboard resize, and the IME rectangle all use. The configured
+    /// pane gap shrinks, down to none, when the panes cannot fit with it
+    /// ([`PaneLayout::compute_with_preferred_gap`]); the layout's `gap` is the
+    /// gap in effect.
     fn computed_pane_layout(&self) -> Result<Option<PaneLayout>> {
-        self.computed_pane_layout_with_gap(self.presentation.pane_gap)
-    }
-
-    /// The pane layout with `gap` logical px between adjacent panes.
-    fn computed_pane_layout_with_gap(&self, gap: u32) -> Result<Option<PaneLayout>> {
         let Some(topology) = self.panes.layout.as_ref() else {
             return Ok(None);
         };
@@ -4353,11 +4353,11 @@ impl App {
         let minimum_height = cell_height
             .checked_mul(2)
             .context("minimum pane height overflow")?;
-        PaneLayout::compute_with_gap(
+        PaneLayout::compute_with_preferred_gap(
             layout,
             self.content_rect(),
             chrome,
-            gap,
+            self.presentation.pane_gap,
             minimum_width,
             minimum_height,
         )
@@ -5937,14 +5937,10 @@ impl App {
 
     /// Applies a reloaded `[multiplexer] pane-gap`: the panes are laid out
     /// again and every pane's PTY is resized on the next update pass. A gap
-    /// the current panes cannot fit at their minimum size is refused, and the
-    /// previous gap stays.
+    /// the panes cannot fit shrinks for that layout in
+    /// [`Self::computed_pane_layout`], so the new value is always accepted.
     fn apply_pane_gap(&mut self, gap: u32) {
         if gap == self.presentation.pane_gap {
-            return;
-        }
-        if self.computed_pane_layout_with_gap(gap).is_err() {
-            eprintln!("splinterm pane-gap reload rejected: the current Splints cannot fit it");
             return;
         }
         self.presentation.pane_gap = gap;

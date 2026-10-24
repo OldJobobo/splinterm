@@ -403,8 +403,9 @@ a hostile program running as your account.
 - `multiplexer.pane-gap` (0–64 logical px, default 0) leaves empty space
   between neighbouring Splints: between whole frames with
   `divider-style=frame`, around the centred line with `line`. The Window
-  background, glassy or not, shows through it. **Reload configuration**
-  applies it.
+  background, glassy or not, shows through it. Where the Splints cannot fit
+  the gap, it shrinks for that layout, down to none, instead of being refused.
+  **Reload configuration** applies it.
 
 ## Omarchy 4
 
