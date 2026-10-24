@@ -1125,6 +1125,33 @@ pub(super) fn paint_picker_source(
     Ok(())
 }
 
+/// The width, in buffer pixels, of one chrome cell as [`paint_picker_source`]
+/// lays out text in `style`, so fixed columns can be placed in whole cells.
+pub(super) fn picker_cell_width(
+    cache: &mut SessionPickerTextCache,
+    context: &RenderContext,
+    used: &mut HashSet<SessionPickerTextKey>,
+    style: ChromeTextStyle,
+    scale_120: u32,
+    renderer_generation: u64,
+) -> Result<u32> {
+    let key = SessionPickerTextKey {
+        source: ChromeSource::from(" "),
+        constrained_width: u32::MAX,
+        style,
+        scale_120,
+        renderer_generation,
+    };
+    if !cache.entries.contains_key(&key) {
+        let text =
+            ChromeText::load_source_styled_with_context(&key.source, scale_120, style, context)?;
+        cache.entries.insert(key.clone(), text);
+    }
+    let width = cache.entries[&key].frame.cell_width.max(1);
+    used.insert(key);
+    Ok(width)
+}
+
 /// Paint a bounded terminal search field inside the terminal side of any Explorer split.
 /// The compositor title alone is not a visible search surface on every desktop.
 #[allow(

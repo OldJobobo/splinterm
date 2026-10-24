@@ -518,7 +518,8 @@ what was removed. A single-pane Window has no palette; there the shortcut
 still ends only the grants that Window shows and every pending request, so
 use `splinterm access revoke --all`.
 
-The Explorer marks, in words in each row's status, which reach an agent has:
+The Explorer marks which reach an agent has, with an icon in its own column
+and in words in the selected row's footer and each row's accessible text:
 **Agent can reach** (a grant or matching policy rule covers it, but no agent
 it covers is connected) or **Agent connected** (one is connected or holds
 control now), on the workspace, or **…part** when only some of its Dojos or

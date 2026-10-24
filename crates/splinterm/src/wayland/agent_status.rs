@@ -1,12 +1,18 @@
 //! Window-local agent status for Dojo tab badges and the palette clear.
 //!
 //! Status is display data from the daemon, never authority and never inferred
-//! from terminal content. Tabs show one static icon badge per Dojo and never
-//! the free-text detail. Nothing here animates, so reduced motion has nothing
-//! further to suppress.
+//! from terminal content. Tabs show one badge per Dojo and never the
+//! free-text detail. A fresh working status shows a Braille spinner here and
+//! in the Explorer. It steps at most four times a second on the event loop's
+//! existing cursor-blink wakeup, only while the Window has keyboard focus and
+//! `SPLINTERM_REDUCED_MOTION` is unset, and otherwise holds its first frame.
 
-use super::{App, DojoId, SplintId};
-use crate::frontend::{AgentAggregate, AgentGlyphs};
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+
+use super::{App, DojoId, QueueHandle, SplintId};
+use crate::frontend::{AgentAggregate, AgentGlyphs, AgentSpinner};
 use crate::navigation_projection::WindowAgentStatus;
 use crate::renderer::{ChromeSource, chrome_icons_available};
 
@@ -14,6 +20,9 @@ pub(super) struct TabAgentStatus {
     status: WindowAgentStatus,
     enabled: bool,
     glyphs: AgentGlyphs,
+    /// The working spinner's frame, shared with the Explorer.
+    spinner: AgentSpinner,
+    last_spinner_step: Instant,
 }
 
 impl TabAgentStatus {
@@ -22,15 +31,30 @@ impl TabAgentStatus {
             status: WindowAgentStatus::default(),
             enabled,
             glyphs: AgentGlyphs::select(chrome_icons_available()),
+            spinner: AgentSpinner::STATIC,
+            last_spinner_step: Instant::now(),
         }
     }
 
-    /// One tab badge: the aggregate icon of the Dojo's Splints.
+    /// One tab badge: the aggregate glyph of the Dojo's Splints.
     pub(super) fn badge(&self, dojo_id: DojoId) -> Option<ChromeSource> {
         if !self.enabled {
             return None;
         }
-        AgentAggregate::from_statuses(self.status.dojo_statuses(dojo_id)).tab_badge(self.glyphs)
+        AgentAggregate::from_statuses(self.status.dojo_statuses(dojo_id))
+            .tab_badge(self.glyphs, self.spinner)
+    }
+
+    /// Whether a Dojo's tab badge shows a fresh working status. The badge is
+    /// the most urgent state, so a working Splint beside one that needs input
+    /// shows no spinner.
+    fn shows_working(&self, dojo_id: DojoId) -> bool {
+        self.enabled
+            && AgentAggregate::from_statuses(self.status.dojo_statuses(dojo_id))
+                .top()
+                .is_some_and(|(state, is_stale, _)| {
+                    state == splinterm_protocol::AgentState::Working && !is_stale
+                })
     }
 
     /// Icons, or ASCII when the embedded icon face is unavailable; shared
@@ -82,6 +106,56 @@ impl App {
             .apply_agent_status(splint_id, incarnation, None);
         tabs || explorer
     }
+
+    /// Whether the working spinner moves now: in a focused Window, without
+    /// reduced motion, while a drawn tab badge or the visible Explorer shows
+    /// a fresh working status.
+    fn agent_spinner_animates(&self) -> bool {
+        let tabs = || {
+            self.tab_state
+                .tab_strip_layout
+                .as_ref()
+                .is_some_and(|layout| {
+                    layout
+                        .tabs
+                        .iter()
+                        .any(|tab| self.tab_state.agent.shows_working(tab.dojo_id))
+                })
+        };
+        // Focus and reduced motion first, so an unfocused Window never builds
+        // Explorer rows to find out.
+        AgentSpinner::animates(self.input.reduced_motion, self.input.keyboard_focused, true)
+            && (tabs() || self.explorer.shows_working_status())
+    }
+
+    /// How long the event loop may sleep before the spinner's next frame;
+    /// `None` while it rests.
+    pub(super) fn agent_spinner_timeout(&self) -> Option<Duration> {
+        AgentSpinner::remaining(
+            self.agent_spinner_animates(),
+            self.tab_state.agent.last_spinner_step.elapsed(),
+        )
+    }
+
+    /// Steps the spinner when its frame is due, or returns it to its first
+    /// frame once it stops, and redraws the chrome that shows it. Runs beside
+    /// the cursor blink on the same event-loop wakeup.
+    pub(super) fn tick_agent_spinner(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
+        let agent = &self.tab_state.agent;
+        let Some(next) = agent.spinner.tick(
+            self.agent_spinner_animates(),
+            agent.last_spinner_step.elapsed(),
+        ) else {
+            return Ok(());
+        };
+        self.tab_state.agent.spinner = next;
+        self.tab_state.agent.last_spinner_step = Instant::now();
+        self.explorer.set_agent_spinner(next);
+        if self.surface.configured {
+            self.schedule_draw(queue_handle)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -131,13 +205,22 @@ mod tests {
         assert_eq!(agent.clearable_incarnation(blocked), Some(3));
         assert_eq!(agent.clearable_incarnation(SplintId::new()), None);
 
+        // Needs input outranks working, so the spinner is not shown yet.
+        assert!(!agent.shows_working(first));
+        assert!(!agent.shows_working(second));
         assert!(agent.status.apply_change(blocked, 3, None));
-        assert_eq!(badge(&agent, first).as_deref(), Some("[loader-2]"));
+        assert_eq!(badge(&agent, first).as_deref(), Some("⠋"));
+        assert!(agent.shows_working(first));
+        assert!(!agent.shows_working(second));
+        // The badge shows the spinner's current frame in both glyph styles.
+        agent.spinner = AgentSpinner::STATIC.next();
+        assert_eq!(badge(&agent, first).as_deref(), Some("⠙"));
         agent.glyphs = AgentGlyphs::Ascii;
-        assert_eq!(badge(&agent, first).as_deref(), Some(">"));
+        assert_eq!(badge(&agent, first).as_deref(), Some("⠙"));
 
         agent.enabled = false;
         assert_eq!(agent.badge(second), None);
+        assert!(!agent.shows_working(first));
         assert_eq!(agent.clearable_incarnation(blocked), None);
     }
 

@@ -1319,7 +1319,7 @@ pub(crate) fn waiting_title(waiting: u32) -> Option<String> {
     }
 }
 
-/// The marks one Explorer row shows, in words, joined for its status line.
+/// The marks one Explorer row shows, in words, joined for its status words.
 pub(crate) fn mark_text(whole: AccessReach, part: AccessReach, waiting: u32) -> Option<String> {
     let mut parts = Vec::with_capacity(3);
     if let Some(text) = waiting_text(waiting) {

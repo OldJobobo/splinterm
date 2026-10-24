@@ -959,6 +959,7 @@ impl WaylandSession {
             app.apply_clipboard_reads()?;
             app.apply_clipboard_image_events();
             app.tick_cursor_blink(queue_handle)?;
+            app.tick_agent_spinner(queue_handle)?;
             let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
                 break;
             };
@@ -10950,6 +10951,12 @@ impl App {
         let command_retry_pending =
             !self.input.pending_terminal_input.is_empty() || self.has_deferred_pane_command();
         let timeout = command_retry_dispatch_timeout(timeout, command_retry_pending);
+        // The agent spinner's next frame is one more deadline on the timer
+        // that wakes the loop for the cursor blink.
+        let timeout = match (timeout, self.agent_spinner_timeout()) {
+            (Some(timeout), Some(spinner)) => Some(timeout.min(spinner)),
+            (timeout, _) => timeout,
+        };
         // Wake to clear an expired upgrade outcome notice.
         match (timeout, self.handoff.timeout(Instant::now())) {
             (Some(timeout), Some(notice)) => Some(timeout.min(notice)),
@@ -11653,7 +11660,6 @@ impl App {
         }
         if let Some(layout) = explorer_layout.as_ref() {
             let rows = self.explorer.rows();
-            let breadcrumb = self.explorer.breadcrumb();
             let status_message = self.explorer.status_message();
             paint_lair_explorer(
                 &mut self.presentation.explorer_text_cache,
@@ -11667,7 +11673,6 @@ impl App {
                 chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
                 &rows,
                 self.explorer.selected(),
-                breadcrumb.as_deref(),
                 self.explorer.query(),
                 status_message,
                 self.explorer.focused(),

@@ -1,30 +1,48 @@
 //! Responsive layout and CPU composition for the non-modal Lair explorer.
+//!
+//! One line per row: the current-row dot, the disclosure chevron, and the
+//! name on the left, and fixed, right-aligned icon columns for agent access,
+//! agent status, live state, and retention. The selected row's status is
+//! spelled out in words in the footer, which also carries the search field,
+//! navigation notices, and who owns keyboard input.
 
 use std::collections::HashSet;
 
 use anyhow::Result;
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    frontend::{LairExplorerFilter, LairExplorerRow},
+    frontend::{LairExplorerAccess, LairExplorerFilter, LairExplorerRow},
     geometry::Rect,
     navigation_projection::NavigationNodeId,
 };
+use splinterm_core::LairRetention;
 
 use super::{
     super::{
         ChromeIcon, ChromeSource, ChromeTextStyle, RenderContext, chrome_icons_available, fill_rect,
     },
     picker::{
-        PickerTextAlignment, SessionPickerPalette, SessionPickerTextCache, paint_picker_source,
-        paint_picker_text,
+        PickerTextAlignment, SessionPickerPalette, SessionPickerTextCache, editable_text,
+        paint_picker_source, paint_picker_text, picker_cell_width, truncate_picker_text,
     },
 };
 
 const PREFERRED_WIDTH: u32 = 288;
-const HEADER_HEIGHT: u32 = 104;
-const FILTER_HEIGHT: u32 = 28;
-const FOOTER_HEIGHT: u32 = 30;
-const ROW_HEIGHT: u32 = 48;
+/// The title and the Live / Saved / All filters share one header line.
+const HEADER_HEIGHT: u32 = 30;
+const FILTER_HEIGHT: u32 = 24;
+/// The header title's share of the panel before the filters begin.
+const HEADER_TITLE_WIDTH: u32 = 84;
+/// One chrome text line: tall enough for the chrome line cap.
+const FOOTER_LINE_HEIGHT: u32 = 24;
+/// Two lines of the selected row's status words and one context line.
+const FOOTER_STATUS_LINES: usize = 2;
+const FOOTER_PADDING: u32 = 4;
+const FOOTER_HEIGHT: u32 = FOOTER_LINE_HEIGHT * 3 + FOOTER_PADDING;
+const ROW_HEIGHT: u32 = 26;
+/// Logical pixels each tree level indents a row's name.
+const LEVEL_INDENT: u32 = 12;
 /// The fewest terminal columns the docked Explorer leaves beside itself.
 const MINIMUM_DOCKED_TERMINAL_COLUMNS: u16 = 20;
 /// The docking floor never exceeds this many logical pixels, whatever the zoom.
@@ -53,22 +71,125 @@ pub(crate) fn explorer_minimum_docked_terminal_width(cell_width: u32, initial_co
         .min(MAXIMUM_DOCKED_TERMINAL_FLOOR)
 }
 
-const fn explorer_header_text(focused: bool) -> &'static str {
+const HEADER_TEXT: &str = "LAIRS";
+
+/// The footer's context line when no search or notice takes it: who owns
+/// keyboard input and how to move.
+const fn explorer_hint_text(focused: bool) -> &'static str {
     if focused {
-        "LAIRS · KEYBOARD FOCUS"
+        "↑↓ move · F filter · Esc terminal"
     } else {
-        "LAIRS"
+        "Click rows · terminal input active"
     }
 }
 
-const fn explorer_footer_text(focused: bool, searching: bool) -> &'static str {
-    if !focused {
-        "Click rows · terminal input active"
-    } else if searching {
-        "Search labels · Esc clear/exit"
+/// The footer's context line: a navigation notice while rows are listed
+/// (with none, it takes the list's place), else the search field while a
+/// search is open or a query remains, else the input hint.
+fn explorer_context_text(
+    focused: bool,
+    searching: bool,
+    query: &str,
+    notice: Option<&str>,
+    maximum_cells: usize,
+) -> String {
+    if let Some(notice) = notice {
+        notice.to_owned()
+    } else if focused && searching {
+        editable_text("Search: ", query, maximum_cells)
+    } else if !query.is_empty() {
+        format!("Search: {query}")
     } else {
-        "↑↓ move · F filter · Esc terminal"
+        explorer_hint_text(focused).to_owned()
     }
+}
+
+/// The selected row's status in words: its name, then its status.
+fn explorer_status_words(row: &LairExplorerRow) -> String {
+    if row.status.is_empty() {
+        row.label.clone()
+    } else {
+        format!("{} · {}", row.label, row.status)
+    }
+}
+
+fn text_cells(text: &str) -> usize {
+    text.chars()
+        .map(|character| character.width().unwrap_or(0).min(2))
+        .sum()
+}
+
+/// Lays `text` out in at most `lines` lines of at most `cells` cells,
+/// breaking only between words. A ` · ` separator never starts a line. Text
+/// that does not fit ends in `…` after the last whole word that fits; only a
+/// word wider than a whole line is cut, at a character boundary.
+fn wrap_status_words(text: &str, cells: usize, lines: usize) -> Vec<String> {
+    let mut wrapped = Vec::new();
+    if cells == 0 || lines == 0 {
+        return wrapped;
+    }
+    // Each word with the separator before it: " · " after a "·" token,
+    // otherwise one space. A line drops the separator of its first word.
+    let mut words = Vec::new();
+    let mut separated = false;
+    for word in text.split(' ').filter(|word| !word.is_empty()) {
+        if word == "·" {
+            separated = true;
+        } else {
+            words.push((if separated { " · " } else { " " }, word));
+            separated = false;
+        }
+    }
+    let joined = |line: &[(&str, &str)]| {
+        let mut text = String::new();
+        for (index, (separator, word)) in line.iter().enumerate() {
+            if index > 0 {
+                text.push_str(separator);
+            }
+            text.push_str(word);
+        }
+        text
+    };
+    let mut line: Vec<(&str, &str)> = Vec::new();
+    for (separator, word) in words {
+        if !line.is_empty() {
+            let mut candidate = line.clone();
+            candidate.push((separator, word));
+            if text_cells(&joined(&candidate)) <= cells {
+                line = candidate;
+                continue;
+            }
+            if wrapped.len() + 1 == lines {
+                // The last line: end on a whole word and an ellipsis. A
+                // single word that fills the line stays whole instead.
+                while line.len() > 1 && text_cells(&joined(&line)) >= cells {
+                    line.pop();
+                }
+                let shown = joined(&line);
+                wrapped.push(if text_cells(&shown) < cells {
+                    format!("{shown}…")
+                } else {
+                    shown
+                });
+                return wrapped;
+            }
+            wrapped.push(joined(&line));
+            line.clear();
+        }
+        if text_cells(word) <= cells {
+            line.push((separator, word));
+            continue;
+        }
+        // A word wider than a whole line: the only cut inside a word.
+        wrapped.push(truncate_picker_text(word, cells));
+        if wrapped.len() == lines {
+            return wrapped;
+        }
+    }
+    if !line.is_empty() {
+        wrapped.push(joined(&line));
+    }
+    wrapped
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,8 +296,11 @@ pub(crate) fn lair_explorer_layout(
             height: footer_height,
         },
         filters: if header_height == HEADER_HEIGHT {
-            let inset = 12.min(panel.width / 2);
-            let available = panel.width.saturating_sub(inset * 2);
+            // The filters take the header line right of the title, with the
+            // panel's inset on their right.
+            let title = HEADER_TITLE_WIDTH.min(panel.width.saturating_mul(3) / 10);
+            let inset = 8.min(panel.width / 2);
+            let available = panel.width.saturating_sub(title).saturating_sub(inset);
             LairExplorerFilter::ALL
                 .into_iter()
                 .enumerate()
@@ -187,8 +311,8 @@ pub(crate) fn lair_explorer_layout(
                     (
                         filter,
                         Rect {
-                            x: panel.x.saturating_add(inset).saturating_add(left),
-                            y: panel.y.saturating_add(HEADER_HEIGHT - FILTER_HEIGHT),
+                            x: panel.x.saturating_add(title).saturating_add(left),
+                            y: panel.y.saturating_add((HEADER_HEIGHT - FILTER_HEIGHT) / 2),
                             width: right - left,
                             height: FILTER_HEIGHT,
                         },
@@ -235,6 +359,13 @@ pub(crate) fn lair_explorer_hit_test(
     })
 }
 
+/// The logical width from a row's left edge that toggles its disclosure: the
+/// row's indent and the current-row dot and chevron after it, with room for
+/// the largest chrome cell.
+fn disclosure_width(level: usize) -> u32 {
+    LEVEL_INDENT.saturating_mul(u32::try_from(level).unwrap_or(u32::MAX).saturating_add(3))
+}
+
 #[must_use]
 pub(crate) fn lair_explorer_disclosure_hit_test(
     layout: &LairExplorerLayout,
@@ -248,16 +379,11 @@ pub(crate) fn lair_explorer_disclosure_hit_test(
         .find_map(|(layout_row, row)| {
             row.expanded?;
             let bottom = f64::from(layout_row.rect.y.saturating_add(layout_row.rect.height));
-            let disclosure_width = 12_u32.saturating_mul(
-                u32::try_from(row.level)
-                    .unwrap_or(u32::MAX)
-                    .saturating_add(3),
-            );
             let right = f64::from(
                 layout_row
                     .rect
                     .x
-                    .saturating_add(disclosure_width.min(layout_row.rect.width)),
+                    .saturating_add(disclosure_width(row.level).min(layout_row.rect.width)),
             );
             (position.0 >= f64::from(layout_row.rect.x)
                 && position.0 < right
@@ -267,10 +393,10 @@ pub(crate) fn lair_explorer_disclosure_hit_test(
         })
 }
 
-/// A row's label line: a current-row dot, a two-cell disclosure slot, the
-/// optional agent status column, and the label. The disclosure chevrons are
-/// icons; ASCII `>` and `v` stand in only if the embedded icon face fails.
-fn row_label_source(row: &LairExplorerRow, icons: bool) -> ChromeSource {
+/// A row's name: a current-row dot, a two-cell disclosure slot, and the
+/// label. The disclosure chevrons are icons; ASCII `>` and `v` stand in only
+/// if the embedded icon face fails.
+fn row_name_source(row: &LairExplorerRow, icons: bool) -> ChromeSource {
     let mut source = ChromeSource::default();
     if row.pending {
         source.push_str("  …");
@@ -297,32 +423,139 @@ fn row_label_source(row: &LairExplorerRow, icons: bool) -> ChromeSource {
             }
         }
     }
-    if let Some(column) = &row.agent_column {
-        source.push_str(" ").push_source(column);
-    }
     source.push_str(" ").push_str(&row.label);
     source
 }
 
-// Give the name and status independent full-width lines rather than squeezing
-// both into a 60/40 split. Bound insets even on a one-pixel drawer.
-fn row_text_clips(rect: Rect, level: usize, inset: u32) -> (Rect, Rect) {
-    let left = inset
+/// Which icon columns the rows in view use. Columns sit at the same place on
+/// every row; a column no row uses is left out.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ExplorerColumns {
+    access: bool,
+    /// Cells of the agent status column, when any Splint in view has one.
+    agent: Option<usize>,
+    retention: bool,
+}
+
+impl ExplorerColumns {
+    fn of(rows: &[LairExplorerRow]) -> Self {
+        Self {
+            access: rows.iter().any(|row| row.access.is_some()),
+            agent: rows
+                .iter()
+                .filter_map(|row| row.agent_column.as_ref())
+                .map(ChromeSource::cells)
+                .max(),
+            retention: rows.iter().any(|row| row.retention.is_some()),
+        }
+    }
+}
+
+fn push_access(source: &mut ChromeSource, access: Option<LairExplorerAccess>, icons: bool) {
+    match (access, icons) {
+        (None, _) => source.push_str("  "),
+        (Some(LairExplorerAccess::Reachable), true) => source.push_icon(ChromeIcon::Plug),
+        (Some(LairExplorerAccess::Connected), true) => source.push_icon(ChromeIcon::PlugConnected),
+        (Some(LairExplorerAccess::Asking), true) => source.push_icon(ChromeIcon::LockQuestion),
+        (Some(LairExplorerAccess::Reachable), false) => source.push_str("a "),
+        (Some(LairExplorerAccess::Connected), false) => source.push_str("A "),
+        (Some(LairExplorerAccess::Asking), false) => source.push_str("A?"),
+    };
+}
+
+fn push_retention(source: &mut ChromeSource, retention: Option<LairRetention>, icons: bool) {
+    match (retention, icons) {
+        (None | Some(LairRetention::Disposable), _) => source.push_str("  "),
+        (Some(LairRetention::Saved), true) => source.push_icon(ChromeIcon::Pin),
+        (Some(LairRetention::Pinned), true) => source.push_icon(ChromeIcon::Pinned),
+        (Some(LairRetention::Saved), false) => source.push_str("s "),
+        (Some(LairRetention::Pinned), false) => source.push_str("p "),
+    };
+}
+
+/// A row's icon columns, left to right: agent access, agent status, the live
+/// dot (filled while running or starting, hollow otherwise), and retention,
+/// one blank cell apart. Also returns the first cell holding a mark, so the
+/// name may run over columns this row leaves blank but never reaches a mark.
+fn row_columns_source(
+    row: &LairExplorerRow,
+    columns: ExplorerColumns,
+    icons: bool,
+) -> (ChromeSource, usize) {
+    let mut source = ChromeSource::default();
+    let mut first_mark = None;
+    if columns.access {
+        if row.access.is_some() {
+            first_mark = Some(0);
+        }
+        push_access(&mut source, row.access, icons);
+        source.push_str(" ");
+    }
+    if let Some(cells) = columns.agent {
+        let start = source.cells();
+        match &row.agent_column {
+            Some(column) => {
+                if first_mark.is_none() && !column.is_blank() {
+                    first_mark = Some(start);
+                }
+                source.push_source(column);
+            }
+            None => {
+                source.push_str(&" ".repeat(cells));
+            }
+        }
+        // Pad a narrower column so every row's later columns line up.
+        let used = source.cells() - start;
+        source.push_str(&" ".repeat(cells.saturating_sub(used)));
+        source.push_str(" ");
+    }
+    let live = source.cells();
+    source.push_str(if row.live { "●" } else { "○" });
+    if columns.retention {
+        source.push_str(" ");
+        push_retention(&mut source, row.retention, icons);
+    }
+    (source, first_mark.unwrap_or(live))
+}
+
+/// A row's name and icon-column clips: the columns end at the row's right
+/// inset, and the name ends one cell before the row's first mark.
+fn row_text_clips(
+    rect: Rect,
+    level: usize,
+    inset: u32,
+    cell_width: u32,
+    column_cells: usize,
+    first_mark: usize,
+) -> (Rect, Rect) {
+    let indent = inset
         .saturating_mul(u32::try_from(level.max(1)).unwrap_or(u32::MAX))
         .min(rect.width);
-    let width = rect.width.saturating_sub(left).saturating_sub(inset);
-    let label = Rect {
-        x: rect.x.saturating_add(left),
-        y: rect.y,
-        width,
-        height: rect.height / 2,
-    };
-    let status = Rect {
-        y: rect.y.saturating_add(label.height),
-        height: rect.height.saturating_sub(label.height),
-        ..label
-    };
-    (label, status)
+    let left = rect.x.saturating_add(indent);
+    let right = rect
+        .x
+        .saturating_add(rect.width.saturating_sub(inset))
+        .max(left);
+    let cells = |count: usize| cell_width.saturating_mul(u32::try_from(count).unwrap_or(u32::MAX));
+    let columns_left = right.saturating_sub(cells(column_cells)).max(left);
+    let name_right = columns_left
+        .saturating_add(cells(first_mark))
+        .saturating_sub(cell_width)
+        .clamp(left, right);
+    (
+        Rect {
+            x: left,
+            y: rect.y,
+            width: name_right - left,
+            height: rect.height,
+        },
+        Rect {
+            x: columns_left,
+            y: rect.y,
+            width: right - columns_left,
+            height: rect.height,
+        },
+    )
 }
 
 fn buffer_rect(rect: Rect, scale_120: u32) -> Rect {
@@ -344,6 +577,27 @@ fn buffer_rect(rect: Rect, scale_120: u32) -> Rect {
         width: right.saturating_sub(left),
         height: bottom.saturating_sub(top),
     }
+}
+
+/// The footer's text lines in buffer pixels: the status lines, then the
+/// context line, below the footer's padding and its top rule.
+fn footer_lines(footer: Rect, scale_120: u32, inset: u32) -> Vec<Rect> {
+    let line = FOOTER_LINE_HEIGHT.saturating_mul(scale_120).div_ceil(120);
+    let top = footer
+        .y
+        .saturating_add(FOOTER_PADDING.saturating_mul(scale_120).div_ceil(120));
+    let bottom = footer.y.saturating_add(footer.height);
+    (0..=u32::try_from(FOOTER_STATUS_LINES).unwrap_or(0))
+        .map(|index| {
+            let y = top.saturating_add(line.saturating_mul(index)).min(bottom);
+            Rect {
+                x: footer.x.saturating_add(inset),
+                y,
+                width: footer.width.saturating_sub(inset.saturating_mul(2)),
+                height: line.min(bottom - y),
+            }
+        })
+        .collect()
 }
 
 fn tuple(rect: Rect) -> (i32, i32, u32, u32) {
@@ -377,7 +631,6 @@ pub(crate) fn paint_lair_explorer(
     palette: SessionPickerPalette,
     rows: &[LairExplorerRow],
     selected: Option<NavigationNodeId>,
-    breadcrumb: Option<&str>,
     query: &str,
     status_message: Option<&str>,
     focused: bool,
@@ -394,6 +647,11 @@ pub(crate) fn paint_lair_explorer(
     );
     let border = scale_120.div_ceil(120).max(1);
     let right = panel.x.saturating_add(panel.width.saturating_sub(border));
+    let frame = rgba(if focused {
+        palette.focused_frame
+    } else {
+        palette.frame
+    });
     fill_rect(
         canvas,
         canvas_width,
@@ -404,66 +662,68 @@ pub(crate) fn paint_lair_explorer(
             border,
             panel.height,
         ),
-        rgba(if focused {
-            palette.focused_frame
-        } else {
-            palette.frame
-        }),
+        frame,
     );
     let mut used = HashSet::new();
-    let header = buffer_rect(layout.header, scale_120);
-    let inset = 12_u32.saturating_mul(scale_120).div_ceil(120);
-    let header_line = Rect {
-        x: header.x.saturating_add(inset),
-        y: header.y,
-        width: header.width.saturating_sub(inset.saturating_mul(2)),
-        height: (HEADER_HEIGHT - FILTER_HEIGHT)
-            .saturating_mul(scale_120)
-            .div_ceil(120)
-            .min(header.height)
-            / 2,
-    };
-    paint_picker_text(
+    let cell_width = picker_cell_width(
         cache,
         context,
         &mut used,
-        canvas,
-        canvas_width,
-        canvas_height,
-        explorer_header_text(focused),
-        ChromeTextStyle::Bold,
-        scale_120,
-        renderer_generation,
-        header_line,
-        PickerTextAlignment::Left,
-        palette.primary,
-    )?;
-    let context_line = Rect {
-        y: header.y.saturating_add(header_line.height),
-        ..header_line
-    };
-    let context_text = if let Some(status_message) = status_message {
-        status_message
-    } else if query.is_empty() {
-        breadcrumb.unwrap_or("No current Dojo")
-    } else {
-        query
-    };
-    paint_picker_text(
-        cache,
-        context,
-        &mut used,
-        canvas,
-        canvas_width,
-        canvas_height,
-        context_text,
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
-        context_line,
-        PickerTextAlignment::Left,
-        palette.secondary,
     )?;
+    let header = buffer_rect(layout.header, scale_120);
+    let inset = LEVEL_INDENT.saturating_mul(scale_120).div_ceil(120);
+    let title_right = layout
+        .filters
+        .first()
+        .map_or(header.x + header.width, |(_, rect)| {
+            buffer_rect(*rect, scale_120).x
+        });
+    paint_picker_text(
+        cache,
+        context,
+        &mut used,
+        canvas,
+        canvas_width,
+        canvas_height,
+        HEADER_TEXT,
+        ChromeTextStyle::Bold,
+        scale_120,
+        renderer_generation,
+        Rect {
+            x: header.x.saturating_add(inset),
+            y: header.y,
+            width: title_right.saturating_sub(header.x.saturating_add(inset)),
+            height: header.height,
+        },
+        PickerTextAlignment::Left,
+        palette.primary,
+    )?;
+    // Rules under the header and over the footer, inside the divider.
+    for y in [
+        header
+            .y
+            .saturating_add(header.height.saturating_sub(border)),
+        buffer_rect(layout.footer, scale_120).y,
+    ] {
+        if header.height == 0 {
+            break;
+        }
+        fill_rect(
+            canvas,
+            canvas_width,
+            canvas_height,
+            (
+                i32::try_from(panel.x).unwrap_or(i32::MAX),
+                i32::try_from(y).unwrap_or(i32::MAX),
+                right.saturating_sub(panel.x),
+                border,
+            ),
+            rgba(palette.frame),
+        );
+    }
 
     for (choice, rect) in &layout.filters {
         let rect = buffer_rect(*rect, scale_120);
@@ -507,13 +767,15 @@ pub(crate) fn paint_lair_explorer(
     }
 
     let icons = chrome_icons_available();
+    let columns = ExplorerColumns::of(rows);
     for (layout_row, row) in layout
         .rows
         .iter()
         .zip(rows.iter().skip(layout.visible_start))
     {
         let rect = buffer_rect(layout_row.rect, scale_120);
-        if selected == Some(row.id) {
+        let is_selected = selected == Some(row.id);
+        if is_selected {
             // Row hit areas span the panel, but selection paint must not cover
             // its right-hand divider, including at fractional buffer scales.
             let highlight = Rect {
@@ -540,9 +802,16 @@ pub(crate) fn paint_lair_explorer(
                 rgba(palette.selected_rail),
             );
         }
-        let source = row_label_source(row, icons);
-        let (label_clip, status_clip) = row_text_clips(rect, row.level, inset);
-        let primary = if selected == Some(row.id) {
+        let (columns_source, first_mark) = row_columns_source(row, columns, icons);
+        let (name_clip, columns_clip) = row_text_clips(
+            rect,
+            row.level,
+            inset,
+            cell_width,
+            columns_source.cells(),
+            first_mark,
+        );
+        let primary = if is_selected {
             if row.enabled {
                 palette.selected_primary
             } else {
@@ -553,11 +822,6 @@ pub(crate) fn paint_lair_explorer(
         } else {
             palette.secondary
         };
-        let secondary = if selected == Some(row.id) {
-            palette.selected_secondary
-        } else {
-            palette.secondary
-        };
         paint_picker_source(
             cache,
             context,
@@ -565,31 +829,90 @@ pub(crate) fn paint_lair_explorer(
             canvas,
             canvas_width,
             canvas_height,
-            &source,
+            &row_name_source(row, icons),
             ChromeTextStyle::Regular,
             scale_120,
             renderer_generation,
-            label_clip,
+            name_clip,
             PickerTextAlignment::Left,
             primary,
         )?;
-        paint_picker_text(
+        paint_picker_source(
             cache,
             context,
             &mut used,
             canvas,
             canvas_width,
             canvas_height,
-            &row.status,
+            &columns_source,
             ChromeTextStyle::Regular,
             scale_120,
             renderer_generation,
-            status_clip,
+            columns_clip,
             PickerTextAlignment::Left,
-            secondary,
+            primary,
         )?;
     }
+
     let footer = buffer_rect(layout.footer, scale_120);
+    let lines = footer_lines(footer, scale_120, inset);
+    let line_cells = |line: &Rect| usize::try_from(line.width / cell_width).unwrap_or(0);
+    // With no rows the notice takes the list's place; otherwise the footer's
+    // context line carries it.
+    let notice = if layout.rows.is_empty() {
+        if let Some(message) = status_message {
+            let list = Rect {
+                x: panel.x.saturating_add(inset),
+                y: header.y.saturating_add(header.height),
+                width: right.saturating_sub(panel.x.saturating_add(inset.saturating_mul(2))),
+                height: ROW_HEIGHT.saturating_mul(scale_120).div_ceil(120).min(
+                    footer
+                        .y
+                        .saturating_sub(header.y.saturating_add(header.height)),
+                ),
+            };
+            paint_picker_text(
+                cache,
+                context,
+                &mut used,
+                canvas,
+                canvas_width,
+                canvas_height,
+                message,
+                ChromeTextStyle::Regular,
+                scale_120,
+                renderer_generation,
+                list,
+                PickerTextAlignment::Left,
+                palette.secondary,
+            )?;
+        }
+        None
+    } else {
+        status_message
+    };
+    if let Some(row) = selected.and_then(|id| rows.iter().find(|row| row.id == id)) {
+        let words = explorer_status_words(row);
+        let wrapped = wrap_status_words(&words, line_cells(&lines[0]), FOOTER_STATUS_LINES);
+        for (line, text) in lines.iter().zip(&wrapped) {
+            paint_picker_text(
+                cache,
+                context,
+                &mut used,
+                canvas,
+                canvas_width,
+                canvas_height,
+                text,
+                ChromeTextStyle::Regular,
+                scale_120,
+                renderer_generation,
+                *line,
+                PickerTextAlignment::Left,
+                palette.primary,
+            )?;
+        }
+    }
+    let context_line = lines[FOOTER_STATUS_LINES];
     paint_picker_text(
         cache,
         context,
@@ -597,15 +920,11 @@ pub(crate) fn paint_lair_explorer(
         canvas,
         canvas_width,
         canvas_height,
-        explorer_footer_text(focused, searching),
+        &explorer_context_text(focused, searching, query, notice, line_cells(&context_line)),
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
-        Rect {
-            x: footer.x.saturating_add(inset),
-            width: footer.width.saturating_sub(inset.saturating_mul(2)),
-            ..footer
-        },
+        context_line,
         PickerTextAlignment::Left,
         palette.secondary,
     )?;
@@ -626,6 +945,10 @@ mod tests {
             kind: LairExplorerRowKind::Lair,
             label: "work".into(),
             agent_column: None,
+            agent_working: false,
+            live: false,
+            retention: None,
+            access: None,
             status: "Saved".into(),
             accessible_status: "Saved".into(),
             level: 1,
@@ -636,13 +959,52 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn paint(
+        context: &RenderContext,
+        canvas: &mut [u8],
+        canvas_width: u32,
+        canvas_height: u32,
+        scale: u32,
+        layout: &LairExplorerLayout,
+        palette: SessionPickerPalette,
+        rows: &[LairExplorerRow],
+        selected: Option<NavigationNodeId>,
+        focused: bool,
+        filter: LairExplorerFilter,
+    ) {
+        paint_lair_explorer(
+            &mut SessionPickerTextCache::default(),
+            context,
+            canvas,
+            canvas_width,
+            canvas_height,
+            scale,
+            1,
+            layout,
+            palette,
+            rows,
+            selected,
+            "",
+            None,
+            focused,
+            filter,
+            false,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn selected_row_preserves_divider_pixels_at_all_scales_and_widths() {
         use super::super::picker::session_picker_palette;
         use crate::config::ResolvedTheme;
 
         let id = NavigationNodeId::Lair(LairId::new());
-        let rows = [row(id)];
+        let mut selected = row(id);
+        selected.live = true;
+        selected.retention = Some(LairRetention::Saved);
+        selected.access = Some(LairExplorerAccess::Asking);
+        let rows = [selected];
         let mut palette = session_picker_palette(ResolvedTheme::default());
         palette.frame = 0x0012_3456;
         palette.focused_frame = 0x0098_abcd;
@@ -666,26 +1028,19 @@ mod tests {
                     let canvas_width = (content.x + content.width) * scale / 120 + 1;
                     let canvas_height = (content.y + content.height) * scale / 120 + 1;
                     let mut canvas = vec![0; (canvas_width * canvas_height * 4) as usize];
-                    paint_lair_explorer(
-                        &mut SessionPickerTextCache::default(),
+                    paint(
                         &RenderContext::new(u16::MAX),
                         &mut canvas,
                         canvas_width,
                         canvas_height,
                         scale,
-                        1,
                         &layout,
                         palette,
                         &rows,
                         Some(id),
-                        None,
-                        "",
-                        None,
                         focused,
                         filter,
-                        false,
-                    )
-                    .unwrap();
+                    );
                     let panel = buffer_rect(layout.panel, scale);
                     let border = scale.div_ceil(120).max(1);
                     let right = panel.x + panel.width.saturating_sub(border);
@@ -725,30 +1080,65 @@ mod tests {
     }
 
     #[test]
-    fn name_and_status_have_separate_full_width_lines() {
+    fn row_name_ends_a_cell_before_its_first_mark_and_columns_end_at_the_inset() {
         for width in [1, 2, 80, 160, PREFERRED_WIDTH] {
             for level in [1, 2, 3] {
                 for scale in [120, 150, 180, 240] {
-                    let rect = buffer_rect(
-                        Rect {
-                            x: 7,
-                            y: 20,
-                            width,
-                            height: ROW_HEIGHT,
-                        },
-                        scale,
-                    );
-                    let inset = 12_u32.saturating_mul(scale).div_ceil(120);
-                    let (name, status) = row_text_clips(rect, level, inset);
-                    assert_eq!(name.width, status.width);
-                    assert_eq!(name.y + name.height, status.y);
-                    assert_eq!(status.y + status.height, rect.y + rect.height);
-                    for clip in [name, status] {
-                        assert!(clip.x >= rect.x);
-                        assert!(clip.x + clip.width <= rect.x + rect.width);
-                    }
-                    if width == PREFERRED_WIDTH {
-                        assert!(name.width >= 240 * scale / 120);
+                    for cell in [5, 8, 11, 16, 24] {
+                        for (column_cells, first_mark) in [(1, 0), (6, 5), (12, 0), (12, 3)] {
+                            let rect = buffer_rect(
+                                Rect {
+                                    x: 7,
+                                    y: 20,
+                                    width,
+                                    height: ROW_HEIGHT,
+                                },
+                                scale,
+                            );
+                            let inset = LEVEL_INDENT.saturating_mul(scale).div_ceil(120);
+                            let (name, columns) =
+                                row_text_clips(rect, level, inset, cell, column_cells, first_mark);
+                            let what = format!(
+                                "width {width}, level {level}, scale {scale}, cell {cell}, \
+                                 columns {column_cells}/{first_mark}"
+                            );
+                            for clip in [name, columns] {
+                                assert!(clip.x >= rect.x, "{what}");
+                                assert!(clip.x + clip.width <= rect.x + rect.width, "{what}");
+                                assert_eq!((clip.y, clip.height), (rect.y, rect.height));
+                            }
+                            // The name never reaches a mark: one blank cell
+                            // separates it from the first one.
+                            let mark = columns.x + cell * u32::try_from(first_mark).unwrap();
+                            assert!(
+                                name.x + name.width + cell <= mark || name.width == 0,
+                                "{what}"
+                            );
+                            assert!(name.x + name.width <= columns.x.max(mark), "{what}");
+                            // With room, the columns end at the right inset
+                            // and hold every cell.
+                            let room = rect
+                                .width
+                                .saturating_sub(inset * (u32::try_from(level).unwrap() + 1));
+                            if room >= cell * u32::try_from(column_cells).unwrap() {
+                                assert_eq!(
+                                    columns.x + columns.width,
+                                    rect.x + rect.width - inset,
+                                    "{what}"
+                                );
+                                assert_eq!(
+                                    columns.width,
+                                    cell * u32::try_from(column_cells).unwrap(),
+                                    "{what}"
+                                );
+                            }
+                            if width == PREFERRED_WIDTH && level == 1 && cell <= 11 {
+                                // At ordinary sizes a level-one name keeps
+                                // well over half the panel beside every
+                                // column.
+                                assert!(name.width * 2 >= rect.width - cell * 12, "{what}");
+                            }
+                        }
                     }
                 }
             }
@@ -756,7 +1146,58 @@ mod tests {
     }
 
     #[test]
-    fn taller_rows_scroll_to_last_selection_without_losing_hit_targets() {
+    fn columns_line_up_on_every_row_and_skip_unused_columns() {
+        let id = NavigationNodeId::Lair(LairId::new());
+        let mut lair = row(id);
+        lair.live = true;
+        lair.retention = Some(LairRetention::Pinned);
+        lair.access = Some(LairExplorerAccess::Asking);
+        lair.agent_column = Some(ChromeSource::from("    "));
+        let mut splint = row(id);
+        splint.kind = LairExplorerRowKind::Splint;
+        splint.level = 3;
+        splint.expanded = None;
+        let mut column = ChromeSource::default();
+        column.push_str("⠋   ");
+        splint.agent_column = Some(column);
+        let rows = [lair.clone(), splint.clone()];
+        let columns = ExplorerColumns::of(&rows);
+        assert_eq!(
+            columns,
+            ExplorerColumns {
+                access: true,
+                agent: Some(4),
+                retention: true,
+            }
+        );
+        let (lair_columns, lair_mark) = row_columns_source(&lair, columns, true);
+        let (splint_columns, splint_mark) = row_columns_source(&splint, columns, true);
+        // access, gap, agent, gap, live, gap, retention.
+        assert_eq!(lair_columns.cells(), 12);
+        assert_eq!(splint_columns.cells(), 12);
+        assert_eq!(lair_columns.describe(), "[lock-question]      ● [pinned]");
+        assert_eq!(splint_columns.describe(), "   ⠋    ○   ");
+        // The Lair's first mark is its access icon; the Splint leaves access
+        // blank, so its name may run up to its spinner.
+        assert_eq!((lair_mark, splint_mark), (0, 3));
+        let (ascii, _) = row_columns_source(&lair, columns, false);
+        assert_eq!(ascii.text(), "A?      ● p ");
+        // Unused columns are left out; the live dot is always there.
+        let bare = [row(id)];
+        let columns = ExplorerColumns::of(&bare);
+        assert_eq!(columns, ExplorerColumns::default());
+        let (source, mark) = row_columns_source(&bare[0], columns, true);
+        assert_eq!((source.text(), mark), ("○", 0));
+        let mut saved = row(id);
+        saved.live = true;
+        saved.retention = Some(LairRetention::Saved);
+        let (source, mark) =
+            row_columns_source(&saved, ExplorerColumns::of(&[saved.clone()]), true);
+        assert_eq!((source.describe().as_str(), mark), ("● [pin]", 0));
+    }
+
+    #[test]
+    fn rows_scroll_to_last_selection_without_losing_hit_targets() {
         let rows = (0..30)
             .map(|_| row(NavigationNodeId::Lair(LairId::new())))
             .collect::<Vec<_>>();
@@ -774,8 +1215,9 @@ mod tests {
             0,
         )
         .unwrap();
-        assert_eq!(layout.visible_capacity, 5);
-        assert_eq!(layout.visible_start, 25);
+        // One line per row: eleven rows fit where two-line rows fitted five.
+        assert_eq!(layout.visible_capacity, 11);
+        assert_eq!(layout.visible_start, 19);
         let last = layout.rows.last().unwrap();
         assert_eq!(last.id, selected);
         assert!(last.rect.y + last.rect.height <= layout.footer.y);
@@ -785,11 +1227,74 @@ mod tests {
         );
     }
 
+    /// Clicks land on the single-line row under the pointer, from its top to
+    /// its bottom pixel and across the icon columns, and only the indent,
+    /// dot, and chevron toggle disclosure.
+    #[test]
+    fn hit_tests_map_every_single_line_row_and_its_chevron() {
+        let mut rows = Vec::new();
+        for level in [1, 2, 3, 2, 1] {
+            let mut entry = row(NavigationNodeId::Lair(LairId::new()));
+            entry.level = level;
+            entry.expanded = (level < 3).then_some(false);
+            rows.push(entry);
+        }
+        let layout = lair_explorer_layout(
+            Rect {
+                x: 5,
+                y: 34,
+                width: 1000,
+                height: 716,
+            },
+            640,
+            &rows,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(layout.rows.len(), rows.len());
+        assert_eq!(layout.rows[0].rect.y, layout.header.y + HEADER_HEIGHT);
+        for (index, (laid, entry)) in layout.rows.iter().zip(&rows).enumerate() {
+            assert_eq!(laid.rect.height, ROW_HEIGHT);
+            if let Some(next) = layout.rows.get(index + 1) {
+                assert_eq!(laid.rect.y + laid.rect.height, next.rect.y);
+            }
+            let top = f64::from(laid.rect.y);
+            let bottom = f64::from(laid.rect.y + laid.rect.height) - 0.5;
+            let columns = f64::from(laid.rect.x + laid.rect.width) - 20.0;
+            for y in [top, top + 13.0, bottom] {
+                assert_eq!(
+                    lair_explorer_hit_test(&layout, (columns, y)),
+                    Some(entry.id)
+                );
+                assert_eq!(
+                    lair_explorer_disclosure_hit_test(&layout, &rows, (columns, y)),
+                    None
+                );
+                let chevron = f64::from(
+                    laid.rect.x + LEVEL_INDENT * u32::try_from(entry.level).unwrap() + 20,
+                );
+                assert_eq!(
+                    lair_explorer_disclosure_hit_test(&layout, &rows, (chevron, y)),
+                    entry.expanded.map(|_| entry.id),
+                    "level {}",
+                    entry.level
+                );
+            }
+        }
+        let below = f64::from(layout.rows.last().unwrap().rect.y + ROW_HEIGHT);
+        assert_eq!(lair_explorer_hit_test(&layout, (50.0, below)), None);
+        assert_eq!(
+            lair_explorer_hit_test(&layout, (50.0, f64::from(layout.header.y + 5))),
+            None
+        );
+    }
+
     #[test]
     fn filter_hit_regions_never_overlap_rows_or_footer() {
         let rows = [row(NavigationNodeId::Lair(LairId::new()))];
         for width in [1, 2, 100, 700, 1000] {
-            for height in [1, 75, 104, 134, 182, 400] {
+            for height in [1, 29, 30, 75, 104, 134, 182, 400] {
                 let layout = lair_explorer_layout(
                     Rect {
                         x: 7,
@@ -805,6 +1310,7 @@ mod tests {
                 .unwrap();
                 for (filter, rect) in &layout.filters {
                     assert!(rect.y + rect.height <= layout.header.y + layout.header.height);
+                    assert!(rect.x + rect.width <= layout.panel.x + layout.panel.width);
                     if rect.width == 0 {
                         continue;
                     }
@@ -844,33 +1350,139 @@ mod tests {
                 );
             }
         }
+        // The filters share the title's line, right of the title, in order.
+        let layout = lair_explorer_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1000,
+                height: 400,
+            },
+            640,
+            &rows,
+            None,
+            0,
+        )
+        .unwrap();
+        let filters = layout
+            .filters
+            .iter()
+            .map(|(filter, rect)| (filter.label(), rect.x))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            filters.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            ["Live", "Saved", "All"]
+        );
+        assert!(filters[0].1 >= HEADER_TITLE_WIDTH);
+        assert!(filters.windows(2).all(|pair| pair[0].1 < pair[1].1));
     }
 
     #[test]
-    fn focus_copy_makes_input_ownership_explicit() {
-        assert_eq!(explorer_header_text(false), "LAIRS");
+    fn footer_context_line_makes_input_ownership_explicit() {
         assert_eq!(
-            explorer_footer_text(false, false),
+            explorer_context_text(false, false, "", None, 40),
             "Click rows · terminal input active"
         );
-        assert_eq!(explorer_header_text(true), "LAIRS · KEYBOARD FOCUS");
         assert_eq!(
-            explorer_footer_text(true, false),
+            explorer_context_text(true, false, "", None, 40),
             "↑↓ move · F filter · Esc terminal"
         );
+        // A navigation notice takes the line while rows are listed.
+        assert_eq!(
+            explorer_context_text(true, true, "abc", Some("Refreshing navigation…"), 40),
+            "Refreshing navigation…"
+        );
+        assert_eq!(HEADER_TEXT, "LAIRS");
     }
 
     #[test]
     fn search_footer_does_not_advertise_tree_filter_shortcut() {
+        let field = explorer_context_text(true, true, "dojo", None, 40);
+        assert_eq!(field, "Search: dojo_");
+        assert!(!field.contains("F filter"));
+        // A long query keeps its latest input and the caret.
+        let long = explorer_context_text(true, true, "a-very-long-search-query", None, 20);
+        assert_eq!(long, "Search: …arch-query_");
+        assert!(text_cells(&long) <= 20);
+        // A query left behind after returning to the tree is still shown.
         assert_eq!(
-            explorer_footer_text(true, true),
-            "Search labels · Esc clear/exit"
+            explorer_context_text(true, false, "dojo", None, 40),
+            "Search: dojo"
         );
-        assert!(!explorer_footer_text(true, true).contains("F filter"));
         assert_eq!(
-            explorer_footer_text(false, true),
-            explorer_footer_text(false, false)
+            explorer_context_text(false, true, "", None, 40),
+            explorer_context_text(false, false, "", None, 40)
         );
+    }
+
+    #[test]
+    fn status_words_wrap_and_truncate_only_between_words() {
+        let words =
+            "splinterm · Agent connected to part · Running · Saved · 1 needs input, 2 working";
+        for cells in 1..=90 {
+            for lines in 1..=3 {
+                let wrapped = wrap_status_words(words, cells, lines);
+                assert!(wrapped.len() <= lines, "{cells}/{lines}: {wrapped:?}");
+                assert!(!wrapped.is_empty());
+                for line in &wrapped {
+                    assert!(text_cells(line) <= cells, "{cells}/{lines}: {line:?}");
+                    assert!(!line.starts_with('·') && !line.starts_with(' '), "{line:?}");
+                    assert!(!line.ends_with(" ·") && !line.ends_with(' '), "{line:?}");
+                    // Every word is whole unless one word is wider than
+                    // the whole line.
+                    for word in line.trim_end_matches('…').split(' ') {
+                        let whole = words.split(' ').any(|original| original == word);
+                        assert!(
+                            whole || text_cells(word) >= cells.saturating_sub(1),
+                            "{cells}/{lines}: cut {word:?} in {line:?}"
+                        );
+                    }
+                }
+                let shown = wrapped.join(" ");
+                if wrapped.len() == lines && !shown.trim_end_matches('…').ends_with("working") {
+                    assert!(
+                        wrapped.last().unwrap().ends_with('…')
+                            || text_cells(wrapped.last().unwrap()) == cells,
+                        "{cells}/{lines}: {wrapped:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            wrap_status_words(words, 40, 2),
+            [
+                "splinterm · Agent connected to part",
+                "Running · Saved · 1 needs input, 2…"
+            ]
+        );
+        assert_eq!(
+            wrap_status_words("work · Running · Saved", 40, 2),
+            ["work · Running · Saved"]
+        );
+        assert_eq!(
+            wrap_status_words("work · Running · Saved", 15, 2),
+            ["work · Running", "Saved"]
+        );
+        assert_eq!(
+            wrap_status_words("work · Running · Saved", 15, 1),
+            ["work · Running…"]
+        );
+        assert!(wrap_status_words(words, 0, 2).is_empty());
+        assert!(wrap_status_words(words, 20, 0).is_empty());
+    }
+
+    #[test]
+    fn footer_words_name_the_selected_row_and_its_full_status() {
+        let mut entry = row(NavigationNodeId::Lair(LairId::new()));
+        entry.label = "splinterm".into();
+        entry.status = "Agent connected · Running · Saved · 1 working".into();
+        entry.accessible_status = entry.status.clone();
+        assert_eq!(
+            explorer_status_words(&entry),
+            "splinterm · Agent connected · Running · Saved · 1 working"
+        );
+        // The words come from the same status as the accessible text.
+        assert!(explorer_status_words(&entry).ends_with(&entry.accessible_status));
     }
 
     #[test]
@@ -1024,18 +1636,21 @@ mod tests {
         );
     }
 
-    /// VM case E6: at maximum zoom every Explorer line still holds a whole
-    /// chrome glyph, and a long label is ellipsized to the panel width.
-    /// Chrome no longer follows zoom, so the largest UI text size now
-    /// stands in for it.
+    /// VM case E6, for the one-line layout: at every Omarchy text size from
+    /// 9 to 20 px and at the largest UI size, at 1x, 1.25x, 1.5x, and 2x,
+    /// every Explorer line still holds a whole chrome glyph, a long name is
+    /// ellipsized before the icon columns, and the columns fit the row.
     #[test]
-    fn maximum_zoom_text_fits_every_explorer_line_and_ellipsizes_long_labels() {
+    fn every_ui_text_size_fits_every_explorer_line_and_ellipsizes_long_names() {
         use super::super::super::{ChromeText, text::chrome_maximum_cell_height};
-        use super::super::picker::truncate_picker_text;
+        use crate::geometry::FontSize;
 
         let id = NavigationNodeId::Lair(LairId::new());
         let mut long = row(id);
         long.label = "e-long-label-lair-with-a-very-long-name".into();
+        long.access = Some(LairExplorerAccess::Connected);
+        long.retention = Some(LairRetention::Pinned);
+        long.agent_column = Some(ChromeSource::from("⠋   "));
         let rows = [long];
         let layout = lair_explorer_layout(
             Rect {
@@ -1050,59 +1665,81 @@ mod tests {
             0,
         )
         .unwrap();
-        for scale in [120, 150, 180, 240] {
-            let context = RenderContext::new(u16::MAX)
-                .at_maximum_zoom(scale)
-                .at_maximum_chrome_font_size();
-            let text = ChromeText::load_source_styled_with_context(
-                &row_label_source(&rows[0], true),
-                scale,
-                ChromeTextStyle::Regular,
-                &context,
-            )
-            .unwrap();
-            assert!(text.pixel_height() <= chrome_maximum_cell_height(scale));
-            let inset = 12_u32.saturating_mul(scale).div_ceil(120);
-            let (label, status) = row_text_clips(
-                buffer_rect(layout.rows[0].rect, scale),
-                rows[0].level,
-                inset,
-            );
-            let header = buffer_rect(layout.header, scale);
-            let header_line = (HEADER_HEIGHT - FILTER_HEIGHT)
-                .saturating_mul(scale)
-                .div_ceil(120)
-                .min(header.height)
-                / 2;
-            for (what, height) in [
-                ("label", label.height),
-                ("status", status.height),
-                ("header", header_line),
-                ("filter", buffer_rect(layout.filters[0].1, scale).height),
-                ("footer", buffer_rect(layout.footer, scale).height),
-            ] {
-                assert!(
-                    text.pixel_height() <= height,
-                    "{what} line at scale {scale}: {} > {height}",
-                    text.pixel_height()
+        let contexts = (9_u16..=20)
+            .map(|px| {
+                RenderContext::new(u16::MAX).with_chrome_font_size(FontSize::Pixels(f32::from(px)))
+            })
+            .chain([RenderContext::new(u16::MAX)
+                .at_maximum_zoom(120)
+                .at_maximum_chrome_font_size()]);
+        for context in contexts {
+            for scale in [120, 150, 180, 240] {
+                let name = ChromeText::load_source_styled_with_context(
+                    &row_name_source(&rows[0], true),
+                    scale,
+                    ChromeTextStyle::Regular,
+                    &context,
+                )
+                .unwrap();
+                assert!(name.pixel_height() <= chrome_maximum_cell_height(scale));
+                let cell = name.frame.cell_width;
+                let (columns, first_mark) =
+                    row_columns_source(&rows[0], ExplorerColumns::of(&rows), true);
+                let inset = LEVEL_INDENT.saturating_mul(scale).div_ceil(120);
+                let row_rect = buffer_rect(layout.rows[0].rect, scale);
+                let (name_clip, columns_clip) = row_text_clips(
+                    row_rect,
+                    rows[0].level,
+                    inset,
+                    cell,
+                    columns.cells(),
+                    first_mark,
                 );
+                let footer = footer_lines(buffer_rect(layout.footer, scale), scale, inset);
+                let mut lines = vec![
+                    ("row", row_rect.height),
+                    ("header", buffer_rect(layout.header, scale).height),
+                    ("filter", buffer_rect(layout.filters[0].1, scale).height),
+                ];
+                lines.extend(footer.iter().map(|line| ("footer", line.height)));
+                for (what, height) in lines {
+                    assert!(
+                        name.pixel_height() <= height,
+                        "{what} line at scale {scale}: {} > {height}",
+                        name.pixel_height()
+                    );
+                }
+                // Every footer line lies inside the footer and below the rows.
+                let footer_rect = buffer_rect(layout.footer, scale);
+                for line in &footer {
+                    assert!(line.y >= footer_rect.y);
+                    assert!(line.y + line.height <= footer_rect.y + footer_rect.height);
+                }
+                // The columns fit whole beside a name of several cells.
+                assert_eq!(
+                    columns_clip.width,
+                    cell * u32::try_from(columns.cells()).unwrap(),
+                    "scale {scale}, cell {cell}"
+                );
+                assert!(name_clip.width >= cell * 6, "scale {scale}, cell {cell}");
+                // The name is ellipsized to whole cells within its clip.
+                assert!(name.pixel_width() > name_clip.width);
+                let cells = usize::try_from(name_clip.width / cell).unwrap();
+                let fitted = truncate_picker_text(&rows[0].label, cells.saturating_sub(4));
+                assert!(fitted.ends_with('…'));
+                let fitted = ChromeText::load_with_context(&fitted, scale, &context).unwrap();
+                assert!(fitted.pixel_width() <= name_clip.width);
             }
-            // The label line is ellipsized to whole cells within its clip.
-            assert!(text.pixel_width() > label.width);
-            let cells = usize::try_from(label.width / text.frame.cell_width).unwrap();
-            let fitted = truncate_picker_text(&rows[0].label, cells);
-            assert!(fitted.ends_with('…'));
-            let fitted = ChromeText::load_with_context(&fitted, scale, &context).unwrap();
-            assert!(fitted.pixel_width() <= label.width);
         }
     }
 
-    /// Paints one unselected row and returns the canvas and its label clip.
+    /// Paints one unselected row and returns the canvas, its width, the
+    /// row's name and column clips, and the chrome cell width.
     fn paint_row(
         context: &RenderContext,
         painted: LairExplorerRow,
         scale: u32,
-    ) -> (Vec<u8>, u32, Rect) {
+    ) -> (Vec<u8>, u32, Rect, Rect, u32) {
         use super::super::picker::session_picker_palette;
         use crate::config::ResolvedTheme;
 
@@ -1117,55 +1754,47 @@ mod tests {
         let canvas_width = surface.width * scale / 120 + 1;
         let canvas_height = surface.height * scale / 120 + 1;
         let mut canvas = vec![0; (canvas_width * canvas_height * 4) as usize];
-        paint_lair_explorer(
-            &mut SessionPickerTextCache::default(),
+        paint(
             context,
             &mut canvas,
             canvas_width,
             canvas_height,
             scale,
-            1,
             &layout,
             session_picker_palette(ResolvedTheme::default()),
             &rows,
             None,
-            None,
-            "",
-            None,
             false,
             LairExplorerFilter::All,
-            false,
-        )
-        .unwrap();
-        let inset = 12_u32.saturating_mul(scale).div_ceil(120);
-        let (label, _) = row_text_clips(buffer_rect(layout.rows[0].rect, scale), 1, inset);
-        (canvas, canvas_width, label)
+        );
+        let cell = chrome_cell_width(context, scale);
+        let inset = LEVEL_INDENT.saturating_mul(scale).div_ceil(120);
+        let (columns, first_mark) = row_columns_source(&rows[0], ExplorerColumns::of(&rows), true);
+        let (name, columns) = row_text_clips(
+            buffer_rect(layout.rows[0].rect, scale),
+            rows[0].level,
+            inset,
+            cell,
+            columns.cells(),
+            first_mark,
+        );
+        (canvas, canvas_width, name, columns, cell)
     }
 
-    /// Paints one unselected Lair row with an agent column.
-    fn paint_agent_row(
-        context: &RenderContext,
-        agent_column: Option<ChromeSource>,
-        scale: u32,
-    ) -> (Vec<u8>, u32, Rect) {
-        let mut agent_row = row(NavigationNodeId::Lair(LairId::new()));
-        agent_row.agent_column = agent_column;
-        paint_row(context, agent_row, scale)
-    }
-
-    /// Asserts that `painted` differs from `blank` only inside label cells
-    /// `cells` and the label line, and returns how many pixels differ.
+    /// Asserts that `painted` differs from `blank` only inside cells `cells`
+    /// counted from `origin` on the row's line, and returns how many pixels
+    /// differ.
     fn changed_only_in_cells(
         painted: &[u8],
         blank: &[u8],
         width: u32,
-        label: Rect,
+        origin: Rect,
         cell: u32,
         cells: std::ops::Range<u32>,
         what: &str,
     ) -> usize {
-        let left = label.x + cells.start * cell;
-        let right = label.x + cells.end * cell;
+        let left = origin.x + cells.start * cell;
+        let right = origin.x + cells.end * cell;
         let mut changed = 0;
         for (index, (a, b)) in painted
             .chunks_exact(4)
@@ -1179,7 +1808,7 @@ mod tests {
             let x = u32::try_from(index).unwrap() % width;
             let y = u32::try_from(index).unwrap() / width;
             assert!(
-                (left..right).contains(&x) && (label.y..label.y + label.height).contains(&y),
+                (left..right).contains(&x) && (origin.y..origin.y + origin.height).contains(&y),
                 "{what} painted outside cells {cells:?} at {x},{y}"
             );
         }
@@ -1194,8 +1823,8 @@ mod tests {
     }
 
     #[test]
-    fn agent_icon_column_paints_only_its_fixed_slots_and_keeps_labels_aligned() {
-        use crate::frontend::AgentGlyphs;
+    fn agent_column_paints_only_its_fixed_slots_right_of_the_name() {
+        use crate::frontend::{AgentGlyphs, AgentSpinner};
         use splinterm_protocol::AgentState;
 
         assert!(super::super::super::chrome_icons_available());
@@ -1207,53 +1836,195 @@ mod tests {
             AgentState::Done,
             AgentState::Idle,
         ];
+        let agent_row = |column: ChromeSource| {
+            let mut agent_row = row(NavigationNodeId::Lair(LairId::new()));
+            agent_row.agent_column = Some(column);
+            agent_row
+        };
         for scale in [120, 150, 180, 240] {
-            let cell = chrome_cell_width(&context, scale);
-            // The label line is "{dot}{disclosure slot} {column} {label}": the
-            // column starts at cell four, after a three-cell marker and a space.
-            let (blank, width, label) =
-                paint_agent_row(&context, Some(ChromeSource::from("    ")), scale);
-            let mut icons = Vec::new();
+            // The columns are "{agent} {live}": the agent glyph takes cells
+            // 0..2 and the stale marker cells 2..4.
+            let (blank, width, _, columns, cell) =
+                paint_row(&context, agent_row(ChromeSource::from("    ")), scale);
+            let mut glyphs = Vec::new();
             for state in states {
                 for is_stale in [false, true] {
                     let mut column = ChromeSource::default();
-                    column.push_icon(AgentGlyphs::icon(state));
+                    match AgentGlyphs::icon(state) {
+                        Some(icon) => {
+                            column.push_icon(icon);
+                        }
+                        None => {
+                            column.push_str(&format!("{} ", AgentSpinner::STATIC.glyph()));
+                        }
+                    }
                     if is_stale {
                         column.push_icon(ChromeIcon::Clock);
                     } else {
                         column.push_str("  ");
                     }
-                    let (painted, _, _) = paint_agent_row(&context, Some(column), scale);
-                    // A fresh icon stays in its two-cell slot; the stale clock
-                    // takes the next slot and never reaches the label.
-                    let slots = if is_stale { 4..8 } else { 4..6 };
+                    let (painted, _, _, _, _) = paint_row(&context, agent_row(column), scale);
+                    // A fresh glyph stays in its slot; the stale clock takes
+                    // the next slot and never reaches the live dot.
+                    let slots = if is_stale { 0..4 } else { 0..2 };
                     let what = format!("{state:?} stale={is_stale} at scale {scale}");
                     let changed =
-                        changed_only_in_cells(&painted, &blank, width, label, cell, slots, &what);
+                        changed_only_in_cells(&painted, &blank, width, columns, cell, slots, &what);
                     assert!(changed > 0, "{what} painted nothing");
                     if !is_stale {
-                        icons.push(painted);
+                        glyphs.push(painted);
                     }
                 }
             }
             // Every state paints a distinct shape.
-            for (index, icon) in icons.iter().enumerate() {
-                assert!(icons[index + 1..].iter().all(|other| other != icon));
+            for (index, glyph) in glyphs.iter().enumerate() {
+                assert!(glyphs[index + 1..].iter().all(|other| other != glyph));
+            }
+            // Spinner frames are distinct shapes in the same cell.
+            let mut frames = Vec::new();
+            let mut spinner = AgentSpinner::STATIC;
+            // All ten frames.
+            for _ in 0..10 {
+                let column = ChromeSource::from(format!("{}   ", spinner.glyph()));
+                let (painted, _, _, _, _) = paint_row(&context, agent_row(column), scale);
+                let what = format!("spinner {spinner:?} at scale {scale}");
+                changed_only_in_cells(&painted, &blank, width, columns, cell, 0..1, &what);
+                frames.push(painted);
+                spinner = spinner.next();
+            }
+            for (index, frame) in frames.iter().enumerate() {
+                assert!(frames[index + 1..].iter().all(|other| other != frame));
             }
             // ASCII fallback columns stay within their two text cells.
-            let (ascii_blank, _, _) =
-                paint_agent_row(&context, Some(ChromeSource::from("  ")), scale);
-            for column in ["? ", "! ", "> ", "+~", "- "] {
-                let (painted, _, _) =
-                    paint_agent_row(&context, Some(ChromeSource::from(column)), scale);
+            for column in ["?   ", "!   ", "+ ~ ", "-   "] {
+                let (painted, _, _, _, _) =
+                    paint_row(&context, agent_row(ChromeSource::from(column)), scale);
                 let what = format!("{column:?} at scale {scale}");
                 let changed =
-                    changed_only_in_cells(&painted, &ascii_blank, width, label, cell, 4..6, &what);
+                    changed_only_in_cells(&painted, &blank, width, columns, cell, 0..4, &what);
                 assert!(changed > 0, "{what} painted nothing");
             }
-            // Without any status in view there is no column and the label moves left.
-            let (without, _, _) = paint_agent_row(&context, None, scale);
-            assert_ne!(without, blank);
+        }
+    }
+
+    #[test]
+    fn live_retention_and_access_marks_are_distinct_and_stay_in_their_columns() {
+        let context = RenderContext::new(u16::MAX);
+        let base = |live, retention, access| {
+            let mut entry = row(NavigationNodeId::Lair(LairId::new()));
+            entry.live = live;
+            entry.retention = retention;
+            entry.access = access;
+            entry
+        };
+        for scale in [120, 150, 240] {
+            // Every variant keeps the access and retention columns: access
+            // takes cells 0..2, the live dot cell 3, and retention 5..7.
+            let reference = base;
+            let (blank_access, width, _, columns, cell) = paint_row(
+                &context,
+                reference(
+                    false,
+                    Some(LairRetention::Saved),
+                    Some(LairExplorerAccess::Reachable),
+                ),
+                scale,
+            );
+            let mut marks = vec![blank_access.clone()];
+            for access in [LairExplorerAccess::Connected, LairExplorerAccess::Asking] {
+                let (painted, _, _, _, _) = paint_row(
+                    &context,
+                    reference(false, Some(LairRetention::Saved), Some(access)),
+                    scale,
+                );
+                let what = format!("{access:?} at scale {scale}");
+                assert!(
+                    changed_only_in_cells(
+                        &painted,
+                        &blank_access,
+                        width,
+                        columns,
+                        cell,
+                        0..2,
+                        &what
+                    ) > 0
+                );
+                marks.push(painted);
+            }
+            let (live, _, _, _, _) = paint_row(
+                &context,
+                reference(
+                    true,
+                    Some(LairRetention::Saved),
+                    Some(LairExplorerAccess::Reachable),
+                ),
+                scale,
+            );
+            // The dot comes from the text font, whose edges may reach the
+            // blank cells on either side of it, never another column.
+            let what = format!("live at scale {scale}");
+            assert!(
+                changed_only_in_cells(&live, &blank_access, width, columns, cell, 2..5, &what) > 0
+            );
+            let (pinned, _, _, _, _) = paint_row(
+                &context,
+                reference(
+                    false,
+                    Some(LairRetention::Pinned),
+                    Some(LairExplorerAccess::Reachable),
+                ),
+                scale,
+            );
+            let what = format!("pinned at scale {scale}");
+            assert!(
+                changed_only_in_cells(&pinned, &blank_access, width, columns, cell, 5..7, &what)
+                    > 0
+            );
+            marks.push(live);
+            marks.push(pinned);
+            for (index, mark) in marks.iter().enumerate() {
+                assert!(marks[index + 1..].iter().all(|other| other != mark));
+            }
+        }
+    }
+
+    #[test]
+    fn long_names_never_reach_the_icon_columns() {
+        let context = RenderContext::new(u16::MAX);
+        for scale in [120, 150, 180, 240] {
+            for level in [1, 2, 3] {
+                for access in [None, Some(LairExplorerAccess::Asking)] {
+                    let entry = |label: &str| {
+                        let mut entry = row(NavigationNodeId::Lair(LairId::new()));
+                        entry.level = level;
+                        entry.label = label.into();
+                        entry.access = access;
+                        entry.live = true;
+                        entry.retention = Some(LairRetention::Saved);
+                        entry.agent_column = Some(ChromeSource::from("⠋   "));
+                        entry
+                    };
+                    let (short, width, name, columns, _) = paint_row(&context, entry(""), scale);
+                    let (long, _, _, _, _) = paint_row(
+                        &context,
+                        entry("a-name-long-enough-to-cross-every-icon-column-of-the-row"),
+                        scale,
+                    );
+                    let what = format!("level {level}, access {access:?}, scale {scale}");
+                    let mut changed = 0;
+                    for (index, (a, b)) in
+                        long.chunks_exact(4).zip(short.chunks_exact(4)).enumerate()
+                    {
+                        if a != b {
+                            changed += 1;
+                            let x = u32::try_from(index).unwrap() % width;
+                            assert!(x < name.x + name.width, "{what}: name ink at {x}");
+                            assert!(x < columns.x, "{what}: name ink in the columns at {x}");
+                        }
+                    }
+                    assert!(changed > 0, "{what}");
+                }
+            }
         }
     }
 
@@ -1261,9 +2032,8 @@ mod tests {
     fn disclosure_chevrons_are_distinct_icons_inside_their_slot() {
         let context = RenderContext::new(u16::MAX);
         for scale in [120, 150, 180, 240] {
-            let cell = chrome_cell_width(&context, scale);
             let base = row(NavigationNodeId::Lair(LairId::new()));
-            let (blank, width, label) = paint_row(
+            let (blank, width, label, _, cell) = paint_row(
                 &context,
                 LairExplorerRow {
                     expanded: None,
@@ -1273,7 +2043,7 @@ mod tests {
             );
             let mut chevrons = Vec::new();
             for expanded in [false, true] {
-                let (painted, _, _) = paint_row(
+                let (painted, _, _, _, _) = paint_row(
                     &context,
                     LairExplorerRow {
                         expanded: Some(expanded),
@@ -1290,7 +2060,7 @@ mod tests {
             assert_ne!(chevrons[0], chevrons[1]);
             // The current-row dot keeps the cell before the chevron: its edge
             // antialiasing may reach the slot, but never the chevron's ink.
-            let (current, _, _) = paint_row(
+            let (current, _, _, _, _) = paint_row(
                 &context,
                 LairExplorerRow {
                     current: true,
@@ -1311,6 +2081,78 @@ mod tests {
                     assert_eq!(dot, chevron, "{what} overlaps the chevron");
                 }
             }
+        }
+    }
+
+    /// The selected row's status is spelled out in the footer, and with no
+    /// row selected the footer's status lines stay empty.
+    #[test]
+    fn footer_paints_the_selected_rows_words_inside_its_status_lines() {
+        use super::super::picker::session_picker_palette;
+        use crate::config::ResolvedTheme;
+
+        let context = RenderContext::new(u16::MAX);
+        let id = NavigationNodeId::Lair(LairId::new());
+        let mut entry = row(id);
+        entry.status = "Agent connected · Running · Saved · 1 needs input, 2 working".into();
+        let rows = [entry];
+        let surface = Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: HEADER_HEIGHT + FOOTER_HEIGHT + ROW_HEIGHT,
+        };
+        let layout = lair_explorer_layout(surface, 640, &rows, None, 0).unwrap();
+        let palette = session_picker_palette(ResolvedTheme::default());
+        for scale in [120, 240] {
+            let canvas_width = surface.width * scale / 120 + 1;
+            let canvas_height = surface.height * scale / 120 + 1;
+            let draw = |selected| {
+                let mut canvas = vec![0; (canvas_width * canvas_height * 4) as usize];
+                paint(
+                    &context,
+                    &mut canvas,
+                    canvas_width,
+                    canvas_height,
+                    scale,
+                    &layout,
+                    palette,
+                    &rows,
+                    selected,
+                    true,
+                    LairExplorerFilter::All,
+                );
+                canvas
+            };
+            let unselected = draw(None);
+            let selected = draw(Some(id));
+            let inset = LEVEL_INDENT.saturating_mul(scale).div_ceil(120);
+            let lines = footer_lines(buffer_rect(layout.footer, scale), scale, inset);
+            let row_rect = buffer_rect(layout.rows[0].rect, scale);
+            let mut in_lines = [0_usize; FOOTER_STATUS_LINES];
+            for (index, (a, b)) in selected
+                .chunks_exact(4)
+                .zip(unselected.chunks_exact(4))
+                .enumerate()
+            {
+                if a == b {
+                    continue;
+                }
+                let x = u32::try_from(index).unwrap() % canvas_width;
+                let y = u32::try_from(index).unwrap() / canvas_width;
+                if (row_rect.y..row_rect.y + row_rect.height).contains(&y) {
+                    continue;
+                }
+                let line = lines[..FOOTER_STATUS_LINES]
+                    .iter()
+                    .position(|line| {
+                        (line.y..line.y + line.height).contains(&y)
+                            && (line.x..line.x + line.width).contains(&x)
+                    })
+                    .unwrap_or_else(|| panic!("footer words outside their lines at {x},{y}"));
+                in_lines[line] += 1;
+            }
+            assert!(in_lines[0] > 0, "scale {scale}");
         }
     }
 }

@@ -43,13 +43,13 @@ pub(crate) fn agent_access_test_entry(
         lair_id,
     )
 }
-pub(crate) use agent_status::{AgentAggregate, AgentGlyphs, badged_tab_label};
+pub(crate) use agent_status::{AgentAggregate, AgentGlyphs, AgentSpinner, badged_tab_label};
 pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
 pub use dialog_text::{DialogIdentity, DialogLine, DialogLineRole, DialogText};
 #[cfg(test)]
 pub(crate) use lair_explorer::LairExplorerRowKind;
 pub(crate) use lair_explorer::{
-    LairExplorerDecision, LairExplorerFilter, LairExplorerRow, LairExplorerUi,
+    LairExplorerAccess, LairExplorerDecision, LairExplorerFilter, LairExplorerRow, LairExplorerUi,
 };
 pub use message::{
     AuthorityStatus, FontUpdate, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,

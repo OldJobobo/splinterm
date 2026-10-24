@@ -162,10 +162,32 @@ Launcher-generated `terminal-<timestamp>-<pid>` names appear as compact **Lair 1
 **Dojo N** and **Terminal N**. Meaningful custom names are preserved, and aliases
 skip names already used by siblings. These are display labels, not renamed saved
 objects or CLI identifiers; numbering follows the current topology and can change
-when siblings are added or removed. Search, breadcrumbs, the navigation
-pickers, and the standalone Recent Dojos picker (`splinterm dojos`) use the
-same labels. Each Explorer row puts status on a separate line so
-it does not crowd out the name; long text is ellipsized within the panel.
+when siblings are added or removed. Search, the navigation pickers, and the
+standalone Recent Dojos picker (`splinterm dojos`) use the same labels.
+
+Each Explorer row is one line. On the left are a dot marking the current row,
+a chevron icon before each Lair and Dojo (pointing right when collapsed and
+down when expanded), and the name. On the right, fixed icon columns line up on
+every row:
+
+| Column | Shows |
+| --- | --- |
+| Agent access | `plug` when an agent can reach the row, `plug-connected` when one is connected, `lock-question` when an agent is asking for access to the Lair |
+| Agent status | the agent's state (see [below](#agent-status-in-the-explorer-and-on-dojo-tabs)) |
+| Live | a filled dot `●` while a Splint in the row is running or starting, a hollow dot `○` otherwise |
+| Retention | `pin` for a saved Lair, `pinned` for a pinned Lair |
+
+A column appears only while some row in the Explorer uses it, except the live
+dot, which is always there. A long name is ellipsized before the first icon in
+its row; it never runs under one. The footer spells out the selected row in
+words, for example *work · Agent connected · Running · Saved · 1 working*,
+wrapping onto a second line between words and ending in an ellipsis after the
+last whole word that fits. These are the same words that assistive technology
+reads for the row. Below them, the footer shows the search field while you
+search, a navigation notice such as *Refreshing navigation…* when there is
+one, and otherwise who has the keyboard: *↑↓ move · F filter · Esc terminal*
+while the Explorer has focus, *Click rows · terminal input active* while the
+terminal does.
 
 Parent rows summarize runtime state independently of retention and window
 attachment. A saved Lair can still be running. A Dojo marked **Not open here**
@@ -175,14 +197,13 @@ restorable Dojo opens a restore confirmation rather than reporting a permission
 failure. Detached starting or mixed-state Dojos still cannot be attached;
 Explorer explains this lifecycle restriction instead of calling it a denial.
 
-The header offers **Live / Saved / All**, initially **Live**. **Live** keeps
+The header shows the title and the **Live / Saved / All** filters on one
+line, initially **Live**. **Live** keeps
 running or starting Splints and their parent context; a mixed parent containing
 only stopped or unavailable Splints is not live. **Saved** keeps saved and pinned Lairs,
 including any live work inside them. These filters preserve the authoritative
-Lair → Dojo → Splint order; pinning adds a status marker, not refresh-driven
+Lair → Dojo → Splint order; pinning adds a retention icon, not refresh-driven
 sorting. Branches begin collapsed, and refreshing preserves disclosure choices.
-A chevron icon before each Lair and Dojo points right when collapsed and down
-when expanded, and a dot marks the current row.
 Label search looks through every Lair, whatever the filter, so a saved or
 stopped Lair is found while Live is chosen; clearing the search returns to the
 chosen filter. The accessibility status names
@@ -228,7 +249,7 @@ output, and a status is display data: it cannot approve, type, or take control.
 
 | State | Icon | ASCII fallback | Text |
 | --- | --- | --- | --- |
-| working | `loader-2` (an open circle) | `>` | Working |
+| working | a Braille spinner, `⠋` at rest | the same spinner | Working |
 | needs input | `message-question` (a speech bubble with `?`) | `?` | Needs input |
 | done | `circle-check` | `+` | Done |
 | error | `alert-circle` (a circle with `!`) | `!` | Error |
@@ -237,20 +258,27 @@ output, and a status is display data: it cannot approve, type, or take control.
 
 The icons are a small subset of [Tabler Icons](https://tabler.io/icons) (MIT)
 built into Splinterm, drawn in the row's text colour at the interface font's
-ascender height. Every state differs by icon shape and by text, never by colour
-or motion alone. Icons are static: the working icon never spins, and nothing
-else animates. They do not depend on the interface font; if the built-in icon
+ascender height. Every state differs by shape and by text, never by colour or
+motion alone. They do not depend on the interface font; if the built-in icon
 data could not be loaded, Splinterm would show the ASCII fallbacks instead of a
 missing-glyph box. Icons are visual only: accessible text and search use the
 state words.
 
-- **Splint rows** show the icon in a fixed-width column before the name and add
-  the state to the status line, for example *Running · Needs input · waiting for
-  approval*. The agent's free-text detail appears only here, ellipsized to the
-  row width.
+A fresh **working** status is a Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), the one moving
+part, in the Explorer and on Dojo tabs. Splinterm draws Braille itself, so it
+needs neither the icon data nor a font. It steps at most four times a second
+on the same event-loop wakeup as the cursor blink, and only while the Window
+has keyboard focus: in an unfocused Window, with `SPLINTERM_REDUCED_MOTION=1`,
+and for a stale working status it holds its first frame, `⠋`. Every other
+state is a static icon.
+
+- **Splint rows** show the icon in the agent status column, and the footer adds
+  the state to the selected row's words, for example *shell · Running · Needs
+  input · waiting for approval*. The agent's free-text detail appears only
+  there, wrapped and ellipsized between words.
 - **Dojo and Lair rows** show the most urgent icon of the Splints inside them,
-  and the status line counts each state in words, joined with ", ", for example
-  *Running · Current · 1 needs input, 2 working*. Priority is needs input, then
+  and their words count each state, joined with ", ", for example *editor ·
+  Running · Current · 1 needs input, 2 working*. Priority is needs input, then
   error, working, done, and idle; stale statuses rank last. The icon column
   appears while any Splint in the Explorer has a status.
 - **Dojo tabs** show one badge before the label: the most urgent icon, with a
@@ -259,12 +287,14 @@ state words.
   narrow tab the label is shortened first and the badge is the last thing
   dropped. Tabs never show the detail text.
 - **Stale.** `working` and `needs input` expire unless the agent reports again,
-  after two minutes by default. Splinterm then keeps the last icon and adds the
-  clock icon after it in the Explorer column and the tab badge, and the
-  Explorer status reads *Working · stale (no report for 2 min)*. A stale status
-  is dropped after 15 more minutes.
+  after two minutes by default. Splinterm then keeps the last icon (a stale
+  working spinner stops on its first frame) and adds the clock icon after it
+  in the Explorer column and the tab badge, and the Explorer's words read
+  *Working · stale (no report for 2 min)*. A stale status is dropped after 15
+  more minutes.
 - **Unavailable.** While the Explorer's view of the daemon is stale or
-  disconnected, rows show *Agent status unavailable* instead of the last value.
+  disconnected, the words read *Agent status unavailable* and the column is
+  blank instead of showing the last value.
 - **Search.** Explorer search also matches state words, so `needs input` (or
   `needs_input`, `error`, `done`, `stale`) filters to those Splints. It does not
   match the detail text.
@@ -280,8 +310,8 @@ the [configuration](configuration.md); **Reload configuration** applies it.
 The Explorer's accessible item states include the state in words, and a polite
 announcement is made only when a visible Splint enters needs input, error, or
 done, or stops being stale. Changes to and from working are not announced.
-`SPLINTERM_REDUCED_MOTION=1` is honoured, but agent status adds nothing to
-animate; Splinterm does not yet read the desktop's reduce-animation setting.
+`SPLINTERM_REDUCED_MOTION=1` stops the working spinner, as it stops the cursor
+blink; Splinterm does not yet read the desktop's reduce-animation setting.
 
 ## Panes and layouts
 
