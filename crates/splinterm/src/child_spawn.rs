@@ -35,6 +35,13 @@ static STATE: Mutex<GateState> = Mutex::new(GateState {
 });
 static IDLE: Condvar = Condvar::new();
 
+/// Serializes the tests that pause the gate or assert that it is open. The
+/// gate is process-wide and the test harness runs tests in parallel threads
+/// of one process, so one test's pause would otherwise refuse another's
+/// spawn.
+#[cfg(test)]
+pub(crate) static TEST_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn lock() -> std::sync::MutexGuard<'static, GateState> {
     STATE.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -118,6 +125,7 @@ mod tests {
     /// One test covers the whole gate: it is process-wide state.
     #[test]
     fn a_pause_refuses_new_spawns_and_waits_for_running_ones() {
+        let _gate = TEST_GATE.blocking_lock();
         assert_eq!(spawn(|| Ok(7)).unwrap(), 7);
 
         let (entered, wait_entered) = mpsc::channel();
