@@ -50,6 +50,8 @@ impl KeyboardHandler for App {
         _serial: u32,
     ) {
         if surface == self.surface.window.wl_surface() {
+            // Leaving releases every key without release events.
+            self.input.pressed_keys.clear();
             self.input.prefix_state.clear();
             self.close_copy_mode();
             self.set_ime_focus(false);
@@ -82,6 +84,8 @@ impl KeyboardHandler for App {
             self.input.carried_keys.insert(event.raw_code);
             return;
         }
+        // A new press is this phase's own, even of a key carried over before.
+        self.input.carried_keys.remove(&event.raw_code);
         if self.modal.input_modal_open() {
             self.input.prefix_state.clear();
         }
