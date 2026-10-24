@@ -462,6 +462,19 @@ impl PaneLayout {
         if !position.0.is_finite() || !position.1.is_finite() {
             return None;
         }
+        // The outer gap is no drag handle, even where a divider's hit lane
+        // would reach into it.
+        if self.gap > 0 {
+            let inner = inset_by_gap(self.area, self.gap).ok()?;
+            let (x, y) = (f64::from(inner.x), f64::from(inner.y));
+            if position.0 < x
+                || position.1 < y
+                || position.0 >= x + f64::from(inner.width)
+                || position.1 >= y + f64::from(inner.height)
+            {
+                return None;
+            }
+        }
         self.splits
             .iter()
             .filter_map(|split| {
