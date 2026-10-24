@@ -225,6 +225,13 @@ pub(crate) async fn run() -> Result<()> {
             "--remote cannot select local service, relay, policy, consent, or remote chooser commands",
         );
     }
+    // Typed in a terminal, the chooser starts itself again detached and this
+    // process returns at once with no output: the one Window it opens may run
+    // OpenSSH, which must never prompt on this terminal. The detached child
+    // (and the desktop entry, which runs through the same path) owns the Window.
+    if remotes_self_detaches(&command, detach_terminal) {
+        return splinterm::remote_launch::open_remote_chooser();
+    }
     if let Command::Upgrade { now } = command {
         return super::upgrade::run(now).await;
     }
@@ -409,6 +416,12 @@ async fn run_access_command(
             run_human_access(request).await
         }
     }
+}
+
+/// `splinterm remotes` started without the internal detach flag relaunches
+/// itself detached rather than opening a Window from this process.
+const fn remotes_self_detaches(command: &Command, detach_terminal: bool) -> bool {
+    matches!(command, Command::Remotes) && !detach_terminal
 }
 
 /// An explicit `--picker` or `--new` wins; otherwise only a commandless launch
@@ -1099,6 +1112,10 @@ mod tests {
         let remotes = Cli::try_parse_from(["splinterm", "remotes"]).unwrap();
         assert!(matches!(remotes.command, Some(Command::Remotes)));
         assert!(!remotes.detach_terminal);
+        assert!(remotes_self_detaches(
+            remotes.command.as_ref().unwrap(),
+            remotes.detach_terminal
+        ));
         assert!(graphical_command(remotes.command.as_ref().unwrap()));
         assert!(Cli::try_parse_from(["splinterm", "remotes", "extra"]).is_err());
 
@@ -1120,6 +1137,11 @@ mod tests {
                 .unwrap();
         assert!(chooser.detach_terminal);
         assert!(matches!(chooser.command, Some(Command::Remotes)));
+        assert!(
+            !remotes_self_detaches(chooser.command.as_ref().unwrap(), chooser.detach_terminal),
+            "the detached child opens the chooser itself"
+        );
+        assert!(!remotes_self_detaches(&Command::Dojos, false));
 
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("remotes"));

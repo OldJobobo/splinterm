@@ -74,7 +74,7 @@ pub(in crate::app) enum Command {
     Dojos,
     /// Reopen the most recently opened logical Dojo that is still running.
     Reopen,
-    /// Choose a configured remote profile and open it in a new Window.
+    /// Open a remote in one new Window: pick a profile, then a Dojo (returns at once).
     Remotes,
     /// Render ordered snapshots of one explicitly selected terminal.
     Window {
