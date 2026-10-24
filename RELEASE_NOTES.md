@@ -386,7 +386,9 @@ a hostile program running as your account.
   `multiplexer.new-dojo-directory` and `multiplexer.new-splint-directory`
   (`inherit`, `home`, or a path).
 - **Reload configuration** now also applies these settings, plus
-  `multiplexer.persist-on-tab-organization` and `explorer.agent-status`.
+  `multiplexer.persist-on-tab-organization`, `explorer.agent-status`,
+  `multiplexer.divider-style` and `multiplexer.frame-title`; a changed divider
+  style re-lays the Splints out at once.
 - `Ctrl+Shift+1` to `Ctrl+Shift+9` select the first nine tabs by default, also
   on layouts where Shift+digit produces a symbol.
 - Inactive tab labels are muted, with automatic contrast adjustment for native
@@ -401,11 +403,11 @@ a hostile program running as your account.
 - The Explorer docks beside a half-width terminal instead of covering it, and
   tabs, the Explorer, menus, and dialogs stay readable at maximum zoom.
 - `multiplexer.pane-gap` (0–64 logical px, default 0) leaves empty space
-  between neighbouring Splints: between whole frames with
-  `divider-style=frame`, around the centred line with `line`. The Window
-  background, glassy or not, shows through it. Where the Splints cannot fit
-  the gap, it shrinks for that layout, down to none, instead of being refused.
-  **Reload configuration** applies it.
+  between neighbouring Splints and around them at the Window's edges: between
+  and around whole frames with `divider-style=frame`, around the centred line
+  with `line`. The Window background, glassy or not, shows through it. Where
+  the Splints cannot fit the gap, it shrinks for that layout, down to none,
+  instead of being refused. **Reload configuration** applies it.
 
 ## Omarchy 4
 

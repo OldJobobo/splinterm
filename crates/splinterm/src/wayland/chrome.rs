@@ -1737,6 +1737,12 @@ mod tests {
                     horizontal_height: 16,
                 },
                 gap: 0,
+                area: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
             },
             active_id,
         )
@@ -1857,7 +1863,8 @@ mod tests {
         // it still reaches the junction.
         let active = layout.extent(top_id).unwrap();
         let vertical_segment = divider_active_segment(vertical, active, false).unwrap();
-        assert_eq!(vertical_segment.y, 0);
+        // The panes and lines start inside the 8 px outer gap.
+        assert_eq!(vertical_segment.y, 8);
         assert_eq!(
             vertical_segment.y + vertical_segment.height,
             horizontal.rect.y
@@ -1936,6 +1943,38 @@ mod tests {
             width: bottom.width,
             height: bottom.y - horizontal_bottom,
         }));
+        // The outer gap around the pane area stays empty on all four sides.
+        for outer in [
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height: 8,
+            },
+            Rect {
+                x: 0,
+                y: height - 8,
+                width,
+                height: 8,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 8,
+                height,
+            },
+            Rect {
+                x: width - 8,
+                y: 0,
+                width: 8,
+                height,
+            },
+        ] {
+            assert!(empty(outer), "{outer:?}");
+        }
+        assert_eq!((left.x, left.y, top.y), (8, 8, 8));
+        assert_eq!(bottom.y + bottom.height, height - 8);
+        assert_eq!(top.x + top.width, width - 8);
         // The horizontal line crosses its half of the gap to the vertical line
         // in the active colour.
         assert!(rect_has_color(

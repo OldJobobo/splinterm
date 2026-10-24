@@ -5926,6 +5926,10 @@ impl App {
                 }
                 self.presentation.ui_font_size = loaded.config.ui_font_size;
                 self.reconcile_chrome_font_size();
+                self.apply_pane_chrome(
+                    loaded.config.pane_divider_style,
+                    loaded.config.frame_title_mode,
+                );
                 self.apply_pane_gap(loaded.config.pane_gap);
                 for _ in loaded.diagnostics {
                     eprintln!("splinterm configuration warning");
@@ -5944,6 +5948,33 @@ impl App {
             return;
         }
         self.presentation.pane_gap = gap;
+        self.relayout_panes();
+    }
+
+    /// Applies a reloaded `[multiplexer] divider-style` and `frame-title`.
+    /// The style changes how much room the chrome takes, so the panes are laid
+    /// out again and every pane's PTY is resized; cached frame titles of every
+    /// tab are dropped so the next draw shapes them for the new chrome.
+    fn apply_pane_chrome(&mut self, style: PaneDividerStyle, title_mode: FrameTitleMode) {
+        if style == self.presentation.pane_divider_style
+            && title_mode == self.presentation.frame_title_mode
+        {
+            return;
+        }
+        self.presentation.pane_divider_style = style;
+        self.presentation.frame_title_mode = title_mode;
+        self.presentation.frame_titles.clear();
+        for tab in self.tab_state.tabs.iter_mut() {
+            if let Some(view) = tab.value.as_mut() {
+                view.frame_titles.clear();
+            }
+        }
+        self.relayout_panes();
+    }
+
+    /// Lays the panes out again after a chrome setting changed: every pane's
+    /// PTY is resized on the next update pass and the Window is drawn again.
+    fn relayout_panes(&mut self) {
         self.panes.restored_frontend_needs_resize = true;
         self.presentation.full_redraw = true;
         if self.surface.configured {
