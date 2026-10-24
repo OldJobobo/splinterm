@@ -471,6 +471,10 @@ a hostile program running as your account.
 - The documentation now states plainly what agent permissions do not protect:
   policy and consent bound a cooperating agent, but they are not a sandbox
   against a hostile program running as your account.
+- A split that cannot fit is refused, with a short note in the Window title,
+  instead of closing the Window. A Window too small for its Splints shows them
+  with less gap or none, or shows only the focused one until there is room
+  again; it no longer exits.
 
 ## Known limitations
 

@@ -149,8 +149,8 @@ use crate::navigation_projection::{NavigationAction, NavigationNodeId};
 #[cfg(test)]
 use crate::pane::PaneDivider;
 use crate::pane::{
-    FocusDirection, PaneChrome, PaneLayout, PaneResizeMetrics, PaneSplit, apply_preview_ratio,
-    directional_resize_ratio, split_ratio_at,
+    FocusDirection, LayoutFit, PaneChrome, PaneLayout, PaneResizeMetrics, PaneSplit,
+    apply_preview_ratio, directional_resize_ratio, split_fits, split_ratio_at,
 };
 #[cfg(test)]
 use crate::renderer::paint_box_drawing_cell;
@@ -3460,6 +3460,16 @@ fn is_pending_remote_splint(pending: &HashMap<SplintId, SplintId>, splint_id: Sp
     pending.values().any(|candidate| *candidate == splint_id)
 }
 
+/// The Splint and axis a command would split, looking through an Explorer
+/// context wrapper, so every split path can be admitted the same way.
+fn split_request(command: &WindowTopologyCommand) -> Option<(SplintId, Axis)> {
+    match command {
+        WindowTopologyCommand::Split { target, axis, .. } => Some((*target, *axis)),
+        WindowTopologyCommand::ExplorerContext { command, .. } => split_request(command),
+        _ => None,
+    }
+}
+
 fn insert_pending_split(
     node: &mut LayoutNode,
     target: SplintId,
@@ -4039,7 +4049,7 @@ impl App {
     }
 
     fn file_drop_target_at(&self, point: (f64, f64)) -> Option<FileDropTarget> {
-        let layout = self.computed_pane_layout().ok().flatten()?;
+        let layout = self.computed_pane_layout()?;
         let over_divider = layout.split_at(point, 6).is_some();
         let splint_id = pane_drop_target(
             self.content_rect(),
@@ -4060,7 +4070,7 @@ impl App {
     }
 
     fn splint_at_point(&self, point: (f64, f64)) -> Option<SplintId> {
-        let layout = self.computed_pane_layout().ok().flatten()?;
+        let layout = self.computed_pane_layout()?;
         layout.panes.into_iter().find_map(|pane| {
             let right = pane.rect.x.checked_add(pane.rect.width)?;
             let bottom = pane.rect.y.checked_add(pane.rect.height)?;
@@ -4107,6 +4117,14 @@ impl App {
         };
         if self.presentation.zoomed_splint.is_some() {
             self.presentation.zoomed_splint = None;
+            self.panes.restored_frontend_needs_resize = true;
+        }
+        // A Window showing only the focused Splint shows the newly focused
+        // one over the whole area, so its PTY takes that size.
+        if matches!(
+            self.pane_layout_fit(),
+            Ok(Some((_, LayoutFit::FocusedOnly)))
+        ) {
             self.panes.restored_frontend_needs_resize = true;
         }
         std::mem::swap(&mut self.panes.pane, &mut self.panes.inactive_panes[index]);
@@ -4174,7 +4192,7 @@ impl App {
     ) -> Result<Option<WindowTopologyCommand>> {
         let (Some(root), Some(layout), Some(current), Some(frame)) = (
             self.panes.layout.as_ref(),
-            self.computed_pane_layout()?,
+            self.computed_pane_layout(),
             self.panes.focused_splint(),
             self.panes.pane.snapshot_frame.as_ref(),
         ) else {
@@ -4317,8 +4335,24 @@ impl App {
     /// drags, keyboard resize, and the IME rectangle all use. The configured
     /// pane gap shrinks, down to none, when the panes cannot fit with it
     /// ([`PaneLayout::compute_with_preferred_gap`]); the layout's `gap` is the
-    /// gap in effect.
-    fn computed_pane_layout(&self) -> Result<Option<PaneLayout>> {
+    /// gap in effect. When the Splints cannot fit even without a gap, only
+    /// the focused Splint is laid out, over the whole content area
+    /// ([`PaneLayout::compute_fitting`]); the others keep their last PTY
+    /// size, since a pane absent from the layout is never resized.
+    ///
+    /// A Window too small for any layout, or a layout that cannot be
+    /// computed at all, gives `None`, and the focused pane fills the content
+    /// area as if it were alone: no layout input ever ends the client.
+    fn computed_pane_layout(&self) -> Option<PaneLayout> {
+        self.pane_layout_fit()
+            .ok()
+            .flatten()
+            .map(|(layout, _)| layout)
+    }
+
+    /// [`Self::computed_pane_layout`] with which Splints it shows. A divider
+    /// drag accepts only a ratio whose layout still shows every Splint.
+    fn pane_layout_fit(&self) -> Result<Option<(PaneLayout, LayoutFit)>> {
         let Some(topology) = self.panes.layout.as_ref() else {
             return Ok(None);
         };
@@ -4328,6 +4362,22 @@ impl App {
             .and_then(|splint_id| topology.find_splint(splint_id).cloned())
             .map(LayoutNode::Leaf);
         let layout = zoomed.as_ref().unwrap_or(topology);
+        let (chrome, minimum_width, minimum_height) = self.pane_layout_metrics()?;
+        PaneLayout::compute_fitting(
+            layout,
+            self.content_rect(),
+            chrome,
+            self.presentation.pane_gap,
+            minimum_width,
+            minimum_height,
+            self.panes.focused_splint(),
+        )
+        .map(Some)
+    }
+
+    /// The pane chrome and the normal two-cell minimum pane width and
+    /// height, in logical pixels, for the current font and scale.
+    fn pane_layout_metrics(&self) -> Result<(PaneChrome, u32, u32)> {
         let frame = self
             .panes
             .pane
@@ -4353,15 +4403,43 @@ impl App {
         let minimum_height = cell_height
             .checked_mul(2)
             .context("minimum pane height overflow")?;
-        PaneLayout::compute_with_preferred_gap(
-            layout,
+        Ok((chrome, minimum_width, minimum_height))
+    }
+
+    /// Whether a split of `target` along `axis` would still fit the content
+    /// area without a gap at the normal minimum ([`split_fits`]). A refused
+    /// split is never sent, so the daemon never gains a Splint this Window
+    /// cannot show; the refusal is noted in the Window title and on stderr,
+    /// like other refused actions, without opening or focusing anything.
+    /// A split the client cannot judge (no topology or font metrics yet, or
+    /// a target outside the shown Dojo) is left to the daemon.
+    fn admit_split(&self, target: SplintId, axis: Axis) -> bool {
+        let (Some(topology), Ok((chrome, minimum_width, minimum_height))) =
+            (self.panes.layout.as_ref(), self.pane_layout_metrics())
+        else {
+            return true;
+        };
+        let fits = split_fits(
+            topology,
+            target,
+            axis,
             self.content_rect(),
             chrome,
-            self.presentation.pane_gap,
             minimum_width,
             minimum_height,
-        )
-        .map(Some)
+        );
+        if !fits {
+            self.window_notice("Split refused: the new pane would not fit in this Window");
+        }
+        fits
+    }
+
+    /// A short notice for an action that did not happen: written to stderr and
+    /// shown in the Window title until the title next changes. It opens and
+    /// focuses nothing.
+    fn window_notice(&self, text: &str) {
+        eprintln!("splinterm: {text}");
+        self.surface.window.set_title(format!("Splinterm — {text}"));
     }
 
     fn buffer_rect(rect: Rect, scale_120: u32) -> Result<Rect> {
@@ -5079,8 +5157,6 @@ impl App {
         let frame = self.panes.pane.snapshot_frame.as_ref()?;
         let pane_rect = self.panes.focused_splint().and_then(|splint_id| {
             self.computed_pane_layout()
-                .ok()
-                .flatten()
                 .and_then(|layout| layout.rect(splint_id))
         });
         let content = self.content_rect();
@@ -6200,6 +6276,11 @@ impl App {
                 Ok(())
             }
             BuiltInCommandDispatch::Topology(mut command) => (|| -> Result<()> {
+                if let Some((target, axis)) = split_request(&command)
+                    && !self.admit_split(target, axis)
+                {
+                    return Ok(());
+                }
                 let picker_request =
                     matches!(&command, WindowTopologyCommand::RequestSelector { .. })
                         .then(|| command.clone());
@@ -6638,6 +6719,13 @@ impl App {
         self.close_tab_context_menu();
         let result = match dispatch {
             TabMenuDispatch::Topology(mut command) => {
+                if let Some((target, axis)) = split_request(&command)
+                    && !self.admit_split(target, axis)
+                {
+                    self.explorer
+                        .set_notice("Split refused: the new pane would not fit in this Window");
+                    return;
+                }
                 let mut navigates = false;
                 if let WindowTopologyCommand::ExplorerContext { target, command } = &mut command
                     && matches!(
@@ -7063,8 +7151,6 @@ impl App {
             .focused_splint()
             .and_then(|splint_id| {
                 self.computed_pane_layout()
-                    .ok()
-                    .flatten()
                     .and_then(|layout| layout.rect(splint_id))
             })
             .unwrap_or_else(|| self.content_rect())
@@ -7602,7 +7688,9 @@ impl App {
                         return Ok(false);
                     }
                     let previous = self.panes.layout.replace(candidate);
-                    if self.computed_pane_layout().is_err() {
+                    // A drag stops where a pane would reach its minimum; it never
+                    // pushes the layout into showing only the focused Splint.
+                    if !matches!(self.pane_layout_fit(), Ok(Some((_, LayoutFit::All)))) {
                         self.panes.layout = previous;
                         return Ok(true);
                     }
@@ -7638,7 +7726,7 @@ impl App {
             }
         ) {
             let split = self
-                .computed_pane_layout()?
+                .computed_pane_layout()
                 .and_then(|layout| layout.split_at(event.position, 6));
             if let Some(split) = split {
                 // A layout change waits out a daemon handoff: the press is
@@ -9049,7 +9137,7 @@ impl App {
     }
 
     fn emit_resize(&mut self) -> Result<()> {
-        let layout = self.computed_pane_layout()?;
+        let layout = self.computed_pane_layout();
         let active_rect = self
             .panes
             .focused_splint()
@@ -9078,7 +9166,7 @@ impl App {
     }
 
     fn emit_font_resize(&mut self) -> Result<()> {
-        let layout = self.computed_pane_layout()?;
+        let layout = self.computed_pane_layout();
         let active_rect = self
             .panes
             .focused_splint()
@@ -11200,7 +11288,7 @@ impl App {
         self.presentation
             .explorer_layout
             .clone_from(&explorer_layout);
-        let pane_layout = self.computed_pane_layout()?;
+        let pane_layout = self.computed_pane_layout();
         let (pane_cell_width, pane_cell_height) = self
             .panes
             .pane
