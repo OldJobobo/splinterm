@@ -11887,6 +11887,8 @@ impl App {
             &self.panes.pane.scrollback_viewport,
             self.panes.pane.snapshot.as_ref(),
         );
+        // A spinner frame changes only chrome, which partial damage misses.
+        let spinner_damage = self.tab_state.agent.take_chrome_damage();
         let picker_damage_full_surface = std::mem::take(&mut self.modal.session_picker_redraw);
         let damage_full_surface = picker_damage_full_surface
             || take_full_surface_damage(
@@ -11920,6 +11922,23 @@ impl App {
                 }
             }
             for region in &inactive_damage_regions {
+                self.surface.window.wl_surface().damage_buffer(
+                    i32::try_from(region.x).unwrap_or(i32::MAX),
+                    i32::try_from(region.y).unwrap_or(i32::MAX),
+                    i32::try_from(region.width).unwrap_or(i32::MAX),
+                    i32::try_from(region.height).unwrap_or(i32::MAX),
+                );
+            }
+            let spinner_regions = [
+                tab_layout.as_ref().map(|layout| layout.rect),
+                explorer_layout.as_ref().map(|layout| layout.panel),
+            ];
+            for region in spinner_regions
+                .into_iter()
+                .flatten()
+                .filter(|_| spinner_damage)
+            {
+                let region = Self::buffer_rect(region, self.surface.scale_120)?;
                 self.surface.window.wl_surface().damage_buffer(
                     i32::try_from(region.x).unwrap_or(i32::MAX),
                     i32::try_from(region.y).unwrap_or(i32::MAX),

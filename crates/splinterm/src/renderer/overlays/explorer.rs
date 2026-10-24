@@ -572,6 +572,17 @@ fn row_text_clips(
     )
 }
 
+/// The clip the icon columns are painted with: their cells and the row's
+/// right inset, up to the panel divider. The last glyph may be wider than its
+/// cell (the hollow live dot in some fonts); clipped at the cell it read as a
+/// "C".
+fn columns_paint_clip(columns: Rect, divider: u32) -> Rect {
+    Rect {
+        width: divider.saturating_sub(columns.x),
+        ..columns
+    }
+}
+
 fn buffer_rect(rect: Rect, scale_120: u32) -> Rect {
     let left = rect.x.saturating_mul(scale_120).div_ceil(120);
     let top = rect.y.saturating_mul(scale_120).div_ceil(120);
@@ -862,7 +873,7 @@ pub(crate) fn paint_lair_explorer(
             ChromeTextStyle::Regular,
             scale_120,
             renderer_generation,
-            columns_clip,
+            columns_paint_clip(columns_clip, right),
             PickerTextAlignment::Left,
             primary,
         )?;
@@ -2295,6 +2306,56 @@ mod tests {
                 rows.len(),
                 layout.visible_capacity
             );
+        }
+    }
+
+    /// VM E6-8: the hollow live dot as the rightmost column was clipped into
+    /// a "C" at its cell edge. The columns are painted up to the divider, so
+    /// a last glyph wider than its cell keeps all of its ink.
+    #[test]
+    fn the_last_column_keeps_its_whole_glyph() {
+        use super::super::super::ChromeText;
+
+        let context = RenderContext::new(u16::MAX);
+        for scale in [120, 150, 180, 240] {
+            let text = ChromeText::load_with_context("○", scale, &context).unwrap();
+            let cell = text.frame.cell_width;
+            let height = text.pixel_height();
+            let ink = |clip_width: u32| {
+                let width = cell * 4;
+                let mut canvas = vec![0_u8; (width * height * 4) as usize];
+                text.paint(
+                    &mut canvas,
+                    width,
+                    height,
+                    (0, 0),
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: clip_width,
+                        height,
+                    },
+                    0x00ff_ffff,
+                );
+                canvas
+                    .chunks_exact(4)
+                    .filter(|pixel| pixel.iter().any(|channel| *channel != 0))
+                    .count()
+            };
+            let whole = ink(cell * 4);
+            assert!(whole > 0);
+            let inset = LEVEL_INDENT.saturating_mul(scale).div_ceil(120);
+            let columns = Rect {
+                x: 0,
+                y: 0,
+                width: cell,
+                height,
+            };
+            let clip = columns_paint_clip(columns, cell + inset);
+            assert_eq!((clip.x, clip.width), (0, cell + inset));
+            assert_eq!(ink(clip.width), whole, "scale {scale}");
+            // The clip never reaches past the divider.
+            assert_eq!(columns_paint_clip(columns, 0).width, 0);
         }
     }
 }
