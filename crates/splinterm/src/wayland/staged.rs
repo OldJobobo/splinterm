@@ -45,6 +45,7 @@ use smithay_client_toolkit::{
     reexports::calloop::ping::{Ping, PingSource, make_ping},
     seat::keyboard::Modifiers,
 };
+use tokio::sync::watch;
 use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_seat};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
@@ -69,6 +70,7 @@ pub enum PhaseEnd {
 ///
 /// Dropping it unmaps the Window and ends its Wayland thread.
 pub struct WindowSurface {
+    closed: watch::Receiver<bool>,
     commands: Option<std_mpsc::Sender<Box<WindowOptions>>>,
     wake: Ping,
     results: std_mpsc::Receiver<Result<StagedOutcome>>,
@@ -83,6 +85,20 @@ impl std::fmt::Debug for WindowSurface {
             .debug_struct("WindowSurface")
             .field("input_method_bound", &self.input_method_bound)
             .finish_non_exhaustive()
+    }
+}
+
+/// Resolves once a parked Window has closed, whether the compositor or user
+/// closed it or its Wayland thread ended. An owner awaiting other work while
+/// the Window is parked races its work against this, so a close ends that work
+/// (and any SSH connection it holds) at once.
+#[derive(Clone, Debug)]
+pub struct CloseSignal(watch::Receiver<bool>);
+
+impl CloseSignal {
+    /// Waits until the Window has closed.
+    pub async fn closed(mut self) {
+        let _ = self.0.wait_for(|closed| *closed).await;
     }
 }
 
@@ -127,6 +143,10 @@ fn staged_phase_refusal(
 ) -> Option<&'static str> {
     if options.trusted_consent.is_some() {
         return Some("a trusted dialog never shares its Window");
+    }
+    if options.keep_surface && options.session_picker.is_none() && !options.connection_status_screen
+    {
+        return Some("only a session picker or the connection status screen keeps its Window");
     }
     if options.keep_surface && options.binds_endpoint() {
         return Some("a phase with a daemon endpoint binds its Window and cannot keep it");
@@ -188,15 +208,33 @@ impl WindowOptions {
 }
 
 impl WindowSurface {
+    /// A signal that resolves once this parked Window closes.
+    #[must_use]
+    pub fn close_signal(&self) -> CloseSignal {
+        CloseSignal(self.closed.clone())
+    }
+
     fn start(options: WindowOptions) -> Result<Self> {
         let (wake, wake_source) = make_ping().context("create staged Window wake source")?;
         let (commands, command_receiver) = std_mpsc::channel();
         let (result_sender, results) = std_mpsc::channel();
+        let (closed_sender, closed) = watch::channel(false);
         let thread = thread::Builder::new()
             .name("splinterm-wayland".to_owned())
-            .spawn(move || staged_thread(options, &command_receiver, wake_source, &result_sender))
+            .spawn(move || {
+                staged_thread(
+                    options,
+                    &command_receiver,
+                    wake_source,
+                    &result_sender,
+                    &closed_sender,
+                );
+                // Also on every other way the thread ends.
+                closed_sender.send_replace(true);
+            })
             .context("start the Window's Wayland thread")?;
         Ok(Self {
+            closed,
             commands: Some(commands),
             wake,
             results,
@@ -481,6 +519,7 @@ fn staged_thread(
     commands: &std_mpsc::Receiver<Box<WindowOptions>>,
     wake_source: PingSource,
     results: &std_mpsc::Sender<Result<StagedOutcome>>,
+    closed_signal: &watch::Sender<bool>,
 ) {
     let started = (|| -> Result<(WaylandSession, App)> {
         let mut options = first;
@@ -535,8 +574,10 @@ fn staged_thread(
                 return;
             }
             Parked::Closed(result) => {
-                // Unmap now; the next phase's caller learns of the close.
+                // Unmap now; the next phase's caller learns of the close, and
+                // its owner's close signal resolves when this thread ends.
                 let closed = session.finish(Some(app), result);
+                closed_signal.send_replace(true);
                 if commands.recv().is_ok() {
                     let _ = results.send(closed.map(|()| StagedOutcome::Closed));
                 }
@@ -616,15 +657,32 @@ mod tests {
         }
     }
 
+    /// A status-screen phase: the explicit marker, no input method.
     fn pre_terminal() -> WindowOptions {
         WindowOptions {
             keep_surface: true,
             input_method: false,
+            connection_status_screen: true,
             ..WindowOptions::default()
         }
     }
 
+    fn picker_phase() -> WindowOptions {
+        WindowOptions {
+            session_picker: Some(crate::SessionPickerUi::new(
+                Vec::new(),
+                std_mpsc::channel().0,
+            )),
+            connection_status_screen: false,
+            ..pre_terminal()
+        }
+    }
+
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table covers every allowed and refused phase shape"
+    )]
     fn staged_phases_follow_the_endpoint_and_input_method_invariants() {
         // A picker or status phase keeps the surface without the input method.
         assert_eq!(staged_phase_refusal(None, &pre_terminal()), None);
@@ -639,6 +697,35 @@ mod tests {
         assert!(!status.binds_endpoint(), "the status screen is no endpoint");
         assert_eq!(staged_phase_refusal(Some(false), &status), None);
         drop(updates_sender);
+        assert_eq!(staged_phase_refusal(None, &picker_phase()), None);
+        assert_eq!(staged_phase_refusal(Some(false), &picker_phase()), None);
+
+        // Only a session picker or the marked status screen may keep it: a
+        // live single-Splint Window (snapshot, updates, and commands, as an
+        // attached Splint has) looks like the status screen but is refused.
+        let (_live_updates, updates) = mpsc::channel(1);
+        let (commands, _live_commands) = mpsc::channel(1);
+        let live_splint = WindowOptions {
+            snapshot: Some(
+                crate::remote_status::RemoteStatus::new("work", "work.example")
+                    .snapshot(splinterm_core::SplintId::new(), 1),
+            ),
+            updates: Some(updates),
+            commands: Some(commands),
+            controlled: true,
+            connection_status_screen: false,
+            ..pre_terminal()
+        };
+        assert!(!live_splint.binds_endpoint());
+        assert!(
+            staged_phase_refusal(Some(false), &live_splint)
+                .is_some_and(|refusal| refusal.contains("only a session picker"))
+        );
+        let unmarked = WindowOptions {
+            connection_status_screen: false,
+            ..pre_terminal()
+        };
+        assert!(staged_phase_refusal(None, &unmarked).is_some());
 
         // The terminal phase binds the surface, with the input method on.
         let terminal = WindowOptions {
@@ -677,16 +764,33 @@ mod tests {
                     .is_some_and(|refusal| refusal.contains("endpoint"))
             );
         }
+        assert!(
+            staged_phase_refusal(
+                Some(false),
+                &WindowOptions {
+                    initial_dojo: Some(identity()),
+                    ..picker_phase()
+                }
+            )
+            .is_some_and(|refusal| refusal.contains("endpoint"))
+        );
         // (2) A kept phase runs without the input method, and a bound input
         // method never turns off again.
-        let composing = WindowOptions {
-            input_method: true,
-            ..pre_terminal()
-        };
-        assert!(
-            staged_phase_refusal(None, &composing)
-                .is_some_and(|refusal| refusal.contains("input method"))
-        );
+        for composing in [
+            WindowOptions {
+                input_method: true,
+                ..pre_terminal()
+            },
+            WindowOptions {
+                input_method: true,
+                ..picker_phase()
+            },
+        ] {
+            assert!(
+                staged_phase_refusal(None, &composing)
+                    .is_some_and(|refusal| refusal.contains("input method"))
+            );
+        }
         let off_again = WindowOptions {
             input_method: false,
             ..WindowOptions::default()

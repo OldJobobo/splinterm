@@ -351,7 +351,7 @@ pub(crate) async fn run() -> Result<()> {
         }
         None => (ConnectionFactory::local(), None),
     };
-    run_configured_command(command, config, factory, surface).await
+    Box::pin(run_configured_command(command, config, factory, surface)).await
 }
 
 /// Resolves the agent status target before connecting, so a missing target is

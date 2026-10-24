@@ -1,6 +1,6 @@
 //! Graphical window lifecycle orchestration.
 
-use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, env, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
@@ -511,6 +511,61 @@ pub(super) fn run_window_phase(
     })
 }
 
+/// What daemon work done while a staged Window is parked ended with.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WhileParked<T> {
+    Done(T),
+    /// The parked Window closed first; the work, and any SSH connection it
+    /// held, was dropped.
+    Closed,
+}
+
+/// The bound on parked work for an endpoint without a profile timeout.
+const PARKED_WORK_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long daemon work may take while a staged Window waits for it: the
+/// remote profile's connect timeout.
+pub(super) fn parked_deadline(factory: &ConnectionFactory) -> Duration {
+    factory
+        .remote_operation_timeout()
+        .unwrap_or(PARKED_WORK_DEADLINE)
+}
+
+/// Runs daemon `work` while a staged Window is parked, `closed` being that
+/// Window's close signal. A close ends the work at once, and it fails after
+/// `deadline`, so a stalled daemon never keeps an unmapped launcher and its
+/// SSH connection alive. Without a parked Window the work runs as before.
+///
+/// # Errors
+///
+/// Returns the work's error, or an error when the deadline passes first.
+pub(super) async fn while_parked<T>(
+    closed: Option<impl Future<Output = ()>>,
+    deadline: Duration,
+    work: impl Future<Output = Result<T>>,
+) -> Result<WhileParked<T>> {
+    // Boxed so a launch future that waits on daemon work stays small.
+    let work = Box::pin(work);
+    let Some(closed) = closed else {
+        return work.await.map(WhileParked::Done);
+    };
+    tokio::select! {
+        biased;
+        () = closed => Ok(WhileParked::Closed),
+        result = tokio::time::timeout(deadline, work) => match result {
+            Ok(result) => result.map(WhileParked::Done),
+            Err(_) => bail!("the daemon did not answer in time"),
+        },
+    }
+}
+
+/// The close signal of a parked staged Window, if there is one.
+pub(super) fn parked_close(
+    surface: Option<&WindowSurface>,
+) -> Option<impl Future<Output = ()> + use<>> {
+    surface.map(|surface| surface.close_signal().closed())
+}
+
 pub(super) async fn run_live_multipane_window(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
@@ -656,9 +711,17 @@ async fn run_live_multipane_window_inner(
         tabs: resume.tabs,
         active: resume.active,
     });
-    let Some((initial_identity, remote_display_identity)) =
-        initial_window_dojo_identity(&factory, dojo_model.id).await?
-    else {
+    let deadline = parked_deadline(&factory);
+    let identity = while_parked(
+        parked_close(surface.as_ref()),
+        deadline,
+        initial_window_dojo_identity(&factory, dojo_model.id),
+    )
+    .await?;
+    let WhileParked::Done(identity) = identity else {
+        return Ok(());
+    };
+    let Some((initial_identity, remote_display_identity)) = identity else {
         // The lookup used a new connection, which could have reached a
         // restarted daemon, so ask the connection that created the Dojo.
         let owner_still_lists = match initial_transient_owner {
@@ -685,19 +748,26 @@ async fn run_live_multipane_window_inner(
     layout_splint_ids(&dojo_model.root, &mut ids);
     let image_cache =
         SharedImageContentCache::with_maximum_bytes(MAX_RENDERER_IMAGE_RESIDENT_BYTES)?;
-    let mut prepared = Vec::with_capacity(ids.len());
-    for splint_id in ids {
-        prepared.push(
-            prepare_live_pane(
-                &factory,
-                &config,
-                splint_id,
-                image_cache.clone(),
-                pane_claims_initial_control(splint_id, dojo_model.default_focus),
-            )
-            .await?,
-        );
-    }
+    let prepared = while_parked(parked_close(surface.as_ref()), deadline, async {
+        let mut prepared = Vec::with_capacity(ids.len());
+        for splint_id in ids {
+            prepared.push(
+                prepare_live_pane(
+                    &factory,
+                    &config,
+                    splint_id,
+                    image_cache.clone(),
+                    pane_claims_initial_control(splint_id, dojo_model.default_focus),
+                )
+                .await?,
+            );
+        }
+        Ok(prepared)
+    })
+    .await?;
+    let WhileParked::Done(prepared) = prepared else {
+        return Ok(());
+    };
     let (topology_commands, topology_command_receiver) = mpsc::channel(8);
     let (topology_settings, topology_settings_receiver) =
         watch::channel(TopologyReloadSettings::from_config(&config));
@@ -1292,7 +1362,61 @@ pub(super) async fn run_live_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{AbortOnDropTask, COMMAND_ENDED_LINE, first_dojo_gone, resolved_window_app_id};
+    use std::time::Duration;
+
+    use anyhow::Result;
+
+    use super::{
+        AbortOnDropTask, COMMAND_ENDED_LINE, WhileParked, first_dojo_gone, resolved_window_app_id,
+        while_parked,
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_work_ends_at_a_close_or_its_deadline_and_runs_unbounded_unparked() {
+        // A remote that never answers: a close ends the request at once.
+        let closed = while_parked(
+            Some(std::future::ready(())),
+            Duration::from_secs(3600),
+            std::future::pending::<Result<()>>(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(closed, WhileParked::Closed);
+
+        // Without a close, the deadline ends it.
+        let started = tokio::time::Instant::now();
+        let stalled = while_parked(
+            Some(std::future::pending::<()>()),
+            Duration::from_secs(7),
+            std::future::pending::<Result<()>>(),
+        )
+        .await;
+        assert!(stalled.is_err());
+        assert_eq!(started.elapsed(), Duration::from_secs(7));
+
+        // Work that answers in time is returned.
+        let answered = while_parked(
+            Some(std::future::pending::<()>()),
+            Duration::from_secs(7),
+            async { Ok(5) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(answered, WhileParked::Done(5));
+
+        // Not parked: no close and no deadline apply.
+        let unparked = while_parked(
+            None::<std::future::Pending<()>>,
+            Duration::from_secs(1),
+            async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok("slow but fine")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(unparked, WhileParked::Done("slow but fine"));
+    }
 
     #[test]
     fn a_first_dojo_gone_is_a_finished_command_only_when_its_own_daemon_says_so() {

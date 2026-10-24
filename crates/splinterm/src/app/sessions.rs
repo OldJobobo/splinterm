@@ -26,8 +26,9 @@ use super::{
         remember_dojo, select_dojo_from, session_picker_item,
     },
     window::{
-        resolved_window_app_id, run_live_multipane_window, run_live_multipane_window_with_app_id,
-        run_live_window, run_owned_live_multipane_window_with_app_id, run_window_phase,
+        WhileParked, parked_close, parked_deadline, resolved_window_app_id,
+        run_live_multipane_window, run_live_multipane_window_with_app_id, run_live_window,
+        run_owned_live_multipane_window_with_app_id, run_window_phase, while_parked,
     },
 };
 
@@ -269,14 +270,21 @@ pub(in crate::app) async fn run_dojos_from(
     surface: Option<WindowSurface>,
 ) -> Result<()> {
     let staged = surface.is_some();
-    let mut connection = factory
-        .connect()
-        .await
-        .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
-    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
-        bail!("splinterd did not return its session list");
+    let deadline = parked_deadline(&factory);
+    let listed = while_parked(parked_close(surface.as_ref()), deadline, async {
+        let mut connection = factory
+            .connect()
+            .await
+            .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
+        let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+            bail!("splinterd did not return its session list");
+        };
+        Ok(lairs)
+    })
+    .await?;
+    let WhileParked::Done(lairs) = listed else {
+        return Ok(());
     };
-    drop(connection);
     let entries = collect_sessions(&lairs, &recent_dojo_ids(&factory))
         .into_iter()
         .filter(SessionEntry::reopenable)
@@ -334,7 +342,15 @@ pub(in crate::app) async fn run_dojos_from(
             let selected = entries
                 .get(index)
                 .context("Dojo picker returned an invalid selection")?;
-            let dojo = select_reopenable_dojo(&factory, selected.lair_id, selected.dojo_id).await?;
+            let selected = while_parked(
+                parked_close(surface.as_ref()),
+                deadline,
+                select_reopenable_dojo(&factory, selected.lair_id, selected.dojo_id),
+            )
+            .await?;
+            let WhileParked::Done(dojo) = selected else {
+                return Ok(());
+            };
             remember_dojo(&factory, dojo.id);
             run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true, surface)
                 .await
@@ -495,12 +511,20 @@ async fn launch_with_app_id(
     app_id: Option<String>,
     surface: Option<WindowSurface>,
 ) -> Result<()> {
-    let mut connection = factory
-        .connect()
-        .await
-        .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
-    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
-        bail!("splinterd did not return its session list");
+    let deadline = parked_deadline(&factory);
+    let listed = while_parked(parked_close(surface.as_ref()), deadline, async {
+        let mut connection = factory
+            .connect()
+            .await
+            .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
+        let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+            bail!("splinterd did not return its session list");
+        };
+        Ok((connection, lairs))
+    })
+    .await?;
+    let WhileParked::Done((mut connection, lairs)) = listed else {
+        return Ok(());
     };
     if let Some(splint_id) = splint_id {
         // Attaching one Splint is never a staged launch; any parked Window
@@ -518,18 +542,25 @@ async fn launch_with_app_id(
 
     let explicit_name = name.is_some();
     let name = name.unwrap_or_else(|| fresh_lair_name(SystemTime::now(), std::process::id()));
-    let expected = connection.topology_revision().await?;
-    let (request, lifetime) = graphical_create_request(
-        &factory,
-        expected,
-        name,
-        explicit_name,
-        cwd,
-        command,
-        &config,
-    )?;
-    let Response::LairCreated { lair: dojo, .. } = connection.request(request).await? else {
-        bail!("splinterd did not create the requested terminal");
+    let created = while_parked(parked_close(surface.as_ref()), deadline, async {
+        let expected = connection.topology_revision().await?;
+        let (request, lifetime) = graphical_create_request(
+            &factory,
+            expected,
+            name,
+            explicit_name,
+            cwd,
+            command,
+            &config,
+        )?;
+        let Response::LairCreated { lair, .. } = connection.request(request).await? else {
+            bail!("splinterd did not create the requested terminal");
+        };
+        Ok((lair, lifetime))
+    })
+    .await?;
+    let WhileParked::Done((dojo, lifetime)) = created else {
+        return Ok(());
     };
     let dojo = dojo
         .dojos

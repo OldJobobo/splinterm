@@ -49,5 +49,5 @@ pub use frontend::{
     WindowTopologyUpdate, WindowUpdate,
 };
 pub use wayland::{
-    PhaseEnd, WindowSurface, check_window_options, run as run_window, run_window_on,
+    CloseSignal, PhaseEnd, WindowSurface, check_window_options, run as run_window, run_window_on,
 };

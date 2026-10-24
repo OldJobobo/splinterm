@@ -551,6 +551,10 @@ pub struct WindowOptions {
     /// closing it. A compositor or user close still ends it. A phase that holds
     /// a daemon endpoint, or turns the input method on, cannot keep it.
     pub keep_surface: bool,
+    /// The Window is the remote connection status screen: an application-owned
+    /// snapshot that controls no terminal. Only that screen sets it; with a
+    /// session picker, it is the only content that may keep a staged surface.
+    pub connection_status_screen: bool,
 }
 
 impl Default for WindowOptions {
@@ -601,6 +605,7 @@ impl Default for WindowOptions {
             handoff_status: None,
             layout_ledger: None,
             keep_surface: false,
+            connection_status_screen: false,
         }
     }
 }

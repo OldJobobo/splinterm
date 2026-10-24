@@ -508,6 +508,8 @@ fn status_window_options(
         prefix_timeout_ms: config.prefix_timeout_ms,
         // The status Window may hold a password field: no IME composition.
         input_method: false,
+        // The one non-picker content that may keep a staged Window.
+        connection_status_screen: true,
         mapped: Some(mapped),
         ..WindowOptions::default()
     }
@@ -624,6 +626,8 @@ mod tests {
         );
         assert!(options.commands.is_some());
         assert!(!options.input_method);
+        assert!(options.connection_status_screen);
+        assert!(!WindowOptions::default().connection_status_screen);
         assert!(WindowOptions::default().controller_title);
     }
 

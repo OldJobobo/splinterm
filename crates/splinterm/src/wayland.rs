@@ -231,7 +231,7 @@ use selection::{
     copy_mode_enter, copy_mode_is_valid, move_copy_cursor, selection_display_bounds,
     selection_endpoint, selection_is_retained, selection_text, transient_overlay_rows, url_at,
 };
-pub use staged::{PhaseEnd, WindowSurface, run_window_on};
+pub use staged::{CloseSignal, PhaseEnd, WindowSurface, run_window_on};
 use staged::{key_repeat_reaches_phase, phase_end_parks};
 #[cfg(test)]
 use tabs::DEFAULT_TAB_STRIP_LOGICAL_HEIGHT;
@@ -6797,6 +6797,8 @@ impl App {
             None,
         )?;
         self.modal.remote_profiles = Some(names);
+        // R retries a navigation picker; it must never turn this pop-up into one.
+        self.modal.session_picker_retry_command = None;
         self.surface.window.set_title("Splinterm — Remotes");
         Ok(())
     }
@@ -8614,6 +8616,7 @@ impl App {
                 }
                 Keysym::r | Keysym::R
                     if self.modal.session_picker_retry_command.is_some()
+                        && self.modal.remote_profiles.is_none()
                         && self
                             .modal
                             .session_picker

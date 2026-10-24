@@ -467,6 +467,12 @@ impl RemoteSession {
         }
     }
 
+    /// The profile's connect timeout, which bounds each channel admission.
+    #[must_use]
+    pub const fn operation_timeout(&self) -> Duration {
+        self.operation_timeout
+    }
+
     /// Returns bounded sanitized SSH diagnostics retained for this session.
     #[must_use]
     pub fn diagnostics(&self) -> String {

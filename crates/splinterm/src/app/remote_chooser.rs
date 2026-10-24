@@ -19,7 +19,10 @@ use super::{
     remote_status::{RemoteConnected, StatusEnd, connect_with_status},
     session_catalog::{recent_dojo_ids, remember_dojo, select_dojo_from, session_picker_item},
     sessions::{launch_new_terminal_on, run_staged_picker},
-    window::run_live_multipane_window_with_app_id,
+    window::{
+        WhileParked, parked_close, parked_deadline, run_live_multipane_window_with_app_id,
+        while_parked,
+    },
 };
 
 const REMOTE_DOJOS_TITLE: &str = "Remote Dojos…";
@@ -84,6 +87,16 @@ enum DojoChoice {
     Open(usize),
 }
 
+/// How resolving a Dojo menu row ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Resolved<D> {
+    Found(D),
+    /// The Dojo is gone; the next menu shows the fresh list.
+    Gone,
+    /// The parked Window closed while the remote was asked.
+    Closed,
+}
+
 /// The phases the remote launcher shows in its one Window. [`WindowLauncher`]
 /// runs them as Window phases; the tests drive [`run_launcher`] with a fake.
 trait LauncherSurface {
@@ -116,13 +129,14 @@ trait LauncherSurface {
         remote: &mut Self::Remote,
     ) -> Result<Phase<Self::Surface, DojoChoice>>;
 
-    /// Lists the remote's Lairs again and resolves menu row `index`; `None`
-    /// when that Dojo is gone, and the next menu shows the fresh list.
+    /// Lists the remote's Lairs again, while `surface` is parked, and resolves
+    /// menu row `index`. A close of the parked Window ends the request at once.
     async fn resolve(
         &mut self,
+        surface: &Self::Surface,
         remote: &mut Self::Remote,
         index: usize,
-    ) -> Result<Option<Self::Dojo>>;
+    ) -> Result<Resolved<Self::Dojo>>;
 
     /// Opens the remote terminal on the Window, a new one for `None`. The
     /// terminal binds the Window to the remote for good.
@@ -165,11 +179,16 @@ async fn run_launcher<L: LauncherSurface>(launcher: &mut L) -> Result<()> {
                     return launcher.open_terminal(next, remote, None).await;
                 }
                 Phase::Kept(next, DojoChoice::Open(index)) => {
-                    match launcher.resolve(&mut remote, index).await? {
-                        Some(dojo) => {
+                    match launcher.resolve(&next, &mut remote, index).await? {
+                        Resolved::Found(dojo) => {
                             return launcher.open_terminal(next, remote, Some(dojo)).await;
                         }
-                        None => kept = next,
+                        Resolved::Gone => kept = next,
+                        Resolved::Closed => {
+                            // The Window is gone: end SSH, then the flow.
+                            drop(remote);
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -296,28 +315,45 @@ impl LauncherSurface for WindowLauncher {
 
     async fn resolve(
         &mut self,
+        surface: &WindowSurface,
         remote: &mut ConnectedRemote,
         index: usize,
-    ) -> Result<Option<Dojo>> {
+    ) -> Result<Resolved<Dojo>> {
         let selected = remote
             .entries
             .get(index)
             .context("remote Dojo picker returned an invalid selection")?;
         let (lair_id, dojo_id) = (selected.lair_id, selected.dojo_id);
-        let mut connection = remote.factory.connect().await?;
-        let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
-            bail!("remote splinterd did not return its session list");
+        let factory = remote.factory.clone();
+        let listed = while_parked(
+            parked_close(Some(surface)),
+            parked_deadline(&factory),
+            async move {
+                let mut connection = factory.connect().await?;
+                let deadline = parked_deadline(&factory);
+                let Response::Lairs { lairs, .. } = connection
+                    .request_with_deadline(Request::ListLairs, deadline)
+                    .await?
+                else {
+                    bail!("remote splinterd did not return its session list");
+                };
+                Ok(lairs)
+            },
+        )
+        .await?;
+        let WhileParked::Done(lairs) = listed else {
+            return Ok(Resolved::Closed);
         };
         remote.lairs = lairs;
         let reopenable = remote_dojo_entries(&remote.lairs, &[])
             .iter()
             .any(|entry| entry.lair_id == lair_id && entry.dojo_id == dojo_id);
         if !reopenable {
-            return Ok(None);
+            return Ok(Resolved::Gone);
         }
         let dojo = select_dojo_from(&remote.lairs, (lair_id, dojo_id))?;
         remember_dojo(&remote.factory, dojo.id);
-        Ok(Some(dojo))
+        Ok(Resolved::Found(dojo))
     }
 
     async fn open_terminal(
@@ -369,6 +405,15 @@ mod tests {
         }
     }
 
+    /// A scripted resolve: the Dojo exists, is gone, or the remote never
+    /// answers and the parked Window is closed meanwhile.
+    #[derive(Clone, Copy)]
+    enum FakeResolve {
+        Found,
+        Gone,
+        NeverAnswersThenClosed,
+    }
+
     /// A scripted profile list outcome.
     #[derive(Clone, Copy)]
     enum Menu {
@@ -384,8 +429,8 @@ mod tests {
         menus: VecDeque<Menu>,
         connects: VecDeque<Option<bool>>,
         dojo_menus: VecDeque<Option<DojoChoice>>,
-        /// Whether each resolved Dojo still exists.
-        resolves: VecDeque<bool>,
+        /// How each resolve ends.
+        resolves: VecDeque<FakeResolve>,
     }
 
     impl FakeLauncher {
@@ -462,15 +507,36 @@ mod tests {
 
         async fn resolve(
             &mut self,
+            _surface: &FakeSurface,
             _remote: &mut FakeRemote,
             index: usize,
-        ) -> Result<Option<usize>> {
-            let exists = self.resolves.pop_front().expect("scripted resolve");
+        ) -> Result<Resolved<usize>> {
+            let script = self.resolves.pop_front().expect("scripted resolve");
+            let outcome = match script {
+                FakeResolve::Found => Resolved::Found(index),
+                FakeResolve::Gone => Resolved::Gone,
+                FakeResolve::NeverAnswersThenClosed => {
+                    // A stalled daemon: only the close ends the request.
+                    let listed = while_parked(
+                        Some(std::future::ready(())),
+                        std::time::Duration::from_secs(3600),
+                        std::future::pending::<Result<()>>(),
+                    )
+                    .await?;
+                    assert_eq!(listed, WhileParked::Closed);
+                    // The compositor already unmapped the Window.
+                    Resolved::Closed
+                }
+            };
             self.note(format!(
                 "resolve row {index}: {}",
-                if exists { "found" } else { "gone" }
+                match outcome {
+                    Resolved::Found(_) => "found",
+                    Resolved::Gone => "gone",
+                    Resolved::Closed => "closed",
+                }
             ));
-            Ok(exists.then_some(index))
+            Ok(outcome)
         }
 
         async fn open_terminal(
@@ -491,6 +557,7 @@ mod tests {
 
     fn launch(launcher: &mut FakeLauncher) -> Vec<String> {
         tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
             .unwrap()
             .block_on(run_launcher(launcher))
@@ -602,7 +669,7 @@ mod tests {
             menus: VecDeque::from([Menu::Pick("wintermute")]),
             connects: VecDeque::from([Some(true)]),
             dojo_menus: VecDeque::from([Some(DojoChoice::Open(0)), Some(DojoChoice::Open(1))]),
-            resolves: VecDeque::from([false, true]),
+            resolves: VecDeque::from([FakeResolve::Gone, FakeResolve::Found]),
             ..FakeLauncher::default()
         };
         assert_eq!(
@@ -617,6 +684,29 @@ mod tests {
                 "terminal for row 1 on wintermute",
                 "unmapped",
                 "ssh to wintermute ended"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_closed_while_a_stalled_remote_lists_dojos_ends_ssh_at_once() {
+        let mut launcher = FakeLauncher {
+            menus: VecDeque::from([Menu::Pick("wintermute")]),
+            connects: VecDeque::from([Some(true)]),
+            dojo_menus: VecDeque::from([Some(DojoChoice::Open(0))]),
+            resolves: VecDeque::from([FakeResolve::NeverAnswersThenClosed]),
+            ..FakeLauncher::default()
+        };
+        let events = launch(&mut launcher);
+        assert_eq!(
+            events,
+            [
+                "profiles in a new Window",
+                "status for wintermute",
+                "Dojos on wintermute",
+                "resolve row 0: closed",
+                "ssh to wintermute ended",
+                "unmapped"
             ]
         );
     }
