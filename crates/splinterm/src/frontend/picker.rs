@@ -100,6 +100,15 @@ impl SessionPickerUi {
         }
     }
 
+    /// Selects the item at `index`, as on returning to a list after choosing
+    /// it; an index not listed leaves the selection as it was.
+    pub fn select_item(&mut self, index: usize) {
+        if let Some(position) = self.filtered_indices.iter().position(|item| *item == index) {
+            self.selected = position + 1;
+            self.ensure_selected_visible(SESSION_PICKER_PAGE_ITEMS);
+        }
+    }
+
     /// Selects the creation row, for a picker whose only items are navigation rows.
     pub fn select_new_row(&mut self) {
         if self.new_enabled {
@@ -812,6 +821,31 @@ mod tests {
             .find(|text| text.starts_with("/ search"))
             .unwrap();
         assert!(footer.contains("Enter connect") && !footer.contains("Ctrl+N"));
+
+        // Back from a profile: that profile stays selected.
+        let (decision, _receiver) = std_mpsc::channel();
+        let mut returned = SessionPickerUi::remote_profiles(
+            (0..12)
+                .map(|index| navigation_item(&format!("host{index}"), "host"))
+                .collect(),
+            "Add profiles in remotes.toml",
+            decision,
+        );
+        returned.select_item(10);
+        assert_eq!(
+            returned.selected_decision(),
+            Some(SessionPickerDecision::Open(10))
+        );
+        assert!(
+            returned.visible_start > 0,
+            "the selection is scrolled into view"
+        );
+        returned.select_item(12);
+        assert_eq!(
+            returned.selected_decision(),
+            Some(SessionPickerDecision::Open(10)),
+            "an unlisted row changes nothing"
+        );
 
         let (decision, _receiver) = std_mpsc::channel();
         let empty = SessionPickerUi::remote_profiles(Vec::new(), "No remote profiles", decision);

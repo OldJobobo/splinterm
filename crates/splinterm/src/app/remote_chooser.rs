@@ -65,7 +65,11 @@ fn report_invalid_catalog(error: &anyhow::Error) {
 /// and then becomes the remote terminal. Escape steps back one stage; Escape
 /// at the profile list closes the Window.
 pub(in crate::app) async fn run_remotes(config: AppConfig) -> Result<()> {
-    run_launcher(&mut WindowLauncher { config }).await
+    run_launcher(&mut WindowLauncher {
+        config,
+        last_profile: None,
+    })
+    .await
 }
 
 /// How one launcher phase ended.
@@ -214,6 +218,8 @@ fn remote_dojo_entries(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> {
 /// The launcher on real Window phases.
 struct WindowLauncher {
     config: AppConfig,
+    /// The profile chosen last, selected again when the list shows again.
+    last_profile: Option<String>,
 }
 
 impl LauncherSurface for WindowLauncher {
@@ -231,10 +237,17 @@ impl LauncherSurface for WindowLauncher {
             report_invalid_catalog(error);
         }
         let (names, items, blocker) = chooser_contents(&catalog);
+        let last = self
+            .last_profile
+            .as_ref()
+            .and_then(|last| names.iter().position(|name| name == last));
         let config = self.config.clone();
         let (decision, surface) = tokio::task::spawn_blocking(move || {
             let (decision, receiver) = std_mpsc::channel();
-            let picker = SessionPickerUi::remote_profiles(items, blocker, decision);
+            let mut picker = SessionPickerUi::remote_profiles(items, blocker, decision);
+            if let Some(index) = last {
+                picker.select_item(index);
+            }
             run_staged_picker(&config, picker, &receiver, None, surface)
         })
         .await
@@ -246,6 +259,9 @@ impl LauncherSurface for WindowLauncher {
             Some(SessionPickerDecision::Open(index)) => Some(chosen_profile(&names, index)?),
             Some(SessionPickerDecision::New) | None => None,
         };
+        if profile.is_some() {
+            self.last_profile.clone_from(&profile);
+        }
         Ok(Phase::Kept(surface, profile))
     }
 

@@ -3136,6 +3136,7 @@ fn initial_window_title(options: &WindowOptions) -> String {
                     .map(|snapshot| snapshot.title.as_str())
             }),
             options.controlled && options.commands.is_some() && options.controller_title,
+            options.local_endpoint,
             &options.authority,
             false,
             None,
@@ -3143,9 +3144,12 @@ fn initial_window_title(options: &WindowOptions) -> String {
     }
 }
 
+/// `local_endpoint` is the Window's fixed endpoint authority: a remote Window
+/// that holds control is "controller", never "local controller".
 fn window_title(
     snapshot_title: Option<&str>,
     controller_active: bool,
+    local_endpoint: bool,
     authority: &AuthorityStatus,
     control_transfer_pending: bool,
     search: Option<&SearchUiState>,
@@ -3154,7 +3158,11 @@ fn window_title(
         None | Some("" | "Splinterm") => "Splinterm".to_owned(),
         Some(title) => format!("Splinterm — {title}"),
     };
-    let controller = controller_active.then_some("local controller");
+    let controller = controller_active.then_some(if local_endpoint {
+        "local controller"
+    } else {
+        "controller"
+    });
     let authority_label = if authority.development_bypass {
         Some("DEVELOPMENT BYPASS")
     } else if authority.grants.is_empty() {
@@ -8266,6 +8274,7 @@ impl App {
                 .as_deref()
                 .or(Some(&snapshot.title)),
             self.panes.pane.controller_active && self.presentation.title.controller_label,
+            self.clipboard.local_endpoint,
             &self.panes.pane.authority,
             // Accepting or denying waits out a daemon handoff, so the title
             // offers neither while paused.
@@ -15017,6 +15026,7 @@ mod tests {
         let terminal = WindowOptions {
             snapshot: Some(snapshot),
             commands: Some(commands),
+            local_endpoint: true,
             ..WindowOptions::default()
         };
         assert_eq!(
@@ -16637,7 +16647,7 @@ mod tests {
             Some(" Splinterm "),
         ] {
             assert_eq!(
-                window_title(title, false, &authority, false, None),
+                window_title(title, false, true, &authority, false, None),
                 "Splinterm"
             );
         }
@@ -16650,7 +16660,7 @@ mod tests {
             ("作業", "Splinterm — 作業"),
         ] {
             assert_eq!(
-                window_title(Some(title), false, &authority, false, None),
+                window_title(Some(title), false, true, &authority, false, None),
                 expected
             );
         }
@@ -16682,8 +16692,34 @@ mod tests {
                     ""
                 };
                 assert_eq!(
-                    window_title(Some("shell"), controller_active, &authority, false, None),
+                    window_title(
+                        Some("shell"),
+                        controller_active,
+                        true,
+                        &authority,
+                        false,
+                        None
+                    ),
                     format!("Splinterm — shell{controller}{label}")
+                );
+                // A remote Window never calls itself local.
+                let remote = window_title(
+                    Some("shell"),
+                    controller_active,
+                    false,
+                    &authority,
+                    false,
+                    None,
+                );
+                assert!(!remote.contains("local"), "{remote}");
+                let remote_controller = if controller_active {
+                    " — controller"
+                } else {
+                    ""
+                };
+                assert_eq!(
+                    remote,
+                    format!("Splinterm — shell{remote_controller}{label}")
                 );
             }
         }
@@ -16739,7 +16775,7 @@ mod tests {
             end_column: 2,
             preview: "needle".into(),
         });
-        let title = window_title(Some("shell"), true, &authority, true, Some(&search));
+        let title = window_title(Some("shell"), true, true, &authority, true, Some(&search));
         assert!(title.starts_with("Splinterm — shell — local controller"));
         assert!(title.contains("CONTROL REQUEST"));
         assert!(title.contains("SEARCH: needlespoof [1 match(es)"));
